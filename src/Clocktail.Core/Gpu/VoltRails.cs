@@ -1,5 +1,4 @@
 using System.Numerics;
-using Clocktail.Core.Native;
 using Clocktail.Hw;
 
 namespace Clocktail.Core.Gpu;
@@ -23,10 +22,11 @@ public sealed record RailState(Rail Rail, uint ControlKind, RailOffsets Offsets,
 public sealed record VoltSnapshot(uint RailMask, IReadOnlyList<RailState> Rails, byte[] RawControl, byte[] RawStatus);
 
 /// <summary>
-/// Private VOLT interface. Control slot order is the field map {3,0,1,2}.
+/// Private VOLT interface, read only (the CLI's diagnostics): every rail write goes through Domain's RailWrites, under
+/// the write policy, a transaction and the ownership journal. Control slot order is the field map {3,0,1,2}.
 /// <list type="bullet">
 /// <item>info   (id 0x2c73afdc) v2, 0x184c bytes: +4 rail mask, per-rail entries of 0xc0 bytes starting at 0x4c.</item>
-/// <item>control(id 0xa3070db0 get / 0x87c55c8a set) v2, 0xac8 bytes: +4 rail mask, +8 legacy boost byte, per-rail entries
+/// <item>control(id 0xa3070db0 get) v2, 0xac8 bytes: +4 rail mask, +8 legacy boost byte, per-rail entries
 ///   of 0x54 bytes starting at 0x48: [+0]=kind, [+4]=REL, [+8]=ALT/OP, [+0xc]=OV, [+0x10]=VMIN offsets.</item>
 /// <item>status (id 0x5d0634ee) v2, 0x1620 bytes: +4 rail mask, per-rail entries of 0xac bytes starting at 0xa4.</item>
 /// </list>
@@ -77,47 +77,5 @@ public static class VoltRails
                 throw new InvalidDataException("NVVDD or MSVDD returned implausible evaluated limits.");
 
         return new VoltSnapshot(mask, rails, ctl.Data, st.Data);
-    }
-
-    public static RailOffsets Apply(NvApi api, nint gpu, Rail rail, RailOffsets want, int maxAbsUv)
-    {
-        foreach (var v in new[] { want.RelUv, want.AltUv, want.OvUv, want.VminUv })
-            if (Math.Abs(v) > maxAbsUv)
-                throw new ArgumentOutOfRangeException(nameof(want), $"Offset {v / 1000.0:0.###} mV exceeds the allowed range of ±{maxAbsUv / 1000.0:0.###} mV.");
-
-        var before = Read(api, gpu);
-        int bit = (int)rail;
-        if ((before.RailMask >> bit & 1) == 0) throw new NotSupportedException($"{rail} is not present on this GPU.");
-        int n = BitOperations.PopCount(before.RailMask & ((1u << bit) - 1));
-        int c = ControlBase + n * ControlEntry;
-
-        // Read-modify-write: start from what the driver just returned so every untouched field is preserved.
-        var data = (byte[])before.RawControl.Clone();
-        BitConverter.TryWriteBytes(data.AsSpan(c + 4), want.RelUv);
-        BitConverter.TryWriteBytes(data.AsSpan(c + 8), want.AltUv);
-        BitConverter.TryWriteBytes(data.AsSpan(c + 12), want.OvUv);
-        BitConverter.TryWriteBytes(data.AsSpan(c + 16), want.VminUv);
-
-        int rc = GuardedCall.Invoke("voltage_control_write", api.Require(0x87C55C8A, "voltage control write"), gpu, data);
-        if (rc != 0)
-        {
-            TryRestore(api, gpu, before.RawControl);
-            throw new NvApiException("Private voltage write", rc);
-        }
-
-        var after = Read(api, gpu);
-        var got = after.Rails.First(r => r.Rail == rail).Offsets;
-        if (got != want)
-        {
-            TryRestore(api, gpu, before.RawControl);
-            throw new InvalidDataException($"Read-back mismatch after write (wanted {want}, driver reports {got}); previous offsets were restored.");
-        }
-        return got;
-    }
-
-    private static void TryRestore(NvApi api, nint gpu, byte[] original)
-    {
-        try { GuardedCall.Invoke("voltage_control_restore", api.Require(0x87C55C8A, "voltage control write"), gpu, (byte[])original.Clone()); }
-        catch (Exception) { /* nothing more can be done here; the caller reports the original failure */ }
     }
 }

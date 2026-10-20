@@ -46,13 +46,10 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _temp;
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _powerUsage, _powerLimit, _powerDefault, _powerEnforced, _fanCount;
     private delegate* unmanaged[Cdecl]<nint, uint*, uint*, int> _powerConstraints;
-    private delegate* unmanaged[Cdecl]<nint, uint, int> _setPowerLimit;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _clock, _maxClock;
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _util, _mem;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _fanSpeed;
     private delegate* unmanaged[Cdecl]<nint, ulong*, int> _throttle;
-    private delegate* unmanaged[Cdecl]<nint, uint, uint, int> _setLocked;
-    private delegate* unmanaged[Cdecl]<nint, int> _resetLocked;
     private delegate* unmanaged[Cdecl]<nint, byte*, uint, int> _vbios;
 
     public static string Describe(int code) => code switch
@@ -131,7 +128,6 @@ public sealed unsafe class NvmlApi : IDisposable
         _powerDefault = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPowerManagementDefaultLimit");
         _powerEnforced = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetEnforcedPowerLimit");
         _powerConstraints = (delegate* unmanaged[Cdecl]<nint, uint*, uint*, int>)Sym(e, "nvmlDeviceGetPowerManagementLimitConstraints");
-        _setPowerLimit = (delegate* unmanaged[Cdecl]<nint, uint, int>)Sym(e, "nvmlDeviceSetPowerManagementLimit");
         _clock = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetClockInfo");
         _maxClock = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetMaxClockInfo");
         _util = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetUtilizationRates");
@@ -139,8 +135,6 @@ public sealed unsafe class NvmlApi : IDisposable
         _fanCount = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetNumFans", true);
         _fanSpeed = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetFanSpeed_v2", true);
         _throttle = (delegate* unmanaged[Cdecl]<nint, ulong*, int>)Sym(e, "nvmlDeviceGetCurrentClocksThrottleReasons", true);
-        _setLocked = (delegate* unmanaged[Cdecl]<nint, uint, uint, int>)Sym(e, "nvmlDeviceSetGpuLockedClocks", true);
-        _resetLocked = (delegate* unmanaged[Cdecl]<nint, int>)Sym(e, "nvmlDeviceResetGpuLockedClocks", true);
         _vbios = (delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)Sym(e, "nvmlDeviceGetVbiosVersion", true);
     }
 
@@ -246,27 +240,6 @@ public sealed unsafe class NvmlApi : IDisposable
         if (_throttle == null || _lost) return 0;
         ulong v;
         return Seen(_throttle(h, &v)) == 0 ? v : 0;
-    }
-
-    // ---- writes (require administrator) ----
-    public void SetPowerLimitMw(nint h, uint mw)
-    {
-        Live("nvmlDeviceSetPowerManagementLimit");
-        Check("nvmlDeviceSetPowerManagementLimit", _setPowerLimit(h, mw));
-    }
-
-    public void SetLockedClocks(nint h, uint minMhz, uint maxMhz)
-    {
-        if (_setLocked == null) throw new NotSupportedException("nvmlDeviceSetGpuLockedClocks is not available in this driver.");
-        Live("nvmlDeviceSetGpuLockedClocks");
-        Check("nvmlDeviceSetGpuLockedClocks", _setLocked(h, minMhz, maxMhz));
-    }
-
-    public void ResetLockedClocks(nint h)
-    {
-        if (_resetLocked == null) throw new NotSupportedException("nvmlDeviceResetGpuLockedClocks is not available in this driver.");
-        Live("nvmlDeviceResetGpuLockedClocks");
-        Check("nvmlDeviceResetGpuLockedClocks", _resetLocked(h));
     }
 
     /// <summary>Shut NVML down and unload it, unless it was lost: then both are left alone (they would run through the
