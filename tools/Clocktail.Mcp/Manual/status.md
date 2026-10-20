@@ -6,6 +6,7 @@ What each status field means, what is normal, how to name the limiter, and the t
 - `clock_mhz`: core clock now. `memory_mhz`: the memory clock as NVML reports it (13801 MHz stock on the 5090, 14159 at +358).
 - `power_w` against `power_limit_w`: board power against the wall in force.
 - `temp_c`, `util_pct`, `limit_reasons`: NVML's own (see the quirks below before trusting `limit_reasons`).
+- `vram_used_gib` of `vram_total_gib` (31.8 on a 5090; the driver's reservation left out, as nvidia-smi does) and `memory_controller_pct` (how busy the memory bus is). A game near the total starts swapping over PCIe, which shows as stutter no clock fixes. `stress_test` and `watch` give its P10/P50/P90, the CSVs every sample.
 - `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
 - `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
 - `session`: the experiment in force, if any.

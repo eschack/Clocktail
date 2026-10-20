@@ -90,7 +90,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                 Started = now, IntervalMs = intervalMs, EverySeconds = everySeconds, Note = note,
                 LogPath = stem + ".log", CsvPath = stem + ".csv", Log = Writer(stem + ".log"), Csv = Writer(stem + ".csv"),
             };
-            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons");
+            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c");
             Emit(run, string.Create(CultureInfo.InvariantCulture, $"🟢 live watch started: a line every {everySeconds} s under load, sampled every {intervalMs} ms")
                 + (note != null ? $". Playing: {note}" : ""));
             run.LastAnswer = now;
@@ -400,7 +400,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         try
         {
             run.Csv.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)}"));
+                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)},{t.PowerInstantWatts:0.#},{TuningTools.Gib(t.VramUsedBytes)},{t.TempMarginC}"));
         }
         catch (IOException) { }
     }

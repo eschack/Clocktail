@@ -77,7 +77,7 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _powerUsage, _powerLimit, _powerDefault, _powerEnforced, _fanCount;
     private delegate* unmanaged[Cdecl]<nint, uint*, uint*, int> _powerConstraints;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _clock, _maxClock;
-    private delegate* unmanaged[Cdecl]<nint, uint*, int> _util, _mem;
+    private delegate* unmanaged[Cdecl]<nint, uint*, int> _util, _mem, _memV2;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _fanSpeed;
     private delegate* unmanaged[Cdecl]<nint, ulong*, int> _throttle;
     private delegate* unmanaged[Cdecl]<nint, byte*, uint, int> _vbios;
@@ -173,6 +173,7 @@ public sealed unsafe class NvmlApi : IDisposable
         _maxClock = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetMaxClockInfo");
         _util = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetUtilizationRates");
         _mem = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetMemoryInfo");
+        _memV2 = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetMemoryInfo_v2", true);
         _fanCount = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetNumFans", true);
         _fanSpeed = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetFanSpeed_v2", true);
         _throttle = (delegate* unmanaged[Cdecl]<nint, ulong*, int>)Sym(e, "nvmlDeviceGetCurrentClocksThrottleReasons", true);
@@ -257,9 +258,20 @@ public sealed unsafe class NvmlApi : IDisposable
         return new NvmlUtilization(v[0], v[1]);
     }
 
+    /// <summary>Total, free and used memory. The _v2 call (nvmlMemory_v2_t: version, total, reserved, free, used) leaves
+    /// the driver's reservation out of "used", as nvidia-smi does (2175 MiB where the first call said 2.5 GiB on the
+    /// reference card); the first call is the fallback.</summary>
     public NvmlMemory Memory(nint h)
     {
         Live("nvmlDeviceGetMemoryInfo");
+        if (_memV2 != null)
+        {
+            ulong* m = stackalloc ulong[5];
+            new Span<ulong>(m, 5).Clear();
+            *(uint*)m = 5 * sizeof(ulong) | 2u << 24;
+            if (Seen(_memV2(h, (uint*)m)) == 0) return new NvmlMemory(m[1], m[3], m[4]);
+            Live("nvmlDeviceGetMemoryInfo");
+        }
         ulong* v = stackalloc ulong[3];
         Check("nvmlDeviceGetMemoryInfo", _mem(h, (uint*)v));
         return new NvmlMemory(v[0], v[1], v[2]);

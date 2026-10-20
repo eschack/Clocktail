@@ -188,7 +188,7 @@ public sealed partial class TuningTools
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Watched {seconds} s: {loaded.Count} of {samples.Count} samples under load. P50 {p50.clock_mhz} MHz @ NVVDD {p50.nvvdd_mv} mV (curve point {point?.index}), " +
             $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} MHz, board {p50.board_w} W, " +
-            $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]")
+            $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C, VRAM {p50.vram_used_gib} GiB; limit reasons [{string.Join(", ", reasons)}]")
             + (note != null ? $". Playing: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         return Out(new
@@ -206,12 +206,13 @@ public sealed partial class TuningTools
         });
     });
 
-    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? board_w, double? temp_c);
+    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? board_w, double? temp_c, double? vram_used_gib);
 
     private static WatchStat WatchStats(IReadOnlyList<Card.Sample> s, double q) => new(
         Pct(s.Select(x => (double?)x.Telemetry?.GraphicsClockMhz), q), Pct(s.Select(x => x.NvvddUv / 1000.0), q),
         Pct(s.Select(x => x.MsvddUv / 1000.0), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Xbar)), q),
-        Pct(s.Select(x => x.Telemetry?.PowerWatts), q), Pct(s.Select(x => x.Telemetry?.TemperatureC), q));
+        Pct(s.Select(x => x.Telemetry?.PowerWatts), q), Pct(s.Select(x => x.Telemetry?.TemperatureC), q),
+        Pct(s.Select(x => Gib(x.Telemetry?.VramUsedBytes)), q));
 
     private static double? Pct(IEnumerable<double?> xs, double q)
     {

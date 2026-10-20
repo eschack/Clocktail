@@ -83,6 +83,9 @@ public sealed partial class TuningTools(Card card, Residency residency)
             power_limit_w = t?.PowerEnforcedWatts,
             temp_c = t?.TemperatureC,
             util_pct = t?.GpuUtilPercent,
+            vram_used_gib = Gib(t?.VramUsedBytes),
+            vram_total_gib = Gib(t?.VramTotalBytes),
+            memory_controller_pct = t?.MemUtilPercent,
             limit_reasons = t?.ThrottleReasons,
             rails = Rails(look),
             point,
@@ -378,6 +381,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
             sys_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), q),
             memory_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Memory)), q),
             temp_c = P(held.Select(s => (double?)s.Telemetry?.TemperatureC), q),
+            vram_used_gib = P(held.Select(s => Gib(s.Telemetry?.VramUsedBytes)), q),
         };
         string csv = WriteSamples(samples, load, seconds);
         double? p50Mv = P(held.Select(s => s.NvvddUv / 1000.0), 0.5), p50Mhz = P(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), 0.5);
@@ -733,7 +737,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
                 : Path.Combine(Path.GetTempPath(), "clocktail-stress");
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}-l{load}-{seconds}s.csv");
-            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons\n");
+            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons,instant_w,vram_used_gib,temp_margin_c\n");
             foreach (var s in samples)
             {
                 var t = s.Telemetry;
@@ -742,7 +746,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
                     s.At.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture), t?.GraphicsClockMhz, s.Mhz(AllClocksLayout.Xbar), s.Mhz(AllClocksLayout.Sys),
                     s.Mhz(AllClocksLayout.Memory), s.Mhz(AllClocksLayout.Video), s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, t?.PowerWatts, t?.PowerEnforcedWatts,
                     s.NvvddOut?.Mw / 1000.0, s.NvvddOut?.Ma / 1000.0, s.MsvddOut?.Mw / 1000.0, s.MsvddOut?.Ma / 1000.0, t?.TemperatureC, t?.GpuUtilPercent,
-                    string.Join("|", t?.ThrottleReasons ?? []),
+                    string.Join("|", t?.ThrottleReasons ?? []), t?.PowerInstantWatts, Gib(t?.VramUsedBytes), t?.TempMarginC,
                 }.Select(v => v switch { null => "", IFormattable f => f.ToString(null, CultureInfo.InvariantCulture), _ => v.ToString() })));
                 sb.Append('\n');
             }
@@ -802,6 +806,9 @@ public sealed partial class TuningTools(Card card, Residency residency)
         note = "the daily profile keeps no curve: offsets compare against stock";
         return [];
     }
+
+    /// <summary>Bytes as GiB to 0.1 (what NVML's 32 GB card calls 31.8).</summary>
+    internal static double? Gib(ulong? bytes) => bytes is { } b ? Math.Round(b / 1073741824.0, 1) : null;
 
     private static VfPoint? Nearest(VfCurveSnapshot c, uint uv) =>
         c.Points.Count == 0 ? null : c.Points.MinBy(p => Math.Abs((long)p.VoltageUv - uv));
