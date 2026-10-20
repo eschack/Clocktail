@@ -16,28 +16,47 @@ public class VfChartTests
     }
 
     [Fact]
-    public void Spans_from_half_the_top_to_the_limit()
+    public void The_frame_is_on_a_readable_scale_from_the_tuned_part_to_the_limit()
     {
         var (now, stock) = Curve();
-        var (x0, x1, y0, y1) = VfChart.Bounds(now, stock, 1095);
-        Assert.Equal(1095, x1);
-        Assert.InRange(x0, 790, 800);   // where now first reaches 3082 / 2: the floor and most of the climb are left out
-        Assert.Equal(0, y0 % 100);
-        Assert.Equal(3100, y1);
+        var f = VfChart.Bounds(now, stock, 1095)!;
+        Assert.Equal(100, f.MhzPerLine);
+        Assert.Equal(5, f.MvPerChar);
+        Assert.Equal(800, f.X0);        // 60 % of the top is reached at about 815 mV; down to the numbered 50 mV step
+        Assert.Equal(1095, f.X1);
+        Assert.Equal(3100, f.Y1);
+        Assert.Equal(0, f.Y0 % 100);
+        Assert.Equal(60, f.Chars);      // 800..1095 at 5 mV a character
     }
 
     [Fact]
-    public void Draws_braille_rows_axis_and_labels()
+    public void Every_line_carries_its_clock_and_the_axis_its_voltages()
     {
         var (now, stock) = Curve();
-        var lines = VfChart.Draw(now, stock, at: (1000, 3000), maxMv: 1095, width: 40, height: 8);
-        Assert.Equal(8 + 2, lines.Count);
-        Assert.StartsWith(" 3100┤", lines[0]);
-        Assert.All(lines.Take(8), l => Assert.All(l[6..], ch => Assert.True(ch is >= (char)0x2800 and <= (char)0x28ff || ch == VfChart.Running)));
+        var f = VfChart.Bounds(now, stock, 1095)!;
+        var lines = VfChart.Draw(now, stock, at: (1000, 3000), maxMv: 1095);
+        Assert.Equal(f.Lines + 2, lines.Count);
+        for (int r = 0; r < f.Lines; r++)
+            Assert.StartsWith($"{f.Y1 - r * 100,5}┤", lines[r]);
+        Assert.All(lines.Take(f.Lines), l => Assert.All(l[6..], ch => Assert.True(ch is >= (char)0x2800 and <= (char)0x28ff || ch == VfChart.Running)));
         Assert.Single(string.Concat(lines), ch => ch == VfChart.Running);
-        Assert.EndsWith("limit 1095 mV", lines[^1]);
-        // The flat top: the top row carries dots across its right half.
+        // A tick every 25 mV, the right edge a corner.
+        Assert.Equal("     └┬────┬", lines[^2][..12]);
+        Assert.EndsWith("┘", lines[^2]);
+        foreach (var mv in new[] { "800", "850", "900", "950", "1000", "1050", "1095 mV" })
+            Assert.Contains(mv, lines[^1]);
+        // The flat top: the top line carries dots across its right end.
         Assert.True(lines[0][^10..].All(ch => ch != (char)0x2800));
+    }
+
+    [Fact]
+    public void A_number_sits_under_its_tick()
+    {
+        var (now, stock) = Curve();
+        var lines = VfChart.Draw(now, stock, null, 1095);
+        int tick = lines[^2].IndexOf('┬', 7);           // the second tick: 825 mV; the one after, 850
+        tick = lines[^2].IndexOf('┬', tick + 1);
+        Assert.Equal("850", lines[^1].Substring(tick - 1, 3));
     }
 
     [Fact]
@@ -46,8 +65,16 @@ public class VfChartTests
         var (now, stock) = Curve();
         var lines = VfChart.Draw(now, stock, at: (805, 285), maxMv: 1095);
         Assert.DoesNotContain(string.Concat(lines), ch => ch == VfChart.Running);
-        var (x0, x1, y0, y1) = VfChart.Bounds(now, stock, 1095);
-        Assert.False(VfChart.Contains((805, 285), x0, x1, y0, y1));
+        Assert.False(VfChart.Bounds(now, stock, 1095)!.Contains((805, 285)));
+    }
+
+    [Fact]
+    public void A_wide_curve_takes_a_coarser_scale()
+    {
+        var pts = Enumerable.Range(0, 120).Select(i => (500.0 + i * 5, 1000.0 + i * 20)).ToList();
+        var f = VfChart.Bounds(pts, null, null)!;
+        Assert.True(f.MvPerChar > 5);
+        Assert.True(f.Chars <= 72);
     }
 
     [Fact]

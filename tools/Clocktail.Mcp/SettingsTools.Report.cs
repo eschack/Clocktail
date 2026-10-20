@@ -365,11 +365,14 @@ public sealed partial class SettingsTools
         (double, double)? at = clock is { } c && mv is { } v ? (v, c) : null;
         var lines = VfChart.Draw(now, stock, at, max).ToList();
         if (lines.Count == 0) return lines;
-        var (x0, x1, y0, y1) = VfChart.Bounds(now, stock, max);
-        string where = at is not { } a ? "" : VfChart.Contains(a, x0, x1, y0, y1)
+        var f = VfChart.Bounds(now, stock, max)!;
+        string where = at is not { } a ? "" : f.Contains(a)
             ? $"   {VfChart.Running} running {F(a.Item2)} MHz @ {F(a.Item1)} mV"
-            : $"   {VfChart.Running} running {F(a.Item2)} MHz @ {F(a.Item1)} mV, off the chart{(a.Item2 < y0 ? ": below the curve, as at idle or light load" : "")}";
-        lines.Insert(0, $"V/F curve   ⣀⣀ now   ⠁⠈ stock{where}");
+            : $"   {VfChart.Running} running {F(a.Item2)} MHz @ {F(a.Item1)} mV, off the chart{(a.Item2 < f.Y0 ? ": below the curve, as at idle or light load" : "")}";
+        lines.Insert(0, $"V/F curve (MHz over mV)   ⣀⣀ now   ⠁⠈ stock{where}");
+        lines.Insert(1, $"each line {F(f.MhzPerLine)} MHz, labelled at its top dot (a dot {F(f.MhzPerLine / 4)} MHz); each character {F(f.MvPerChar)} mV" +
+                        (max is { } m ? $"; the right edge is the {F(m)} mV voltage limit" : ""));
+        lines.Insert(2, "");
         return lines;
     }
 
