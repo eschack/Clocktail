@@ -128,9 +128,10 @@ public sealed class BrokerDispatcher
         {
             return Fail(e.Message, BrokerCode.BadRequest);   // a key, value or slot name the request got wrong
         }
-        catch (Exception e) when (e is InvalidOperationException or NotSupportedException or InvalidDataException or NvApiException or NvmlException)
+        catch (Exception e) when (e is InvalidOperationException or NotSupportedException or InvalidDataException or NvApiException or NvmlException
+                                      or IOException or UnauthorizedAccessException)
         {
-            return Fail(e.Message, BrokerCode.Failed);
+            return Fail(e.Message, BrokerCode.Failed);   // a file the state lives in can be locked or gone too (the responder retries these)
         }
     }
 

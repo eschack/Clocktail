@@ -75,4 +75,23 @@ public class DriverResetResponderTests
         Assert.Equal(2, _profile.Count);
         r.ApplyAtStart(["gpu-A"]);   // idle now: the queue is spent, so a look would throw
     }
+
+    [Fact]
+    public void An_answer_that_throws_is_logged_and_the_next_reset_is_still_answered()
+    {
+        int calls = 0;
+        var r = Responder(_ => ++calls == 1 ? throw new IOException("the journal is locked") : Recovered(true, "Written"));
+        Assert.False(r.Respond("nvlddmkm 153"));
+        Assert.Contains("the answer failed", _log[^1]);
+        Assert.Contains("the journal is locked", _log[^1]);
+        Assert.True(r.Respond("nvlddmkm 153"));
+    }
+
+    [Fact]
+    public void A_profile_at_start_that_throws_is_logged_not_lost()
+    {
+        var r = new DriverResetResponder(_ => throw new UnauthorizedAccessException("profile.json is read-only"), ["gpu-A"], _log.Add, () => _now, t => _now += t);
+        r.ApplyAtStart([]);
+        Assert.Contains("daily profile at start: failed", _log[^1]);
+    }
 }

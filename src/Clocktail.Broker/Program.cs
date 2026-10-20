@@ -120,6 +120,21 @@ static int Run()
 
     Console.WriteLine($"{DateTimeOffset.Now:u} broker up: pid {host.Pid}, boot {host.BootId}, pipe {BrokerTransport.PipeName}, gpus [{string.Join(", ", targets.Ids)}], state {BrokerPaths.StateRoot()}");
     void Log(string line) => Console.WriteLine($"{DateTimeOffset.Now:u} {line}");
+    // Nothing that fails in the background vanishes: an exception that ends the process is in broker.log before the
+    // supervisor starts a new worker, a one-off task's is logged, and a loop's is logged and the loop started again.
+    AppDomain.CurrentDomain.UnhandledException += (_, e) => Log($"unhandled exception, the worker ends: {e.ExceptionObject}");
+    TaskScheduler.UnobservedTaskException += (_, e) => { Log($"a background task failed: {e.Exception.GetBaseException()}"); e.SetObserved(); };
+    void Once(string name, Action work) => _ = Task.Run(work).ContinueWith(t => Log($"{name} failed: {t.Exception!.GetBaseException()}"), TaskContinuationOptions.OnlyOnFaulted);
+    void KeepRunning(string name, Func<Task> loop) => _ = Task.Run(async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            try { await loop().ConfigureAwait(false); return; }
+            catch (Exception e) { Log($"{name} failed, starting it again in 5 s: {e}"); }
+            try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    });
     // A bugcheck or a power loss while the daily profile was held leaves no window open, only these events.
     string? unclean = null;
     try { unclean = UncleanShutdown.SinceBoot(); }
@@ -131,13 +146,13 @@ static int Run()
 
     // A driver reset keeps every offset on the card: give back what is held, through the same recovery op a client would send.
     var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id));
-    var responding = Task.Run(() => responder.RunAsync(cts.Token));
+    KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
     // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
     // shutdown) is recorded first.
-    _ = Task.Run(() => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
+    Once("the daily profile at start", () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
-    _ = Task.Run(() => sampler.RunAsync(cts.Token));
+    KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
     // The driver this process opened can go away under it (a device restart, a driver update), and nothing it holds can be
     // rebound safely after that: once a session or NVML says so, the broker hands over to a fresh worker, which puts the
     // daily profile back on as at any start.
@@ -152,22 +167,28 @@ static int Run()
         var seen = DateTimeOffset.Now;
         if (!bursts.Starts(seen)) return;
         var windows = sampler.Recorders.ToDictionary(r => r.Key, r => r.Value.Freeze());   // before the recovered driver adds its own looks
-        _ = Task.Run(() =>
+        Once("the crash trace", () =>
         {
             var crashUv = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
             var details = new List<string>();
-            foreach (var (id, window) in windows)
+            try
             {
-                var point = FlightRecorder.Pick(window, seen);
-                try
+                foreach (var (id, window) in windows)
                 {
-                    var trace = FlightRecorder.Save(targets.Resolve(id)!.Journal.Path, seen, evidence, driver, point, window);
-                    Log($"gpu {id}: crash trace {trace}: {(point == null ? "no loaded sample before the hang" : $"{point.Describe()}, {point.Why}")}");
+                    var point = FlightRecorder.Pick(window, seen);
+                    try
+                    {
+                        var trace = FlightRecorder.Save(targets.Resolve(id)!.Journal.Path, seen, evidence, driver, point, window);
+                        Log($"gpu {id}: crash trace {trace}: {(point == null ? "no loaded sample before the hang" : $"{point.Describe()}, {point.Why}")}");
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"gpu {id}: crash trace not saved: {e.Message}"); }
+                    if (point?.Sample.CoreMv is { } mv) { crashUv[id] = mv * 1000; details.Add(point.Describe()); }
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"gpu {id}: crash trace not saved: {e.Message}"); }
-                if (point?.Sample.CoreMv is { } mv) { crashUv[id] = mv * 1000; details.Add(point.Describe()); }
             }
-            responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv);
+            finally   // the trace is for the record; the give-back must happen whatever became of it
+            {
+                responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv);
+            }
         });
     }
     DriverResetWatch? watch = null;

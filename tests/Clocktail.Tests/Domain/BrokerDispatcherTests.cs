@@ -898,4 +898,13 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Null(_journal.Load()?.Items.FirstOrDefault());
         Assert.Equal(2, FakeDriver.Sets);
     }
+
+    [Fact]
+    public void A_state_file_that_cannot_be_written_is_a_failed_answer_not_an_exception()
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, Experiment.FileName));   // a folder where the session file goes
+        var r = Power().Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "begin", Value: "{\"game\":\"RE4\"}"));
+        Assert.False(r.Ok);
+        Assert.Equal(BrokerCode.Failed, r.Code);
+    }
 }

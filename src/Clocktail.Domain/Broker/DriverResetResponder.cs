@@ -59,11 +59,16 @@ public sealed class DriverResetResponder(
         }
     }
 
-    /// <summary>Gives back every GPU's held cells; true when each one ended clean.</summary>
+    /// <summary>Gives back every GPU's held cells; true when each one ended clean. A GPU whose answer throws is logged and
+    /// counted as not clean: the next GPU, and the next reset, are still answered.</summary>
     public bool Respond(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null)
     {
         bool clean = true;
-        foreach (var id in gpuIds) clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0);
+        foreach (var id in gpuIds)
+        {
+            try { clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0); }
+            catch (Exception e) { log($"gpu {id}: driver reset ({evidence}): the answer failed: {e}"); clean = false; }
+        }
         return clean;
     }
 
@@ -104,7 +109,8 @@ public sealed class DriverResetResponder(
         foreach (var id in gpuIds)
         {
             bool down = crashed.Contains(id);
-            Profile(id, down ? "reset" : "apply", down ? "the machine went down holding the profile" : "the broker started", "at start");
+            try { Profile(id, down ? "reset" : "apply", down ? "the machine went down holding the profile" : "the broker started", "at start"); }
+            catch (Exception e) { log($"gpu {id}: daily profile at start: failed: {e}"); }
         }
     }
 
