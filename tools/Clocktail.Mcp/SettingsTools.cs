@@ -69,6 +69,9 @@ public sealed partial class SettingsTools(Card card)
         string json = Out(new
         {
             gpu = card.Name,
+            driver = VerifiedOn.Driver(card.DriverVersion),
+            vbios = card.Vbios,
+            tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             at = DateTimeOffset.Now,
             power = Section(() => Power(c, t)),
             clock_offsets = Section(() => P0Offsets(c)),

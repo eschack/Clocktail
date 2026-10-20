@@ -54,6 +54,8 @@ public sealed partial class SettingsTools
         var l = limiterDoc.RootElement;
         var rows = SettingRows(s);
         var live = LiveRows(s, l);
+        if (Str(s, "driver") is { } driver && Str(s, "tested_on") is { } tested)
+            live.Add(new("🧪", "Tested on", "", $"driver {driver}, VBIOS {Str(s, "vbios")}", "", Info, tested));
         var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
         live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
         var all = rows.Concat(live).ToList();

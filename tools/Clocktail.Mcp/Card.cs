@@ -33,6 +33,9 @@ public sealed class Card : IDisposable
 
     public string StableId => _gpu.Identity.StableId;
     public string Name => _gpu.Identity.Name;
+    public string Vbios => _gpu.Identity.Vbios;
+    /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
+    public uint DriverVersion => _mgr.Driver.Version;
 
     /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and the Core curve, and
     /// from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
