@@ -18,7 +18,8 @@ internal static class PowerSplitCommands
 
         Power split (read-only, one sample):
           --power-split            JSON: board power and limits, gfx/mem/xbar/sys/video clocks, NVVDD/MSVDD voltage, temperature, limit reasons
-          --power-split-topology   also read the power topology (raw values, unit not decoded; adds 8-14 ms)
+          --power-split-topology   also read the power topology (board power twice, in 1/1000 % of the default limit and
+                                   in W; adds 5-17 ms)
         """;
 
     private const string Undecoded = "undecoded";
@@ -93,7 +94,12 @@ internal static class PowerSplitCommands
                 nvvdd_a = nvvddOut?.Ma / 1000.0,
                 msvdd_w = msvddOut?.Mw / 1000.0,
                 msvdd_a = msvddOut?.Ma / 1000.0,
-                topology = topo?.Select(e => new { id = e.Id, label = e.Id switch { 0 => "gpu", 1 => "board (inferred)", _ => Undecoded }, raw = e.Raw, unit = Undecoded }),
+                topology = topo?.Select(e => new
+                {
+                    id = e.Id, label = e.Id switch { 0 => "board, steady", 1 => "board, wider spread", _ => Undecoded }, raw = e.Raw,
+                    unit = "1/1000 % of the default power limit",
+                    w = t?.PowerDefaultWatts is { } d ? Math.Round(PowerTopologyLayout.Watts(e.Raw, d), 1) : (double?)null,
+                }),
             },
             clocks_mhz = new
             {

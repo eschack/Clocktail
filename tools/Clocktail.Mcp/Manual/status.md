@@ -18,6 +18,7 @@ Everything Clocktail can write, as it is on the card now, next to stock and the 
 ## limiter: naming what holds the clock
 The firmware climbs the curve and stops at the first limit; each leaves a trace:
 - **Power wall** (`power_wall`): board power within 10 W of the wall, or `sw_power_cap` with the instantaneous power peaking within 15 W of it. The limiter watches the instantaneous power every 20 ms between its samples (`peak_w`), because the wall answers peaks (below).
+- `topology_w` in the limiter's readings: the driver's power controller's own two readings of board power, in W (steady, and one with a wider spread). They agree with NVML at a steady load (601 / 592 W against 600 W at the wall); a difference only says the load is changing fast.
 - **Current limit** (`current_limit`): `sw_power_cap` with NVVDD or MSVDD drawing within 3 % of its current limit (`nvvdd_a` against `nvvdd_limit_a`). NVIDIA's own limits (600 A, 180 A) are far away on a 5090; a trial's lowered limit is the usual cause.
 - **Power sub-policy** (`power_policy`): `sw_power_cap` with none of those. Memory-heavy work sets it the whole time at 336-361 W on a 575-600 W wall; that is normal.
 - **Voltage limit**: NVVDD within 12.5 mV of MAX. The firmware parks one step under MAX; under the wall it would sit 55-75 mV lower, so the two are easy to tell apart. NVML's "reliability voltage" bit alone means nothing on a 5090: it is set even at idle.

@@ -54,6 +54,13 @@ public sealed partial class SettingsTools
         var l = limiterDoc.RootElement;
         var rows = SettingRows(s);
         var live = LiveRows(s, l);
+        // The driver's own word that it is holding the card down: shown only when it says something.
+        var why = Arr(s, "perf_decrease", "reasons").Select(x => x.GetString()).ToList();
+        if (why.Count > 0)
+            live.Add(new("🔌", "Driver holding it down", "", string.Join(", ", why), "", why.Contains("insufficient_power") || why.Contains("thermal_protection") ? Act : Look,
+                why.Contains("insufficient_power") ? "the driver says the card is not getting enough power: check the 16-pin cable is fully seated and the PSU, now"
+                : why.Contains("thermal_protection") ? "the driver is protecting the GPU from heat: check the fans and the case airflow now"
+                : "the driver reports it is reducing performance"));
         var others = Arr(s, "other_gpus").Select(g => g.GetString()).ToList();
         if (others.Count > 0)
             live.Add(new("🖥️", "Other GPUs", "", string.Join(", ", others), "", Look,

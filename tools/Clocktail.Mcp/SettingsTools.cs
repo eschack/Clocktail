@@ -74,6 +74,9 @@ public sealed partial class SettingsTools(Card card)
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
+            perf_decrease = Section(() => card.PerfDecrease() is { } bits
+                ? new { bits = $"0x{bits:x}", reasons = Card.PerfDecreaseReasons(bits) }
+                : throw new InvalidOperationException("GetPerfDecreaseInfo did not answer")),
             temperature = Section(() =>
             {
                 var (max, slow, shut) = card.TemperatureLimits();
@@ -149,6 +152,7 @@ public sealed partial class SettingsTools(Card card)
                 power_limit_w = limit,
                 power_headroom_w = R(limit - board),
                 peak_w = R(behind.Max(x => x.R.PeakW)),
+                topology_w = Topology(look.Telemetry?.PowerDefaultWatts),
                 peak_headroom_w = R(limit - behind.Max(x => x.R.PeakW)),
                 nvvdd_a = Median(behind.Select(x => x.R.NvvddA)),
                 nvvdd_limit_a = Median(behind.Select(x => x.R.NvvddLimitA)),
@@ -178,6 +182,19 @@ public sealed partial class SettingsTools(Card card)
             }),
         });
     });
+
+    /// <summary>The driver's power topology now, in W (both entries are board power; <see cref="PowerTopologyLayout"/>):
+    /// the power controller's own view beside NVML's. Null where it cannot be read.</summary>
+    private object? Topology(double? defaultW)
+    {
+        if (defaultW is not { } d) return null;
+        try
+        {
+            var e = card.WithDriver(PowerSplitReader.ReadTopology);
+            return e.ToDictionary(x => x.Id switch { 0 => "steady", 1 => "wider_spread", var id => $"entry_{id}" }, x => Math.Round(PowerTopologyLayout.Watts(x.Raw, d), 1));
+        }
+        catch (InvalidOperationException) { return null; }
+    }
 
     /// <summary>What every section compares against: the daily profile's writes and the journal's originals, both by
     /// "kind/key" in the write path's own encodings. Originals are null when the journal could not be read.</summary>

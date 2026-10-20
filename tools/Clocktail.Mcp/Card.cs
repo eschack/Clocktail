@@ -61,6 +61,24 @@ public sealed class Card : IDisposable
         }
     }
 
+    /// <summary>NVAPI's GetPerfDecreaseInfo (public nvapi.h): the reasons the driver is holding performance down, as bits;
+    /// null where it does not answer. 0 at idle and at the 600 W wall on the reference card.</summary>
+    public uint? PerfDecrease()
+    {
+        using (_lane.Enter("the performance-decrease reasons"))
+            return _hw.ReadScalar(_session, Slot.GetPerfDecreaseInfo, out uint v).IsOk ? v : null;
+    }
+
+    /// <summary>The public names of GetPerfDecreaseInfo's bits.</summary>
+    public static IReadOnlyList<string> PerfDecreaseReasons(uint bits) =>
+    [
+        .. new (uint Bit, string Name)[]
+        {
+            (0x1, "thermal_protection"), (0x2, "power_control"), (0x4, "ac_battery"), (0x8, "api_triggered"),
+            (0x10, "insufficient_power"), (0x80000000, "unknown"),
+        }.Where(r => (bits & r.Bit) != 0).Select(r => r.Name),
+    ];
+
     /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
     public string? DriverGone() => DriverLoss.Why(_mgr.Nvml, [_session]);
     public string Name => _gpu.Identity.Name;

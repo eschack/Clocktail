@@ -30,13 +30,18 @@ public static class AllClocksLayout
 
 /// <summary>
 /// <see cref="Slot.ClientPowerTopologyGetStatus"/> at 0x48 rev 1: count at +4, entries of 0x10 from +8 {id at +0, value
-/// at +8}. Id 0 tracks the GPU, id 1 is taken for the board; the unit is not decoded (the values do not scale with
-/// NVML's board power across load changes, measured live), so they are passed on raw. The call
-/// takes 8–14 ms, more than a 1 Hz sampler should spend, so it is read only when asked for.
+/// at +8}. Both entries are board power in thousandths of a percent of the default power limit (575 W on a 5090):
+/// measured under nvgwls at three loads (2026-10-20), entry 0 read 104,000-104,700 at 600 W, 85,000-86,200 at 493 W and
+/// 44,800-45,200 at 259 W (600 / 493 / 259 W of 575 W = 104.3 / 85.7 / 45.0 %); entry 1 the same with a wider spread
+/// (102,500-105,700 at 600 W), a shorter window by the look of it. Neither is the GPU's share. The call takes 5-17 ms,
+/// more than a 1 Hz sampler should spend, so it is read only when asked for.
 /// </summary>
 public static class PowerTopologyLayout
 {
     public const int Size = 0x48, Rev = 1, CountOffset = 4, Base = 8, Entry = 0x10;
+
+    /// <summary>An entry's value in watts, given the default power limit it is a share of.</summary>
+    public static double Watts(uint raw, double defaultW) => raw / 100_000.0 * defaultW;
 
     public static IReadOnlyList<(uint Id, uint Raw)> Parse(ReadOnlySpan<byte> b)
     {
