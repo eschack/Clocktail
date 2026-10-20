@@ -166,12 +166,23 @@ public sealed class Card : IDisposable
         lock (_lane) return f(_hw, _session);
     }
 
-    /// <summary>A broker op for this GPU. Null result with an error when the broker does not answer.</summary>
-    public (bool Ok, JsonElement? Result, string? Error) Broker(string op, string? kind = null, string? value = null)
+    /// <summary>A broker op for this GPU, with the refusal code and whether the card can have changed
+    /// (<see cref="WriteOutcome"/>; null for the ops that only read). A service that cannot be reached wrote nothing; one
+    /// that stops answering after the request went out may have.</summary>
+    public BrokerAnswer Broker(string op, string? kind = null, string? value = null)
     {
-        var r = BrokerClient.TryCall(new BrokerRequest(op, StableId, Kind: kind, Value: value));
-        if (r == null) return (false, null, "the Clocktail service does not answer: if it was never installed, call install_service (one UAC prompt); otherwise check the ClocktailBroker scheduled task");
-        return (r.Ok, r.Result, r.Error ?? (r.Ok ? null : r.Code ?? "failed"));
+        bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved";
+        BrokerResponse? r;
+        try { r = BrokerClient.TryCall(new BrokerRequest(op, StableId, Kind: kind, Value: value)); }
+        catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)
+        {
+            return new(false, null, $"the Clocktail service stopped answering after the request was sent ({e.Message}); {WriteOutcome.ReadFirst}",
+                "no_answer", reads ? null : WriteOutcome.Unknown);
+        }
+        if (r == null)
+            return new(false, null, "the Clocktail service does not answer: if it was never installed, call install_service (one UAC prompt); otherwise check the ClocktailBroker scheduled task",
+                BrokerCode.BrokerUnreachable, reads ? null : WriteOutcome.None);
+        return new(r.Ok, r.Result, r.Error ?? (r.Ok ? null : r.Code ?? "failed"), r.Code, reads ? null : WriteOutcome.Of(r.Ok, r.Code, r.Result));
     }
 
     public void Dispose() => _mgr.Dispose();

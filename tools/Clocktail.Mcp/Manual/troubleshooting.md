@@ -4,6 +4,7 @@ When a tool fails, when the card or the service misbehaves, and where things liv
 | Symptom | What it means | What to do |
 |---|---|---|
 | "the Clocktail service does not answer" | the service is not installed or not running | `install_service` (one admin prompt); if it was installed, tell the person to run `npx -y clocktail verify` |
+| A write's answer has `written` | whether it reached the card: `none` (refused, or nothing changed), `applied` (it landed and was read back), `unknown` (a write could not be confirmed or undone, or the service stopped answering after the request went out) | on `unknown`, read `card_settings` before anything else and tell the person; never repeat the write blind. `code` names a refusal (`judge_busy`, `window_busy`: wait and try again) |
 | A write is refused with a limit in the message | the firmware's own limit or Clocktail's ceiling (1150 mV, current defaults, 400-600 W) | do not work around it; explain the limit |
 | A write is refused because a stress run is measuring | the service stands down while a stability run holds its lock | wait for the run to end |
 | `load_preset` refuses | the card is not the model the preset was tuned on | tune from stock |

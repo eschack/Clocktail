@@ -440,7 +440,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         var r = card.Broker(BrokerRequest.OpExperiment, "crash", note + stays);
         var back = r.Result is { } res && res.TryGetProperty("back", out var b) && b.ValueKind == JsonValueKind.Object ? b : (JsonElement?)null;
         var point = r.Result is { } res2 && res2.TryGetProperty("point", out var p) ? p : (JsonElement?)null;
-        return Applied((r.Ok, back, r.Error), point);
+        return Applied(r with { Result = back }, point);
     }
 
     [McpServerTool(Name = "back_to_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
@@ -566,7 +566,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         // "end" wraps the profile's answer (or a recovery's) in "back", beside the trial's data point.
         var back = r.Result is { } res && res.TryGetProperty("back", out var b) && b.ValueKind == JsonValueKind.Object ? b : (JsonElement?)null;
         var point = r.Result is { } res2 && res2.TryGetProperty("point", out var p) ? p : (JsonElement?)null;
-        return Applied((r.Ok, back, r.Error), point);
+        return Applied(r with { Result = back }, point);
     }
 
     [McpServerTool(Name = "data_points", ReadOnly = true, OpenWorld = false), Description(
@@ -819,7 +819,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
 
     /// <summary>A profile apply (or a recovery) in one line per write: the full answer carries the whole profile and each
     /// transaction's log, which an agent does not need and would spend its context on.</summary>
-    private static string Applied((bool Ok, JsonElement? Result, string? Error) r, JsonElement? point)
+    private static string Applied(BrokerAnswer r, JsonElement? point)
     {
         var lines = new List<string>();
         if (r.Result is { } res)
@@ -827,14 +827,16 @@ public sealed partial class TuningTools(Card card, Residency residency)
                 if (res.TryGetProperty(name, out var arr) && arr.ValueKind == JsonValueKind.Array)
                     foreach (var w in arr.EnumerateArray())
                         lines.Add($"{Str(w, "kind") ?? Str(w, "Kind")}/{Str(w, "key") ?? Str(w, "Key")}: {Str(w, "outcome") ?? Str(w, "action")}");
-        return Out(new { success = r.Ok, error = r.Error, data_point = point, writes = lines });
+        // "end" and "crash" carry the profile's answer in "back": what that wrote is what the card went through.
+        string? written = WriteOutcome.Of(r.Ok, r.Code, r.Result) ?? r.Written;
+        return Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, data_point = point, writes = lines });
     }
 
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
-    private static string Reply((bool Ok, JsonElement? Result, string? Error) r) =>
-        Out(new { success = r.Ok, error = r.Error, result = r.Result });
+    private static string Reply(BrokerAnswer r) =>
+        Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written = r.Written, next = r.Written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, result = r.Result });
 
     private static string Out(object o) => JsonSerializer.Serialize(o, Json);
 
