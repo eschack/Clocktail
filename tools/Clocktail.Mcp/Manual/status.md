@@ -9,6 +9,7 @@ What each status field means, what is normal, how to name the limiter, and the t
 - `temp_margin_c`: NVIDIA's own headroom (nvidia-smi's "T.Limit"): how many °C until the GPU slows itself down, at 90 °C on a 5090 (hardware slowdown 93, shutdown 96; `card_settings` has all three). It is the number to watch, not a fixed temperature.
 - `vram_used_gib` of `vram_total_gib` (31.8 on a 5090; the driver's reservation left out, as nvidia-smi does) and `memory_controller_pct` (how busy the memory bus is). A game near the total starts swapping over PCIe, which shows as stutter no clock fixes. `stress_test` and `watch` give its P10/P50/P90, the CSVs every sample.
 - `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
+- `gpc_mv`: the voltage the 11 GPCs measure at their own sensors (mean, min, max, and the mean against NVVDD). On the reference card the mean sits 3-9 mV above NVVDD and the lowest GPC within 7 mV below it, at idle and at the wall: the core gets what the rail is asked for, so a crash is the point's frequency, not a sagging rail. `stress_test` gives its P10/P50/P90, the CSVs every sample. Read only on the layout verified on an RTX 5090; absent elsewhere.
 - `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
 - `session`: the experiment in force, if any.
 

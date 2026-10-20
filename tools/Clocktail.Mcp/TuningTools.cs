@@ -70,6 +70,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
         if (look.NvvddUv is { } uv && Nearest(look.Curve, uv) is { } p)
             point = Row(p, daily);
         var session = card.Broker(BrokerRequest.OpExperiment, "show");
+        GpcVoltages.Reading? gpc = null;
+        try { gpc = card.Gpc(); } catch (InvalidOperationException) { }
         return Out(new
         {
             gpu = card.Name,
@@ -89,6 +91,11 @@ public sealed partial class TuningTools(Card card, Residency residency)
             memory_controller_pct = t?.MemUtilPercent,
             limit_reasons = t?.ThrottleReasons,
             rails = Rails(look),
+            gpc_mv = gpc == null ? null : new
+            {
+                mean = Math.Round(gpc.MeanMv, 1), min = gpc.MinMv, max = gpc.MaxMv,
+                mean_vs_nvvdd = look.NvvddUv is { } nv ? Math.Round(gpc.MeanMv - nv / 1000.0, 1) : (double?)null,
+            },
             point,
             daily = dailyNote,
             session = session.Ok ? session.Result?.GetProperty("experiment") : null,
@@ -388,6 +395,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
             memory_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Memory)), q),
             temp_c = P(held.Select(s => (double?)s.Telemetry?.TemperatureC), q),
             vram_used_gib = P(held.Select(s => Gib(s.Telemetry?.VramUsedBytes)), q),
+            gpc_mean_mv = P(held.Select(s => s.Gpc?.MeanMv), q),
+            gpc_min_mv = P(held.Select(s => s.Gpc?.MinMv), q),
         };
         string csv = WriteSamples(samples, load, seconds);
         double? p50Mv = P(held.Select(s => s.NvvddUv / 1000.0), 0.5), p50Mhz = P(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), 0.5);
@@ -743,7 +752,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
                 : Path.Combine(Path.GetTempPath(), "clocktail-stress");
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}-l{load}-{seconds}s.csv");
-            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons,instant_w,vram_used_gib,temp_margin_c\n");
+            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv\n");
             foreach (var s in samples)
             {
                 var t = s.Telemetry;
@@ -753,6 +762,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
                     s.Mhz(AllClocksLayout.Memory), s.Mhz(AllClocksLayout.Video), s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, t?.PowerWatts, t?.PowerEnforcedWatts,
                     s.NvvddOut?.Mw / 1000.0, s.NvvddOut?.Ma / 1000.0, s.MsvddOut?.Mw / 1000.0, s.MsvddOut?.Ma / 1000.0, t?.TemperatureC, t?.GpuUtilPercent,
                     string.Join("|", t?.ThrottleReasons ?? []), t?.PowerInstantWatts, Gib(t?.VramUsedBytes), t?.TempMarginC,
+                    s.Gpc is { } g ? Math.Round(g.MeanMv, 1) : null, s.Gpc?.MinMv,
                 }.Select(v => v switch { null => "", IFormattable f => f.ToString(null, CultureInfo.InvariantCulture), _ => v.ToString() })));
                 sb.Append('\n');
             }

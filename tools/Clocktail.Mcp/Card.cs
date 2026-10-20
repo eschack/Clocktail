@@ -131,7 +131,7 @@ public sealed class Card : IDisposable
     /// from the power monitor beside its current limit (the channels and limits read at most every 5 s: a trial can lower a
     /// limit, nothing else moves them). No curve: it does not move under load.</summary>
     public sealed record Sample(DateTimeOffset At, TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, MonitorReading? NvvddOut, MonitorReading? MsvddOut,
-        IReadOnlyDictionary<int, uint>? ClocksKhz = null, CurrentLimits? Limits = null)
+        IReadOnlyDictionary<int, uint>? ClocksKhz = null, CurrentLimits? Limits = null, GpcVoltages.Reading? Gpc = null)
     {
         /// <summary>A domain's clock from the driver's clock table (AllClocksLayout ids), MHz.</summary>
         public double? Mhz(int domain) => ClocksKhz != null && ClocksKhz.TryGetValue(domain, out var k) ? Math.Round(k / 1000.0) : null;
@@ -177,8 +177,23 @@ public sealed class Card : IDisposable
             catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
             IReadOnlyDictionary<int, uint>? clocks = null;
             try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (InvalidOperationException) { }
-            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks, _monitorLayout);
+            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks, _monitorLayout, GpcLocked());
         }
+    }
+
+    private uint? _adcMask;
+    private bool _adcMaskRead;
+
+    /// <summary>The voltage each GPC measures (<see cref="GpcVoltages"/>); null off the layout it was verified on.</summary>
+    public GpcVoltages.Reading? Gpc()
+    {
+        using (_lane.Enter("the GPCs' voltages")) return GpcLocked();
+    }
+
+    private GpcVoltages.Reading? GpcLocked()
+    {
+        if (!_adcMaskRead) { _adcMask = GpcVoltages.Mask(_hw, _session); _adcMaskRead = true; }
+        return _adcMask is { } m ? GpcVoltages.Read(_hw, _session, m) : null;
     }
 
     /// <summary>The highest instantaneous board power over <paramref name="span"/>, read every 20 ms (NVML's instant field:
