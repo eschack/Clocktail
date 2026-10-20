@@ -38,7 +38,8 @@ public sealed partial class SettingsTools
         "this card (or the range measured on the reference card), so nothing strains the hardware; ⚠️ outside them, worth a " +
         "look; ⛔ act now; ℹ️ information. Safety, not stability: whether it holds in every game is what stress_test and play " +
         "decide. Show 'table' to the person exactly as it is (Markdown with emoji), then add one or two sentences of your own. " +
-        "Run it with a game or stress test loaded for meaningful live rows; idle is fine for the settings.")]
+        "Run it with a game or stress test loaded for meaningful live rows; idle is fine for the settings. Its last row is " +
+        "Clocktail's own version: when a newer one is out (update_available), tell the person and how to update.")]
     public string CardReport() => Guard(() =>
     {
         using var settingsDoc = JsonDocument.Parse(CardSettings());
@@ -47,6 +48,8 @@ public sealed partial class SettingsTools
         var l = limiterDoc.RootElement;
         var rows = SettingRows(s);
         var live = LiveRows(s, l);
+        var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
+        live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
         var all = rows.Concat(live).ToList();
         var act = all.Where(r => r.Mark == Act).ToList();
         var look = all.Where(r => r.Mark == Look).ToList();
@@ -61,6 +64,7 @@ public sealed partial class SettingsTools
             verdict,
             settings = rows.Select(Plain),
             live = live.Select(Plain),
+            update_available = newer,
             table = Table(Str(s, "gpu") ?? "GPU", rows, live, verdict),
         });
     });

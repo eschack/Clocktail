@@ -24,6 +24,8 @@ npx -y clocktail setup
 
 Either way you choose your agents, review the proposed changes, and approve them. Setup installs Clocktail, connects your agents (with backups of their configuration), and installs the service; Windows asks for admin rights once. Restart your agent afterward. Your card stays at stock until you say otherwise.
 
+Updates do not install themselves. When a new version is out, "How's my card doing?" says so in its last row; close your agents and run the same `npx -y clocktail@latest setup` again. Your card, your daily profile and your saved profiles stay as they are. To check, Clocktail reads one thing from the npm registry, the latest version number, and sends nothing about your computer or card. `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off.
+
 Setup supports Claude Code, Claude Desktop, Codex, Cursor, OpenCode, VS Code, Gemini CLI, Windsurf, GitHub Copilot CLI and a dozen more (the list is borrowed from [REA](https://github.com/morluto/rea), with thanks). Any other MCP client works too: point it at `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe`.
 
 ### Ask your agent

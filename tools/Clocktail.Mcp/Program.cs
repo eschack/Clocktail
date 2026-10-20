@@ -12,4 +12,5 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<Residency>());
 builder.Services.AddSingleton<LiveWatch>();
 builder.Services.AddMcpServer(o => o.ServerInstructions = ManualTools.Instructions)
     .WithStdioServerTransport().WithTools<TuningTools>().WithTools<SettingsTools>().WithTools<LiveTools>().WithTools<ManualTools>();
+_ = Task.Run(UpdateCheck.Latest);   // ask npm once at start, so the first card_report need not wait
 await builder.Build().RunAsync();

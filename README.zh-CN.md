@@ -24,6 +24,8 @@ npx -y clocktail setup
 
 安装程序会列出它在你电脑上找到的 AI 助手，告诉你要改哪些配置（改之前都会备份），等你点头才动手。中间 Windows 会弹一次管理员权限确认，同意就行。装完重启一下你的 AI 助手。显卡在你开口之前一直保持出厂设置。
 
+它不会自动更新。出了新版，问一句“我的卡现在怎么样”，表格最后一行会告诉你；关掉 AI 助手，再运行一次 `npx -y clocktail@latest setup` 就行，显卡设置、日常设置和你存的配置都不会动。检查更新时它只向 npm 读取最新版本号，不会发送你电脑或显卡的任何信息。不想检查，设环境变量 `CLOCKTAIL_NO_UPDATE_CHECK=1`。
+
 npm 下载慢的话，先换国内镜像：`npm config set registry https://registry.npmmirror.com`
 
 ### 然后跟它聊
