@@ -437,7 +437,13 @@ function runningServers() {
   const r = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { quiet: true });
   if (r.status !== 0) return [];
   const dir = INSTALL_DIR.toLowerCase();
-  return r.stdout.split(/\r?\n/).filter(Boolean).map(l => l.trim().split('|')).filter(([, exe]) => (exe || '').toLowerCase().startsWith(dir))
+  return serversByAgent(r.stdout.split(/\r?\n/).filter(Boolean).map(l => l.trim().split('|')), dir);
+}
+
+/** Rows of pid|exe|parent name|parent path, as the query above prints them: the installed servers an agent started. Since
+ * 0.1.8 each agent's server is a relay with a worker under it; the worker (its parent is the server itself) is not an agent. */
+function serversByAgent(rows, dir) {
+  return rows.filter(([, exe, parent]) => (exe || '').toLowerCase().startsWith(dir) && String(parent || '').toLowerCase() !== 'clocktail-mcp.exe')
     .map(([pid, , parent, parentPath]) => ({ pid: Number(pid), agent: agentName(parent, parentPath) }));
 }
 
@@ -506,7 +512,7 @@ function fail(msg) { say(`\n  ${msg}\n`); process.exit(1); }
 // ---- entry --------------------------------------------------------------------------------------------------------
 
 // Loaded by the tests as a module: hand them the agents and run nothing.
-if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList }; return; }
+if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList, serversByAgent }; return; }
 
 const argv = process.argv.slice(2);
 const opts = {

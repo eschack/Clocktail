@@ -60,6 +60,9 @@ public sealed class WorkerProcess(string exe)
         return p.ExitCode;
     }
 
+    /// <summary>Ties a process this one started some other way to the same job: it ends when this process does.</summary>
+    public bool Adopt(Process p) => Contain(p);
+
     private bool Contain(Process p)
     {
         if (_job == 0)

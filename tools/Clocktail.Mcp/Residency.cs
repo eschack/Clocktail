@@ -86,7 +86,8 @@ public sealed class Residency(Card card) : BackgroundService
         return ticks;
     }
 
-    private void Flush()
+    /// <summary>The samples not yet on disk go there (also before a worker ends for a lost driver).</summary>
+    public void Flush()
     {
         List<Tick> batch;
         lock (_gate)

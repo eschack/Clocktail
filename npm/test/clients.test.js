@@ -101,3 +101,17 @@ test('a running server is named by the agent that started it', () => {
   assert.equal(agentList([{ agent: 'OpenCode' }, { agent: 'Claude Code' }, { agent: 'OpenCode' }]), 'OpenCode and Claude Code');
   assert.equal(agentList([]), '');
 });
+
+test('a relay counts once: the worker under it is not an agent', () => {
+  const { serversByAgent } = require('../bin/clocktail.js');
+  const dir = String.raw`c:\users\x\appdata\local\programs\clocktail`;
+  const exe = String.raw`C:\Users\x\AppData\Local\Programs\Clocktail\clocktail-mcp.exe`;
+  const rows = [
+    ['100', exe, 'claude.exe', String.raw`C:\Users\x\.local\bin\claude.exe`],
+    ['101', exe, 'clocktail-mcp.exe', exe],
+    ['200', exe, 'OpenCode.exe', ''],
+    ['201', exe, 'clocktail-mcp.exe', exe],
+    ['300', String.raw`D:\elsewhere\clocktail-mcp.exe`, 'code.exe', ''],
+  ];
+  assert.deepStrictEqual(serversByAgent(rows, dir), [{ pid: 100, agent: 'Claude Code' }, { pid: 200, agent: 'OpenCode' }]);
+});

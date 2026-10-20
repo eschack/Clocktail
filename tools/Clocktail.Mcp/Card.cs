@@ -42,6 +42,9 @@ public sealed class Card : IDisposable
     public IReadOnlyList<string> OtherGpus { get; }
 
     public string StableId => _gpu.Identity.StableId;
+
+    /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
+    public string? DriverGone() => DriverLoss.Why(_mgr.Nvml, [_session]);
     public string Name => _gpu.Identity.Name;
     public string Vbios => _gpu.Identity.Vbios;
     /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
