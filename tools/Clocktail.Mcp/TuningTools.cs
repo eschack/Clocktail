@@ -56,7 +56,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
-    [McpServerTool(Name = "gpu_status"), Description(
+    [McpServerTool(Name = "gpu_status", ReadOnly = true, OpenWorld = false), Description(
         "Where the card runs right now: NVVDD/MSVDD, core clock, the V/F point it sits on (stock, current and daily offset), " +
         "power, temperature, utilization, NVML limit reasons, and the experiment session. NVML on this card sets gpu_idle at " +
         "full load when the clock sits at the top of a curve cut flat, and sw_power_cap at ~340 W far under the 598 W wall: " +
@@ -92,7 +92,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "curve_around"), Description(
+    [McpServerTool(Name = "curve_around", ReadOnly = true, OpenWorld = false), Description(
         "The Core V/F points around a voltage (default: where the card runs now): index, mV, stock MHz, effective MHz now, " +
         "offset now, the daily profile's offset, and how far above the daily profile each point is.")]
     public string CurveAround(
@@ -111,7 +111,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "begin_session"), Description(
+    [McpServerTool(Name = "begin_session", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Start an experiment session for a game. Every adjust_curve after this is a trial; its outcome becomes a data point " +
         "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down.")]
     public string BeginSession(
@@ -119,7 +119,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         [Description("Anything worth keeping with the data (settings, scene).")] string? note = null) =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note })));
 
-    [McpServerTool(Name = "adjust_curve"), Description(
+    [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +
         "each point by at most the step (default 15 MHz) and never above the daily profile by more than the cap (default " +
         "200 MHz); the firmware's own limits are held by the broker. The operating point is the median NVVDD under load " +
@@ -194,7 +194,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "set_power_limit"), Description(
+    [McpServerTool(Name = "set_power_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the board power limit for the session, as a new trial with the curve left as it is. A lower wall makes the card " +
         "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +
         "the curve's slope bends). Later adjust_curve trials run under this wall until back_to_daily, end_session or a crash " +
@@ -233,7 +233,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "set_current_limit"), Description(
+    [McpServerTool(Name = "set_current_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set a rail's current limit (OCP, in amps) for the session, as a new trial with the curve left as it " +
         "is. The firmware caps the rail's current at it, so a lower NVVDD limit caps the core's power (P = V x I) and moves " +
         "the card down the curve below where the 400 W board wall stops; gpu_status shows each rail's amps and watts to " +
@@ -276,7 +276,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "adjust_msvdd"), Description(
+    [McpServerTool(Name = "adjust_msvdd", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Raise or lower the MSVDD rail (L2, crossbar, SYS and Video) through its REL and VMIN offsets, as a new trial with the " +
         "curve left as it is. MSVDD runs at what the core's frequency asks for minus its REL offset (measured 1:1: REL -50 → " +
         "-75 mV moved MSVDD 975 → 950 mV), down to its VMIN floor (825 mV stock). Raising REL lets XBAR run faster where MSVDD " +
@@ -331,7 +331,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return Out(new { success = true, change, rails = Rails(after) });
     });
 
-    [McpServerTool(Name = "stress_test"), Description(
+    [McpServerTool(Name = "stress_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Run the driver's own golden stressor (nvgwls.exe, what NVIDIA App's auto-tune runs) on what is on the card now, " +
         "sampling the operating point twice a second; no game and no person needed, so it is the way to test while the " +
         "person is away. It compares every graphics, compute and ray-tracing result bit for bit with the first, so it " +
@@ -420,14 +420,14 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "mark_stable"), Description(
+    [McpServerTool(Name = "mark_stable", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Record the trial in force as stable in this game, with a note (minutes played, scene, anything seen). The curve stays on. " +
         "The curve points the card ran on under load during the trial (from the once-a-second residency samples) go into " +
         "the note: those are the points this trial proved, not the whole window.")]
     public string MarkStable([Description("What was played and seen.")] string note) => Guard(() =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "stable", note + TrialStays(out _))));
 
-    [McpServerTool(Name = "mark_crash"), Description(
+    [McpServerTool(Name = "mark_crash", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "The game crashed to the desktop (or froze) with no driver reset: record the trial in force as a crash, with what " +
         "the player saw, and put the daily profile back at once. A driver reset is recorded by the broker by itself; use " +
         "this for the crashes it cannot see. Afterwards, read data_points before the next step.")]
@@ -443,12 +443,12 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return Applied((r.Ok, back, r.Error), point);
     }
 
-    [McpServerTool(Name = "back_to_daily"), Description(
+    [McpServerTool(Name = "back_to_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "Put the daily profile back on at once (artefacts, stutter, a doubt). The trial in force ends as survived; the session stays open.")]
     public string BackToDaily([Description("Why, for the tuning log.")] string? reason = null) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "apply", reason ?? "back_to_daily (agent)"), null);
 
-    [McpServerTool(Name = "stock"), Description(
+    [McpServerTool(Name = "stock", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "Put the card back to stock, as NVIDIA shipped it, and keep it there: every setting Clocktail ever wrote goes back to " +
         "the value it found, and the daily profile is suspended (kept, not deleted), so nothing puts it back at the next start " +
         "or driver reset until load_daily. The trial in force (if any) ends as survived. Tell the person before calling this.")]
@@ -458,12 +458,12 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return off.Ok ? Applied(card.Broker(BrokerRequest.OpRecover), null) : Applied(off, null);
     }
 
-    [McpServerTool(Name = "load_daily"), Description(
+    [McpServerTool(Name = "load_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "End a suspension (after stock) and put the kept daily profile on the card now; it goes on at every start and after " +
         "every driver reset again. Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
     public string LoadDaily() => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null);
 
-    [McpServerTool(Name = "keep_as_daily"), Description(
+    [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
         "every driver reset from then on. Kept from the card: the V/F curve, the fan curve, the memory offset, MSVDD's offsets, " +
         "XBAR's offset and voltage demand. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
@@ -481,7 +481,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return Out(new { success = true, daily = writes });
     }
 
-    [McpServerTool(Name = "list_presets"), Description(
+    [McpServerTool(Name = "list_presets", ReadOnly = true, OpenWorld = false), Description(
         "The daily profiles that ship with Clocktail, each with the card model it was tuned on and whether this card is that " +
         "model, and the profiles the person saved under a name (save_profile). A fresh install runs the card at stock; a " +
         "preset is a starting point the person may choose instead. load_preset loads either kind by name.")]
@@ -501,7 +501,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         });
     });
 
-    [McpServerTool(Name = "save_profile"), Description(
+    [McpServerTool(Name = "save_profile", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Save the daily profile under a name (\"quiet\", \"games\", \"benchmark\"), so the person can keep several and switch " +
         "with load_preset and that name. It saves what is kept, not a trial on the card: keep_as_daily first when the person " +
         "wants the card's current settings saved. A name already used is replaced (say so). The daily profile itself does not " +
@@ -509,12 +509,12 @@ public sealed partial class TuningTools(Card card, Residency residency)
     public string SaveProfile([Description("The name to save it under.")] string name) =>
         Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "save", name)));
 
-    [McpServerTool(Name = "delete_profile"), Description(
+    [McpServerTool(Name = "delete_profile", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. Ask the person first.")]
     public string DeleteProfile([Description("The saved profile's name, from list_presets.")] string name) =>
         Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
 
-    [McpServerTool(Name = "load_preset"), Description(
+    [McpServerTool(Name = "load_preset", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make a preset, or a profile saved with save_profile, the daily profile and put it on the card now: it replaces the " +
         "daily profile (the old one goes into the tuning log; save_profile it first if the person may want it back) and goes on " +
         "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
@@ -522,7 +522,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
     public string LoadPreset([Description("The preset's or saved profile's name, from list_presets.")] string name) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null);
 
-    [McpServerTool(Name = "install_service"), Description(
+    [McpServerTool(Name = "install_service", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Install (or update) the Clocktail service, the one elevated process that does every write and puts the daily " +
         "profile back after each boot and driver reset. Every other write tool needs it. Windows asks the person to " +
         "approve once (a UAC prompt). Tell the person before calling this.")]
@@ -539,13 +539,13 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return Out(new { success = p.ExitCode == 0 && ping.Ok, exit_code = p.ExitCode, output = (stdout.Result + stderr.Result).Trim(), service_answers = ping.Ok });
     });
 
-    [McpServerTool(Name = "log_note"), Description(
+    [McpServerTool(Name = "log_note", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Write into the tuning log in your own words: what the person said, what you saw (fps, stutter, scene, settings), " +
         "what you plan next and why. The more detail the better; every write the tools make is logged by themselves.")]
     public string LogNote([Description("The note (Markdown is fine).")] string text) =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "note", text));
 
-    [McpServerTool(Name = "read_log"), Description(
+    [McpServerTool(Name = "read_log", ReadOnly = true, OpenWorld = false), Description(
         "The last entries of the tuning log (oldest first): every trial with its readings and each point before and after, " +
         "every crash, every profile kept or put back, and the notes. Read it at the start of a session to pick up where the " +
         "last one left off.")]
@@ -558,7 +558,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return tail.Length == 0 ? Out(new { success = true, path, log = "(nothing logged yet)" }) : $"<!-- {path} -->\n{tail}";
     });
 
-    [McpServerTool(Name = "end_session"), Description(
+    [McpServerTool(Name = "end_session", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "End the session: the trial in force ends as survived and the daily profile goes back on (stock when none is kept).")]
     public string EndSession()
     {
@@ -569,7 +569,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         return Applied((r.Ok, back, r.Error), point);
     }
 
-    [McpServerTool(Name = "data_points"), Description(
+    [McpServerTool(Name = "data_points", ReadOnly = true, OpenWorld = false), Description(
         "The last data points across sessions and games, oldest first: game, outcome (stable / survived / crash), minutes, " +
         "the change, the operating point when it was written, and for a crash the voltage the flight recorder found at the hang. " +
         "by_point sums every data point up per curve point, from the points the card actually ran on under load (at least " +

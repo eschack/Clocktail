@@ -29,7 +29,7 @@ public sealed class ManualTools
     /// <summary>The server instructions: Manual/instructions.md, sent to every agent when it connects.</summary>
     public static string Instructions => Topics.Value.TryGetValue("instructions", out var t) ? t : "";
 
-    [McpServerTool(Name = "manual"), Description(
+    [McpServerTool(Name = "manual", ReadOnly = true, OpenWorld = false), Description(
         "The Clocktail manual for the agent: the tuning method phase by phase and why each step comes where it does, " +
         "answers to the questions people ask, Blackwell (voltage rails, clock domains, the V/F curve, what limits the clock), " +
         "how to read every status field, stability testing, presets and troubleshooting. Call it with no topic for the index. " +

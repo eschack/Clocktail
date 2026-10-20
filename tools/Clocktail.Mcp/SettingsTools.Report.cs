@@ -37,7 +37,7 @@ public sealed partial class SettingsTools
 
     private sealed record ReportRow(string Icon, string Name, string Original, string Now, string Change, string Mark, string Note);
 
-    [McpServerTool(Name = "card_report"), Description(
+    [McpServerTool(Name = "card_report", ReadOnly = true, OpenWorld = true), Description(
         "How's my card doing: THE call for 'how is my card', 'is this safe', 'what did we change', 'status'. Every setting " +
         "as original (stock) → now with the change and a safety mark, then live readings (temperature, power, clock and " +
         "voltage, what holds the clock), then one verdict. The marks come from fixed rules: ✅ within NVIDIA's own limits for " +

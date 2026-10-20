@@ -36,7 +36,7 @@ public sealed partial class SettingsTools(Card card)
 
     private static readonly ClockDomainId[] Domains = [ClockDomainId.Xbar, ClockDomainId.Sys, ClockDomainId.Video];
 
-    [McpServerTool(Name = "card_settings"), Description(
+    [McpServerTool(Name = "card_settings", ReadOnly = true, OpenWorld = false), Description(
         "Every setting Clocktail can write, as it is on the card now: the power limit (the FE request) and the board's " +
         "range, the P0 core/memory offsets, the Core V/F curve (offsets in kHz as runs offset*count, how many points are " +
         "offset, its top below NVVDD MAX and its knee), NVVDD/MSVDD offsets per slot and the limits they give, XBAR/SYS/" +
@@ -95,7 +95,7 @@ public sealed partial class SettingsTools(Card card)
         return node.ToJsonString(Json);
     });
 
-    [McpServerTool(Name = "limiter"), Description(
+    [McpServerTool(Name = "limiter", ReadOnly = true, OpenWorld = false), Description(
         "What holds the core clock back right now, judged on 5 samples 200 ms apart (the verdict most of them agree on), the " +
         "instantaneous power watched every 20 ms between them: power_wall (board power within 10 W of the limit in force, or " +
         "sw_power_cap with instantaneous peaks within 15 W of it: the wall answers short peaks, so a game's average can sit " +

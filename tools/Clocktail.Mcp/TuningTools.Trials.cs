@@ -44,7 +44,7 @@ public sealed partial class TuningTools
     public const uint LoadedUtilPct = 50;
     public const double LoadedW = 120;
 
-    [McpServerTool(Name = "set_fan_curve"), Description(
+    [McpServerTool(Name = "set_fan_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the firmware fan curve (every editable curve policy) as a new trial, the V/F curve left as it is: three points " +
         "degC:duty%, e.g. 50:20,79:60,86:100; rpm follows the firmware's own duty-to-rpm pairing. The fan curve decides the " +
         "temperature the card runs at, and the V/F curve's clocks move with temperature (the driver's compensation steps near " +
@@ -69,7 +69,7 @@ public sealed partial class TuningTools
         return Trial($"fan curve → {text}", reason, new() { ["fan_curve"] = text });
     });
 
-    [McpServerTool(Name = "set_fan_speed"), Description(
+    [McpServerTool(Name = "set_fan_speed", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Hold every fan at a fixed duty for the session, as a new trial (or 'auto' to give them back to the fan curve): to " +
         "hold a temperature while testing, e.g. a fan sweep at the wall to see what each degree costs. On the reference card at " +
         "600 W: 100 % held 67 C, 75 % 73 C, 60 % 79 C; 45 % passed 85 C within 40 s. Watch temp_c and go back to 'auto' above " +
@@ -87,7 +87,7 @@ public sealed partial class TuningTools
         return Trial(pct == 0 ? "fans back to the fan curve" : $"fans held at {pct} %", reason, new() { ["fan_pct"] = pct });
     });
 
-    [McpServerTool(Name = "set_memory_offset"), Description(
+    [McpServerTool(Name = "set_memory_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the memory (GDDR7) offset as a new trial: the P0 offset in MHz, which NVML shows doubled. A memory write zeroes " +
         "the V/F curve's offsets, so the curve on the card is written again right after it, in the same trial. At most 250 MHz " +
         "from where it is per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ), within the driver's range (-1000..+3000 on a 5090). On " +
@@ -110,7 +110,7 @@ public sealed partial class TuningTools
             reason, new() { ["memory_khz"] = khz });
     });
 
-    [McpServerTool(Name = "adjust_xbar"), Description(
+    [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
         "L2 and memory; under load it is held to about 0.9 x the core clock, and about +250 MHz of offset reaches that, after " +
         "which more offset only lowers the MSVDD voltage it needs. On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
@@ -143,7 +143,7 @@ public sealed partial class TuningTools
         return Trial(string.Join(", ", parts), reason, items);
     });
 
-    [McpServerTool(Name = "set_daily_power_limit"), Description(
+    [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +
         "(set_power_limit) is never kept, so this is how the daily one changes. 400-600 W on an RTX 5090 (575 W stock). Set it " +
         "before tuning the curve: the wall decides where on the curve heavy load runs. On the reference card the last 100 W " +
@@ -158,7 +158,7 @@ public sealed partial class TuningTools
         return Out(new { success = true, daily_power_limit_w = mw / 1000.0, power_limit_w = card.Read().Telemetry?.PowerEnforcedWatts });
     });
 
-    [McpServerTool(Name = "watch"), Description(
+    [McpServerTool(Name = "watch", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Sample the card for a stretch while the person plays (twice a second) and summarize it: p10/p50/p90 of the core clock, " +
         "NVVDD, MSVDD, XBAR, board power and temperature over the samples under load (50 %+ utilization and 120 W+: menus and " +
         "loading screens are left out), how much of the time it sat on the wall, the curve point it ran on, and NVML's limit " +

@@ -11,7 +11,7 @@ public sealed class LiveTools(LiveWatch live)
 {
     private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
-    [McpServerTool(Name = "live_start"), Description(
+    [McpServerTool(Name = "live_start", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Watch the card live while the person plays or runs a benchmark, for as long as it takes: sampled 4 times a second in the " +
         "background (read-only), and every 10 s under load one line: the clock range and median, the voltage and the curve point it " +
         "ran on, MSVDD, XBAR, power against the wall and how much of the time it sat on it, temperature, fans, and what held the clock. " +
@@ -25,7 +25,7 @@ public sealed class LiveTools(LiveWatch live)
         [Description("What is being played (game, scene, settings), for the log.")] string? note = null) =>
         Guard(() => live.Start(intervalMs, everySeconds, note));
 
-    [McpServerTool(Name = "live_read"), Description(
+    [McpServerTool(Name = "live_read", ReadOnly = true, OpenWorld = false), Description(
         "The live watch's lines since the last live_read (the newest 'max' of them), and the run so far: time under load, " +
         "p10/p50/p90 clock, the curve points it spent most time on, how much of it sat on the wall, max temperature and power, " +
         "and what held the clock how often. After a crash or a stutter, tailSeconds returns every sample of the last seconds " +
@@ -35,7 +35,7 @@ public sealed class LiveTools(LiveWatch live)
         [Description("Also return every sample of the last N seconds (0..30; default 0).")] int tailSeconds = 0) =>
         Guard(() => live.Read(max, tailSeconds));
 
-    [McpServerTool(Name = "live_stop"), Description(
+    [McpServerTool(Name = "live_stop", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "End the live watch: the summary of the whole run (also written to the tuning log), the lines not read yet, and the totals.")]
     public string Stop() => Guard(live.Stop);
 
