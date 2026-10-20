@@ -1,5 +1,5 @@
 # Presets
-The starting points that ship with Clocktail, what each part of one does, and how to offer it.
+The starting points that ship with Clocktail, what each part of one does, how to offer it, and the profiles the person saves under a name.
 
 ## founders (RTX 5090 only)
 The reference card's daily profile, kept after four days of measurement. In write order:
@@ -21,3 +21,12 @@ Verified on the reference card: bit-exact compute tests, nvgwls at 50 % and 100 
 - After loading: `stress_test load=100` for 60-120 s, then load 50 for 60 s, then have them play. If anything fails, it is their silicon, not the preset (and `back_to_daily` now means the preset). Lower the curve where it failed (`begin_session`, `adjust_curve` -15 MHz, test, `keep_as_daily` once it holds).
 - If lowering the curve does not cure it and the failure was memory-bound or showed artefacts, XBAR +300 may be too much for this chip: `adjust_xbar` -50 MHz per step, test, `keep_as_daily` once it holds.
 - From stock without a preset is equally valid; it just takes more sessions.
+
+## Saved profiles
+The service keeps one daily profile: the one it puts back after every boot and driver reset. A person who wants several ("quiet" for late nights, "games", "benchmark") saves the daily profile under a name and switches by name.
+- `save_profile name`: saves the daily profile as it is kept. A trial on the card is not saved: `keep_as_daily` first when they want the card's current settings. A name already used is replaced: say so.
+- `list_presets`: the presets and the saved profiles, each with its settings.
+- `load_preset name`: a saved profile becomes the daily profile and goes on now, exactly as a preset does. It replaces the daily profile: if the current one is not saved yet and they may want it back, `save_profile` it first. Ask first.
+- `delete_profile name`: deletes a saved one; the daily profile and the presets are untouched. Ask first.
+- Names: letters (any language), digits, '-' and '_'; not a preset's name. Saved profiles belong to this card: they live in its state folder.
+- A quiet profile is usually the daily one with a lower wall (`set_daily_power_limit`) and a gentler fan curve: the curve can stay, since a lower wall only moves the card down it.

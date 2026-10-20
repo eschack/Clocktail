@@ -17,7 +17,8 @@ The agent's hands. Each change is a **trial** in a session; the person plays, th
 | `curve_around` | Curve points near a voltage. |
 | `watch` | Sample one stretch of play: p10/p50/p90 of clock, voltage, XBAR, power, temperature; time on the wall. |
 | `live_start` / `live_read` / `live_stop` | Watch a whole session of play live: 4 samples a second, a line every 10 s under load (clock, voltage and curve point, MSVDD, XBAR, power vs the wall, temperature, fans, what held the clock), and a line when load starts or stops, the clock freezes, the card stops answering or runs hot. The log can be followed as it is written (Claude Code's Monitor); every sample goes to a CSV. |
-| `list_presets` / `load_preset` | The profiles that ship with Clocktail; load one as the daily profile. Ask the person first. |
+| `list_presets` / `load_preset` | The profiles that ship with Clocktail and the ones saved by name; load one as the daily profile. Ask the person first. |
+| `save_profile` / `delete_profile` | Save the daily profile under a name ("quiet", "games") to switch back to later; delete a saved one. |
 | `set_daily_power_limit` | The daily power limit. Ask the person first. |
 | `begin_session` / `end_session` | Start a session for a game / end it and go back to the daily profile. |
 | `adjust_curve` | Raise or lower the V/F points around the working point (one trial). |

@@ -51,6 +51,7 @@ Ask how your card is doing and you get every setting, original → now, with a �
 - **The agent does the tuning.** Power limit, fan curve, V/F curve, memory, MSVDD and XBAR, in that order, each for a reason it can explain. One small step at a time, because large steps are how graphics cards end up on the secondhand market.
 - **NVIDIA's stress tester is the judge.** `nvgwls.exe` ships with your driver; NVIDIA App's auto-tune runs the same program. It checks every graphics, compute and ray-tracing result bit for bit. It has no feelings to hurt and cannot be bribed.
 - **Game-stable = stress-stable minus 30–60 MHz.** The stress tester maps the shape of the edge, voltage by voltage. Only games can say how far under it they need to stay: in our runs, 30–60 MHz under the highest clock `nvgwls` passed. So you play, the agent watches, and every crash goes into the data. We did not make this rule. We merely crashed into it.
+- **Keep as many profiles as you like.** Save the daily one as "quiet" or "games" and switch with a sentence. The card only ever runs one at a time, which is how it prefers it.
 - **Nothing is permanent unless you say so.** Every write is read back and can be undone. A background service keeps your daily profile and puts it back after every boot and every driver reset, including the ones you caused.
 
 ## What it found on the one card we tested

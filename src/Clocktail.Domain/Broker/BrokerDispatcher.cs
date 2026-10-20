@@ -285,10 +285,10 @@ public sealed class BrokerDispatcher
             }
             case "preset":
             {
-                // Value: the preset's name. It replaces the daily profile (the old one's writes go into the log) and goes on now.
+                // Value: a preset's name, or a saved profile's. It replaces the daily profile (the old one's writes go into
+                // the log) and goes on now.
                 var preset = Presets.Find(req.Value);
-                if (preset == null)
-                    return Fail($"no preset named '{req.Value}' (known: {string.Join(", ", Presets.All.Select(p => p.Name))})", BrokerCode.CannotWrite);
+                if (preset == null) return LoadSaved(target, req.Value, profile, path);
                 if (!preset.Fits(target.Name))
                     return Fail($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}. Nothing was written", BrokerCode.CannotWrite);
                 CloseTrial(target, Experiment.Survived, $"preset '{preset.Name}' went on");
@@ -300,6 +300,41 @@ public sealed class BrokerDispatcher
                     .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
                     .. Writes(r)]);
                 return r;
+            }
+            case "save":
+            {
+                // Value: the name. The daily profile as it is kept now, saved beside it under that name; one already saved
+                // under the name is replaced.
+                var (name, bad) = SavedProfiles.Normalize(req.Value);
+                if (name == null) return Fail(bad!, BrokerCode.BadRequest);
+                if (profile == null) return Fail("no daily profile is kept yet: keep_as_daily (or load a preset) first, then save it", BrokerCode.CannotWrite);
+                var dir = SavedProfiles.DirBeside(target.Journal.Path);
+                Directory.CreateDirectory(dir);
+                var file = SavedProfiles.PathOf(dir, name);
+                bool replaced = File.Exists(file);
+                var saved = new DailyProfile(profile.Writes, _host.Now).Noted(_host.Now, $"saved as '{name}' from the daily profile kept {profile.KeptAt:yyyy-MM-dd HH:mm}");
+                saved.Save(file);
+                Log(target, $"Profile saved · {name}", [replaced ? "Replaced the profile saved under this name" : null, .. profile.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}")]);
+                return Ok(new { success = true, name, path = file, replaced, profile = saved });
+            }
+            case "saved":
+                return Ok(new
+                {
+                    success = true,
+                    profiles = SavedProfiles.All(SavedProfiles.DirBeside(target.Journal.Path)).Select(p => new { name = p.Name, saved_at = p.Profile.KeptAt, writes = p.Profile.Writes }),
+                });
+            case "forget":
+            {
+                // Value: a saved profile's name. The daily profile and the presets are never deleted here.
+                var (name, bad) = SavedProfiles.Normalize(req.Value);
+                if (name == null) return Fail(bad!, BrokerCode.BadRequest);
+                var file = SavedProfiles.PathOf(SavedProfiles.DirBeside(target.Journal.Path), name);
+                var gone = DailyProfile.Load(file);
+                if (gone == null) return Fail($"no profile is saved as '{name}'", BrokerCode.CannotWrite);
+                File.Delete(file);
+                if (File.Exists(Platform.AtomicFile.BackupPath(file))) File.Delete(Platform.AtomicFile.BackupPath(file));
+                Log(target, $"Saved profile deleted · {name}", [.. gone.Writes.Select(w => $"Was: {w.Kind}/{w.Key} = {w.Value}")]);
+                return Ok(new { success = true, name, deleted = gone });
             }
             case "wall":
             {
@@ -358,7 +393,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"profile needs show, keep, off, apply, load, preset, wall, apply-power or reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, keep, off, apply, load, preset, save, saved, forget, wall, apply-power or reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -568,6 +603,25 @@ public sealed class BrokerDispatcher
     /// the memory offset, XBAR, MSVDD), so the card is the profile and stock everywhere else. Part of it (the wall alone,
     /// right after a driver reset or at a keep): only the trial-only cells, a wall and MSVDD's offsets the profile does
     /// not hold, nothing that needs an idle GPU.</summary>
+    /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on, as a preset does.</summary>
+    private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path)
+    {
+        var dir = SavedProfiles.DirBeside(target.Journal.Path);
+        string known = string.Join(", ", [.. Presets.All.Select(p => p.Name), .. SavedProfiles.All(dir).Select(p => p.Name)]);
+        var (name, _) = SavedProfiles.Normalize(value);
+        var saved = name == null ? null : DailyProfile.Load(SavedProfiles.PathOf(dir, name));
+        if (saved == null) return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
+        CloseTrial(target, Experiment.Survived, $"saved profile '{name}' went on");
+        var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History)
+            .Noted(_host.Now, $"saved profile '{name}' loaded");
+        loaded.Save(path);
+        var r = ApplyProfile(target, loaded, path);
+        Log(target, $"Saved profile loaded · {name}", [
+            .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
+            .. Writes(r)]);
+        return r;
+    }
+
     private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)
     {
         bool Written(OwnedItem i) => profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);

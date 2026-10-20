@@ -59,7 +59,8 @@ public sealed record BrokerRequest(
     /// saves what this broker holds now as the profile (<see cref="Value"/>, optional: why, for the history and the
     /// log), but once a profile is kept only the Core curve is taken from the card: its power limit and memory offset
     /// stay as kept, and a trial's lowered wall goes back to the kept one at once; "off" suspends it; "apply" writes it unless suspended (<see cref="Value"/>: why, for the log); "load" ends a
-    /// suspension and writes it; "preset" makes a shipped preset (<see cref="Value"/>: its name) the profile and writes it;
+    /// suspension and writes it; "preset" makes a shipped preset or a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
+    /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (right after a driver reset, which puts the
     /// limit back to 575 W, without waiting for an idle GPU); "reset" is the step after a crash (the held cells already
     /// given back): recorded, a trial in force made a data point, and the profile written back unchanged. Every one of

@@ -22,7 +22,7 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 | Record the outcome | `mark_stable`, `mark_crash`, `log_note` |
 | Undo / keep | `back_to_daily`, `keep_as_daily` |
 | Stock, and back | `stock`, `load_daily` |
-| Starting points | `list_presets`, `load_preset` |
+| Starting points, and profiles by name | `list_presets`, `load_preset`, `save_profile`, `delete_profile` |
 | Setup | `install_service` |
 
 ## Words the person will hear from you

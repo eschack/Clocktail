@@ -479,22 +479,43 @@ public sealed partial class TuningTools(Card card, Residency residency)
 
     [McpServerTool(Name = "list_presets"), Description(
         "The daily profiles that ship with Clocktail, each with the card model it was tuned on and whether this card is that " +
-        "model. A fresh install runs the card at stock; a preset is a starting point the person may choose instead.")]
-    public string ListPresets() => Guard(() => Out(new
+        "model, and the profiles the person saved under a name (save_profile). A fresh install runs the card at stock; a " +
+        "preset is a starting point the person may choose instead. load_preset loads either kind by name.")]
+    public string ListPresets() => Guard(() =>
     {
-        gpu = card.Name,
-        presets = Presets.All.Select(p => new
+        var saved = card.Broker(BrokerRequest.OpProfile, "saved");
+        return Out(new
         {
-            p.Name, p.Title, tuned_on = p.Gpu, fits_this_card = p.Fits(card.Name), p.Note,
-            writes = p.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}"),
-        }),
-    }));
+            gpu = card.Name,
+            presets = Presets.All.Select(p => new
+            {
+                p.Name, p.Title, tuned_on = p.Gpu, fits_this_card = p.Fits(card.Name), p.Note,
+                writes = p.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}"),
+            }),
+            saved = saved.Ok && saved.Result is { } res && res.TryGetProperty("profiles", out var list) ? list : (JsonElement?)null,
+            saved_error = saved.Ok ? null : saved.Error,
+        });
+    });
+
+    [McpServerTool(Name = "save_profile"), Description(
+        "Save the daily profile under a name (\"quiet\", \"games\", \"benchmark\"), so the person can keep several and switch " +
+        "with load_preset and that name. It saves what is kept, not a trial on the card: keep_as_daily first when the person " +
+        "wants the card's current settings saved. A name already used is replaced (say so). The daily profile itself does not " +
+        "change. Names: letters, digits, '-' and '_'; not a preset's name.")]
+    public string SaveProfile([Description("The name to save it under.")] string name) =>
+        Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "save", name)));
+
+    [McpServerTool(Name = "delete_profile"), Description(
+        "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. Ask the person first.")]
+    public string DeleteProfile([Description("The saved profile's name, from list_presets.")] string name) =>
+        Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
 
     [McpServerTool(Name = "load_preset"), Description(
-        "Make a preset the daily profile and put it on the card now: it replaces the daily profile (the old one goes into the " +
-        "tuning log) and goes on at every start from then on. Only loads on the card model the preset was tuned on. Another " +
-        "card of that model is still other silicon: after loading, run stress_test before trusting it. Ask the person before calling this.")]
-    public string LoadPreset([Description("The preset's name, from list_presets.")] string name) =>
+        "Make a preset, or a profile saved with save_profile, the daily profile and put it on the card now: it replaces the " +
+        "daily profile (the old one goes into the tuning log; save_profile it first if the person may want it back) and goes on " +
+        "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
+        "is still other silicon: after loading one, run stress_test before trusting it. Ask the person before calling this.")]
+    public string LoadPreset([Description("The preset's or saved profile's name, from list_presets.")] string name) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null);
 
     [McpServerTool(Name = "install_service"), Description(

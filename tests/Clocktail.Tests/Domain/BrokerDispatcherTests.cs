@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Text.Json;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Ownership;
@@ -613,6 +613,46 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(Exp("end")).Ok);
         Assert.Equal(590_000u, _requests[0xfe]);
         Assert.Contains("Daily power limit · 590 W", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>Several daily profiles, kept by name (the user, 2026-10-20): save the daily profile as "quiet", switch to
+    /// another, and load "quiet" back by name as a preset is loaded; a preset's name is not a saved profile's.</summary>
+    [Fact]
+    public void A_daily_profile_saved_under_a_name_loads_back_by_that_name()
+    {
+        var d = Power();
+        static BrokerRequest P(string kind, string? value = null) => new(BrokerRequest.OpProfile, Kind: kind, Value: value);
+        static BrokerRequest Wall(uint mw) => P("wall", mw.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        string Kept() => Assert.Single(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!.Writes, w => w.Kind == PowerCap.Kind).Value;
+
+        Assert.False(d.Dispatch(P("save", "quiet")).Ok);                          // nothing kept yet
+        Assert.True(d.Dispatch(Wall(450_000)).Ok);
+        var saved = d.Dispatch(P("save", " Quiet "));
+        Assert.True(saved.Ok, saved.Error);
+        Assert.Equal("quiet", saved.Result!.Value.GetProperty("name").GetString());
+        Assert.False(saved.Result!.Value.GetProperty("replaced").GetBoolean());
+        Assert.False(d.Dispatch(P("save", "founders")).Ok);                       // a preset's name
+        Assert.False(d.Dispatch(P("save", "my quiet")).Ok);                       // no spaces
+        Assert.True(d.Dispatch(P("save", "安静")).Ok);                 // any script's letters ("quiet" in Chinese)
+
+        Assert.True(d.Dispatch(Wall(600_000)).Ok);                                // the daily profile moves on
+        Assert.Equal("600000", Kept());
+        var list = d.Dispatch(P("saved"));
+        Assert.Equal(["quiet", "安静"], list.Result!.Value.GetProperty("profiles").EnumerateArray().Select(p => p.GetProperty("name").GetString()).Order(StringComparer.Ordinal));
+
+        var loaded = d.Dispatch(P("preset", "QUIET"));
+        Assert.True(loaded.Ok, loaded.Error);
+        Assert.Equal("450000", Kept());
+        Assert.Equal(450_000u, _requests[0xfe]);                                   // on the card now
+        Assert.Contains("Saved profile loaded · quiet", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+
+        var missing = d.Dispatch(P("preset", "loud"));
+        Assert.False(missing.Ok);
+        Assert.Contains("quiet", missing.Error);                                   // the names it knows
+        Assert.True(d.Dispatch(P("forget", "quiet")).Ok);
+        Assert.False(d.Dispatch(P("forget", "quiet")).Ok);
+        Assert.False(d.Dispatch(P("preset", "quiet")).Ok);
+        Assert.Equal("450000", Kept());                                            // deleting a saved one leaves the daily profile
     }
 
     /// <summary>A trial may lower a rail's current limit, where the board request stops at 400 W. The data point
