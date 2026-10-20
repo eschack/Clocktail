@@ -15,6 +15,36 @@ public readonly record struct NvmlMemory(ulong Total, ulong Free, ulong Used);
 public readonly record struct NvmlUtilization(uint Gpu, uint Memory);
 public readonly record struct NvmlPci(uint Domain, uint Bus, uint Device, uint DeviceId, uint SubSystemId, string BusId);
 
+/// <summary>One field of nvmlDeviceGetFieldValues: its own status (0 = read), and the value as its type gives it.</summary>
+public readonly record struct NvmlFieldValue(uint Id, int Status, int Type, ulong Raw)
+{
+    /// <summary>The value by nvmlValueType_t: 0 double, 1 uint, 2 ulong (32-bit on Windows), 3 ulonglong, 4 longlong,
+    /// 5 int, 6 ushort. Null when the field was not read.</summary>
+    public double? Value => Status != 0 ? null : Type switch
+    {
+        0 => BitConverter.Int64BitsToDouble((long)Raw),
+        1 or 2 => (uint)Raw,
+        3 => Raw,
+        4 => (long)Raw,
+        5 => (int)(uint)Raw,
+        6 => (ushort)Raw,
+        _ => null,
+    };
+}
+
+/// <summary>The NVML field ids Clocktail reads (public nvml.h), each read on the reference card (driver 617.42,
+/// 2026-10-20). The policy counters are nanoseconds the clock was held by that reason since the driver loaded; the
+/// instantaneous power is the board's draw now, where nvmlDeviceGetPowerUsage on this card is close to a 1 s average.</summary>
+public static class NvmlField
+{
+    public const uint PowerPolicyNs = 74, ThermalPolicyNs = 75, BoardLimitNs = 77, ReliabilityNs = 79;
+    public const uint PowerAverageMw = 185, PowerInstantMw = 186;
+    public const uint SwThermalSlowdownNs = 269, HwThermalSlowdownNs = 270;
+}
+
+/// <summary>nvmlTemperatureThresholds_t, the ones the 5090 answers (absolute °C: 96, 93, 90 on the reference card).</summary>
+public enum NvmlTemperatureThreshold : uint { Shutdown = 0, Slowdown = 1, GpuMax = 3 }
+
 /// <summary>
 /// Thin, dynamically bound wrapper over nvml.dll.
 /// <para>
@@ -51,6 +81,17 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _fanSpeed;
     private delegate* unmanaged[Cdecl]<nint, ulong*, int> _throttle;
     private delegate* unmanaged[Cdecl]<nint, byte*, uint, int> _vbios;
+    private delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int> _fields;
+    private delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int> _margin;
+    private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _threshold;
+
+    /// <summary>nvmlFieldValue_t: 40 bytes, the value union 8-aligned at +32.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FieldValue { public uint FieldId, ScopeId; public long Timestamp, LatencyUsec; public int ValueType, Return; public ulong Value; }
+
+    /// <summary>nvmlMarginTemperature_v1_t: the version word (size | 1 &lt;&lt; 24), then the margin in °C.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MarginTemperature { public uint Version; public int MarginC; }
 
     public static string Describe(int code) => code switch
     {
@@ -136,6 +177,9 @@ public sealed unsafe class NvmlApi : IDisposable
         _fanSpeed = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetFanSpeed_v2", true);
         _throttle = (delegate* unmanaged[Cdecl]<nint, ulong*, int>)Sym(e, "nvmlDeviceGetCurrentClocksThrottleReasons", true);
         _vbios = (delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)Sym(e, "nvmlDeviceGetVbiosVersion", true);
+        _fields = (delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int>)Sym(e, "nvmlDeviceGetFieldValues", true);
+        _margin = (delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int>)Sym(e, "nvmlDeviceGetMarginTemperature", true);
+        _threshold = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetTemperatureThreshold", true);
     }
 
     /// <summary>Before every call: once lost, fail as the call would have, without entering the library.</summary>
@@ -233,6 +277,34 @@ public sealed unsafe class NvmlApi : IDisposable
         if (_fanSpeed == null || _lost) return null;
         uint v;
         return Seen(_fanSpeed(h, fan, &v)) == 0 ? v : null;
+    }
+
+    /// <summary>Several fields in one call (<see cref="NvmlField"/>); null when this NVML has no field call or the call
+    /// itself failed. Each field carries its own status, and a status that says the driver is gone latches the loss.</summary>
+    public NvmlFieldValue[]? FieldValues(nint h, params uint[] ids)
+    {
+        if (_fields == null || _lost || ids.Length == 0) return null;
+        var v = stackalloc FieldValue[ids.Length];
+        for (int i = 0; i < ids.Length; i++) v[i] = new FieldValue { FieldId = ids[i] };
+        if (Seen(_fields(h, ids.Length, v)) != 0) return null;
+        var result = new NvmlFieldValue[ids.Length];
+        for (int i = 0; i < ids.Length; i++) result[i] = new NvmlFieldValue(v[i].FieldId, Seen(v[i].Return), v[i].ValueType, v[i].Value);
+        return result;
+    }
+
+    /// <summary>How many °C the GPU is under its maximum operating temperature (nvidia-smi's "T.Limit"); null when not answered.</summary>
+    public int? MarginTemperatureC(nint h)
+    {
+        if (_margin == null || _lost) return null;
+        var m = new MarginTemperature { Version = (uint)sizeof(MarginTemperature) | 1u << 24 };
+        return Seen(_margin(h, &m)) == 0 ? m.MarginC : null;
+    }
+
+    public uint? TemperatureThresholdC(nint h, NvmlTemperatureThreshold t)
+    {
+        if (_threshold == null || _lost) return null;
+        uint v;
+        return Seen(_threshold(h, (uint)t, &v)) == 0 ? v : null;
     }
 
     public ulong ThrottleReasons(nint h)

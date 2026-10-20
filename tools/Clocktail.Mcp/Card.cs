@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Clocktail.Core.Gpu;
+using Clocktail.Domain;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Power;
 using Clocktail.Domain.Rails;
@@ -75,15 +76,25 @@ public sealed class Card : IDisposable
     }
 
     /// <summary>A light sample for a stress run's 2 Hz log: telemetry, both rails' present voltage, and each rail's output
-    /// from the power monitor (its channels read once and kept). No curve and no limits: those do not move under load.</summary>
+    /// from the power monitor beside its current limit (the channels and limits read at most every 5 s: a trial can lower a
+    /// limit, nothing else moves them). No curve: it does not move under load.</summary>
     public sealed record Sample(DateTimeOffset At, TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, MonitorReading? NvvddOut, MonitorReading? MsvddOut,
-        IReadOnlyDictionary<int, uint>? ClocksKhz = null)
+        IReadOnlyDictionary<int, uint>? ClocksKhz = null, CurrentLimits? Limits = null)
     {
         /// <summary>A domain's clock from the driver's clock table (AllClocksLayout ids), MHz.</summary>
         public double? Mhz(int domain) => ClocksKhz != null && ClocksKhz.TryGetValue(domain, out var k) ? Math.Round(k / 1000.0) : null;
+
+        /// <summary>The sample as the limiter reads it; <paramref name="peakW"/> is the highest instantaneous board power
+        /// seen since the last sample, where it was watched. Null without NVML's telemetry.</summary>
+        public LimiterReading? Reading(double? peakW = null) => Telemetry is not { } t ? null : new LimiterReading(
+            t.PowerWatts, t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.GraphicsClockMhz, NvvddUv, t.GpuUtilPercent, t.ThrottleReasons,
+            peakW is { } p && (t.PowerInstantWatts is not { } i || p > i) ? p : t.PowerInstantWatts,
+            NvvddOut?.Ma / 1000.0, Limits?.Get(Rail.Nvvdd)?.LimitMa / 1000.0, MsvddOut?.Ma / 1000.0, Limits?.Get(Rail.Msvdd)?.LimitMa / 1000.0);
     }
 
     private CurrentLimits? _monitorLayout;
+    private DateTime _monitorAt;
+    public static readonly TimeSpan MonitorLayoutFor = TimeSpan.FromSeconds(5);
 
     public Sample ReadSample()
     {
@@ -102,7 +113,11 @@ public sealed class Card : IDisposable
             MonitorReading? nvvddOut = null, msvddOut = null;
             try
             {
-                _monitorLayout ??= CurrentLimitsReader.Read(_hw, _session);
+                if (_monitorLayout == null || DateTime.UtcNow - _monitorAt > MonitorLayoutFor)
+                {
+                    _monitorLayout = CurrentLimitsReader.Read(_hw, _session);
+                    _monitorAt = DateTime.UtcNow;
+                }
                 var readings = CurrentLimitsReader.Monitor(_hw, _session, _monitorLayout.Channels);
                 nvvddOut = _monitorLayout.Output(Rail.Nvvdd, readings);
                 msvddOut = _monitorLayout.Output(Rail.Msvdd, readings);
@@ -110,8 +125,24 @@ public sealed class Card : IDisposable
             catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
             IReadOnlyDictionary<int, uint>? clocks = null;
             try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (InvalidOperationException) { }
-            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks);
+            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks, _monitorLayout);
         }
+    }
+
+    /// <summary>The highest instantaneous board power over <paramref name="span"/>, read every 20 ms (NVML's instant field:
+    /// the wall answers peaks a 1 s average hides); null when NVML does not give it.</summary>
+    public double? PeakInstantW(TimeSpan span)
+    {
+        var until = DateTime.UtcNow + span;
+        double? peak = null;
+        do
+        {
+            lock (_lane)
+                if (_mgr.Nvml != null && _gpu.HasNvml && _mgr.Nvml.FieldValues(_gpu.NvmlHandle, NvmlField.PowerInstantMw)?[0].Value is { } mw)
+                    peak = Math.Max(peak ?? 0, mw / 1000.0);
+            Thread.Sleep(20);
+        } while (DateTime.UtcNow < until);
+        return peak;
     }
 
     /// <summary>The lightest look, for the residency sampler: NVVDD's present voltage, core clock, utilization, board W.</summary>

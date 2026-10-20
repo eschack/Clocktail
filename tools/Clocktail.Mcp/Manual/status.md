@@ -15,8 +15,9 @@ Everything Clocktail can write, as it is on the card now, next to stock and the 
 
 ## limiter: naming what holds the clock
 The firmware climbs the curve and stops at the first limit; each leaves a trace:
-- **Power wall**: board power within 10 W of the wall.
-- **Power sub-policy**: NVML says `sw_power_cap` but the board is far from the wall. A rail or sub-policy hit its limit first. Memory-heavy work sets it the whole time at 336-361 W on a 575-600 W wall; that is normal.
+- **Power wall** (`power_wall`): board power within 10 W of the wall, or `sw_power_cap` with the instantaneous power peaking within 15 W of it. The limiter watches the instantaneous power every 20 ms between its samples (`peak_w`), because the wall answers peaks (below).
+- **Current limit** (`current_limit`): `sw_power_cap` with NVVDD or MSVDD drawing within 3 % of its current limit (`nvvdd_a` against `nvvdd_limit_a`). NVIDIA's own limits (600 A, 180 A) are far away on a 5090; a trial's lowered limit is the usual cause.
+- **Power sub-policy** (`power_policy`): `sw_power_cap` with none of those. Memory-heavy work sets it the whole time at 336-361 W on a 575-600 W wall; that is normal.
 - **Voltage limit**: NVVDD within 12.5 mV of MAX. The firmware parks one step under MAX; under the wall it would sit 55-75 mV lower, so the two are easy to tell apart. NVML's "reliability voltage" bit alone means nothing on a 5090: it is set even at idle.
 - **Curve cap**: the clock is at the curve's highest point below MAX (within 15 MHz). Only a tuned curve has this; a stock curve that runs out is a voltage limit.
 - **Thermal / hardware slowdown**: only from NVML's own reasons. Never seen on the reference card.
@@ -26,7 +27,7 @@ The firmware climbs the curve and stops at the first limit; each leaves a trace:
 ## Quirks that mislead
 - **`gpu_idle` at full load**: on a curve with a flat top, NVML reports `gpu_idle` on almost every sample at 280-410 W and 100 % utilization. Never call a card idle from that bit alone. A hung GPU also reports it.
 - **`sw_power_cap` far below the wall**: see sub-policy above. Read `power_w` against `power_limit_w`, not the bit.
-- **The wall tracks short peaks**, not the 1 s average: a game can sit at 516-566 W average on a 600 W wall and still be wall-limited (10 Hz samples: median 552 W, p90 588 W, max 593 W). nvgwls full load is flat, so there average equals peak.
+- **The wall tracks short peaks**, not the 1 s average: a game can sit at 516-566 W average on a 600 W wall and still be wall-limited (10 Hz samples: median 552 W, p90 588 W, max 593 W). nvgwls full load is flat, so there average equals peak (600 W average, peaks 598-604 W). The limiter counts the peaks, so it calls that game the wall, not a sub-policy.
 - **NVML's max graphics clock (3090 MHz) is not a limit**; tuned cards run past it.
 - **NVML's memory offset reads double** the real P0 offset (+358 shows as +716).
 - **Game overlays show a lower clock than the curve** under a tight wall (very fast power throttling), but the voltage still follows the curve point, so stability is a property of the point, not of the overlay's number.

@@ -10,9 +10,9 @@ namespace Clocktail.Tests.Hw;
 /// </summary>
 internal static unsafe class FakeNvml
 {
-    public static int Answer, Calls, Shutdowns;
+    public static int Answer, Calls, Shutdowns, FieldAnswer;
 
-    public static void Reset() { Answer = 0; Calls = 0; Shutdowns = 0; }
+    public static void Reset() { Answer = 0; Calls = 0; Shutdowns = 0; FieldAnswer = 0; }
 
     public static NvmlApi Open() => NvmlApi.FromExports(name => name switch
     {
@@ -29,7 +29,8 @@ internal static unsafe class FakeNvml
             => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Value,
         "nvmlDeviceGetUtilizationRates" or "nvmlDeviceGetMemoryInfo" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Pair,
         "nvmlDeviceGetPowerManagementLimitConstraints" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, uint*, int>)&TwoValues,
-        "nvmlDeviceSetPowerManagementLimit" => (nint)(delegate* unmanaged[Cdecl]<nint, uint, int>)&SetValue,
+        "nvmlDeviceGetFieldValues" => (nint)(delegate* unmanaged[Cdecl]<nint, int, byte*, int>)&Fields,
+        "nvmlDeviceGetMarginTemperature" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Margin,
         "nvmlDeviceGetCurrentClocksThrottleReasons" => (nint)(delegate* unmanaged[Cdecl]<nint, ulong*, int>)&Reasons,
         _ => 0,
     });
@@ -44,7 +45,24 @@ internal static unsafe class FakeNvml
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Value(nint h, uint* v) { Calls++; *v = 1; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pair(nint h, uint* v) { Calls++; v[0] = 100; v[1] = 50; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int TwoValues(nint h, uint* a, uint* b) { Calls++; *a = 400_000; *b = 600_000; return Answer; }
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int SetValue(nint h, uint v) { Calls++; return Answer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Margin(nint h, uint* m) { Calls++; m[1] = 39; return Answer; }
+
+    /// <summary>nvmlFieldValue_t as the 5090 answered (40 bytes each): instantaneous power as a uint in mW, a policy
+    /// counter as an unsigned long long in ns, each field with <see cref="FieldAnswer"/> as its own status.</summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static int Fields(nint h, int n, byte* v)
+    {
+        Calls++;
+        for (int i = 0; i < n; i++)
+        {
+            byte* e = v + i * 40;
+            bool power = *(uint*)e == NvmlField.PowerInstantMw;
+            *(int*)(e + 24) = power ? 1 : 3;
+            *(int*)(e + 28) = FieldAnswer;
+            *(ulong*)(e + 32) = power ? 48_102ul : 927_153_308_736ul;
+        }
+        return Answer;
+    }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Reasons(nint h, ulong* v) { Calls++; *v = 0x4; return Answer; }
 }
 
@@ -99,6 +117,28 @@ public sealed class NvmlApiTests : IDisposable
 
         nvml.Dispose();
         Assert.Equal(0, FakeNvml.Shutdowns);
+    }
+
+    [Fact]
+    public void Field_values_come_back_by_their_type_and_a_field_that_says_lost_latches()
+    {
+        var nvml = FakeNvml.Open();
+        var v = nvml.FieldValues(H, NvmlField.PowerInstantMw, NvmlField.PowerPolicyNs)!;
+        Assert.Equal(48_102.0, v[0].Value);
+        Assert.Equal(927_153_308_736.0, v[1].Value);
+        Assert.Equal(39, nvml.MarginTemperatureC(H));
+
+        FakeNvml.FieldAnswer = 3;   // one field not supported: that field is unread, nothing latches
+        Assert.Null(nvml.FieldValues(H, NvmlField.PowerInstantMw)![0].Value);
+        Assert.False(nvml.Lost);
+
+        FakeNvml.FieldAnswer = NvmlApi.GpuIsLost;
+        Assert.Null(nvml.FieldValues(H, NvmlField.PowerInstantMw)![0].Value);
+        Assert.True(nvml.Lost);
+        int calls = FakeNvml.Calls;
+        Assert.Null(nvml.FieldValues(H, NvmlField.PowerInstantMw));
+        Assert.Null(nvml.MarginTemperatureC(H));
+        Assert.Equal(calls, FakeNvml.Calls);
     }
 
     [Fact]

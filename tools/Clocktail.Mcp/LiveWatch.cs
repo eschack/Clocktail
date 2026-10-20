@@ -317,7 +317,7 @@ public sealed class LiveWatch(Card card) : IDisposable
 
     private static Point ToPoint(Card.Sample s, TelemetrySnapshot t, VfCurveSnapshot? curve, uint? maxUv)
     {
-        var reading = new LimiterReading(t.PowerWatts, t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.GraphicsClockMhz, s.NvvddUv, t.GpuUtilPercent, t.ThrottleReasons);
+        var reading = s.Reading()!;
         var top = curve == null ? null : Limiter.CurveTop(curve.Points, maxUv);
         int? point = s.NvvddUv is { } uv && curve is { Points.Count: > 0 } c ? c.Points.MinBy(x => Math.Abs((long)x.VoltageUv - uv))!.Index : null;
         return new Point(s.At, t.GraphicsClockMhz, s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, s.Mhz(AllClocksLayout.Xbar), t.PowerWatts,

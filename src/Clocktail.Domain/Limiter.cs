@@ -3,20 +3,27 @@ using Clocktail.Domain.Vf;
 namespace Clocktail.Domain;
 
 /// <summary>What holds the core clock now (the tray's main readout).</summary>
-public enum ClockLimit { Idle, None, Power, PowerPolicy, Voltage, Curve, Thermal, Hardware }
+public enum ClockLimit { Idle, None, Power, PowerPolicy, Voltage, Curve, Thermal, Hardware, Current }
 
 /// <summary>One look at the card, as much of it as the classification needs: board watts and the limit in force (NVML's
 /// enforced one), the core clock, NVVDD's present voltage, utilization and NVML's limit reasons by name
-/// (<c>Telemetry</c>'s: gpu_idle, sw_power_cap, reliability_voltage, ...).</summary>
-public sealed record LimiterReading(double? BoardW, double? LimitW, uint? ClockMhz, uint? NvvddUv, uint? UtilPct, IReadOnlyList<string> Reasons);
+/// (<c>Telemetry</c>'s: gpu_idle, sw_power_cap, reliability_voltage, ...); and, where read, the highest instantaneous board
+/// power since the last look and each rail's output current beside its current limit.</summary>
+public sealed record LimiterReading(double? BoardW, double? LimitW, uint? ClockMhz, uint? NvvddUv, uint? UtilPct, IReadOnlyList<string> Reasons,
+    double? PeakW = null, double? NvvddA = null, double? NvvddLimitA = null, double? MsvddA = null, double? MsvddLimitA = null);
 
 /// <summary>
 /// Which limit holds the clock, from one reading. The firmware climbs the V/F curve until the first limit stops it, so
 /// at most a few are in force at once, and each leaves its own mark:
 /// <list type="bullet">
-/// <item>The power wall: board watts at the enforced limit (within 10 W, the regulator's band).</item>
-/// <item>A power sub-policy: NVML's sw_power_cap with the board well under the wall. The memory phase sets it at
-/// 336-361 W under a 575/598 W wall (stability runs, 2026-10-18), so the bit alone is not the wall.</item>
+/// <item>The power wall: board watts at the enforced limit (within 10 W, the regulator's band); or NVML's sw_power_cap
+/// with the instantaneous power peaking at the wall (within 15 W). The wall answers short peaks: a game's 1 s average
+/// sat 30-60 W under a 600 W wall (Kingdom Come 2: instantaneous median 552 W, p90 588, max 593, sw_power_cap 83 % of the
+/// time; Speed Way 538 W), and that is still the wall holding.</item>
+/// <item>A rail's current limit: NVVDD or MSVDD drawing within 3 % of its current limit with sw_power_cap set (NVML sets
+/// the same bit for it; current regulation holds 1-2 % under the limit, measured).</item>
+/// <item>A power sub-policy: NVML's sw_power_cap with neither of those. The memory phase sets it at 336-361 W under a
+/// 575/598 W wall (stability runs, 2026-10-18), so the bit alone is not the wall.</item>
 /// <item>The voltage limit: NVVDD within two steps (12.5 mV) of MAX. When the top holds the firmware settles one step
 /// under MAX; under the wall the card sits 55-75 mV under (drill 20), so the two do not blur. The driver's reason bit
 /// 0x400 (reliability_voltage) counts only when NVVDD or MAX is unread: the 5090 sets it at idle, 290 mV under MAX
@@ -31,6 +38,10 @@ public sealed record LimiterReading(double? BoardW, double? LimitW, uint? ClockM
 public static class Limiter
 {
     public const double WallBandW = 10;
+    /// <summary>An instantaneous peak this close to the limit, with sw_power_cap set, is the wall at work.</summary>
+    public const double PeakBandW = 15;
+    /// <summary>A rail drawing within this fraction of its current limit is held by it.</summary>
+    public const double CurrentBand = 0.03;
     public const uint TopBandUv = 12_500;
     /// <summary>One step of the curve: a clock this close to the curve's top is at it.</summary>
     public const uint CurveBandKhz = 15_000;
@@ -43,9 +54,14 @@ public static class Limiter
         r.BoardW is < IdleW || r.Reasons.Contains("gpu_idle") && r.UtilPct is < IdleUtilPercent;
 
     public static bool PowerHolds(LimiterReading r) =>
-        r.BoardW is { } w && r.LimitW is { } l && w >= l - WallBandW;
+        r.LimitW is { } l && (r.BoardW is { } w && w >= l - WallBandW || r.Reasons.Contains("sw_power_cap") && r.PeakW is { } p && p >= l - PeakBandW);
 
-    public static bool PowerPolicyHolds(LimiterReading r) => r.Reasons.Contains("sw_power_cap") && !PowerHolds(r);
+    public static bool CurrentHolds(LimiterReading r) =>
+        r.Reasons.Contains("sw_power_cap") && (Near(r.NvvddA, r.NvvddLimitA) || Near(r.MsvddA, r.MsvddLimitA));
+
+    private static bool Near(double? a, double? limit) => a is { } x && limit is { } l && l > 0 && x >= l * (1 - CurrentBand);
+
+    public static bool PowerPolicyHolds(LimiterReading r) => r.Reasons.Contains("sw_power_cap") && !PowerHolds(r) && !CurrentHolds(r);
 
     public static bool TopHolds(LimiterReading r, uint? maxUv) =>
         maxUv is { } m && r.NvvddUv is { } uv ? (long)uv + TopBandUv >= m : r.Reasons.Contains("reliability_voltage");
@@ -81,7 +97,8 @@ public static class Limiter
         if (Idle(r)) return [ClockLimit.Idle];
         var held = new List<ClockLimit>();
         if (PowerHolds(r)) held.Add(ClockLimit.Power);
-        else if (PowerPolicyHolds(r)) held.Add(ClockLimit.PowerPolicy);
+        if (CurrentHolds(r)) held.Add(ClockLimit.Current);
+        if (PowerPolicyHolds(r)) held.Add(ClockLimit.PowerPolicy);
         if (TopHolds(r, maxUv)) held.Add(ClockLimit.Voltage);
         else if (CurveHolds(r, curveTopKhz)) held.Add(ClockLimit.Curve);
         if (ThermalHolds(r)) held.Add(ClockLimit.Thermal);
@@ -115,6 +132,7 @@ public static class Limiter
         ClockLimit.Voltage => "voltage_limit",
         ClockLimit.Curve => "curve_cap",
         ClockLimit.Thermal => "thermal",
+        ClockLimit.Current => "current_limit",
         _ => "hardware_slowdown",
     };
 
@@ -123,8 +141,9 @@ public static class Limiter
     {
         ClockLimit.Idle => "The card is idle (under 120 W, or NVML's gpu_idle at under 10 % utilization): no limit decides the clock.",
         ClockLimit.None => "The card is loaded but under every limit: the load asks for less than the limits allow (CPU-bound, a frame cap, a light scene).",
-        ClockLimit.Power => "Board power is at the power limit (within 10 W): the card climbs the curve only as far as the watts allow; less voltage per MHz (or a higher limit) buys clock.",
-        ClockLimit.PowerPolicy => "NVML reports sw_power_cap with the board far under its power limit: a power sub-policy, not the wall, holds the clock (seen in memory-heavy phases).",
+        ClockLimit.Power => "Board power is at the power limit (its average within 10 W, or its instantaneous peaks within 15 W with NVML's power cap set): the card climbs the curve only as far as the watts allow; less voltage per MHz (or a higher limit) buys clock.",
+        ClockLimit.Current => "A rail draws within 3 % of its current limit with NVML's power cap set: the current limit, not the board wall, holds the clock (NVIDIA's own on a 5090: NVVDD 600 A, MSVDD 180 A, unless a trial lowered it).",
+        ClockLimit.PowerPolicy => "NVML reports sw_power_cap with the board far under its power limit, no peak at it and no rail at its current limit: a power sub-policy holds the clock (seen in memory-heavy phases).",
         ClockLimit.Voltage => "NVVDD is within two steps (12.5 mV) of its MAX: the curve cannot climb higher; more clock needs a higher curve at the top voltage.",
         ClockLimit.Curve => "The clock is at the highest frequency the V/F curve reaches below MAX: the curve's own top (a flat top) holds it; raising the top points would let it climb.",
         ClockLimit.Thermal => "NVML reports a thermal slowdown: temperature holds the clock.",

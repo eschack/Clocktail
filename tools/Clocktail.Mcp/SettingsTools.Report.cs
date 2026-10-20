@@ -223,10 +223,11 @@ public sealed partial class SettingsTools
             rows.Add(new("📈", "Core", "", mv is { } v ? $"{F(c)} MHz @ {F(v)} mV" : $"{F(c)} MHz", "", mv > max + 0.5 ? Look : Safe,
                 max is { } m ? $"voltage limit {F(m)} mV" : ""));
         if (Str(l, "limiter") is { } id)
-            rows.Add(new(id switch { "power_wall" => "⚡", "thermal" => "🌡️", "idle" => "💤", "curve_cap" => "📈", "voltage_limit" => "🔌", _ => "🧭" },
+            rows.Add(new(id switch { "power_wall" => "⚡", "current_limit" => "🔋", "thermal" => "🌡️", "idle" => "💤", "curve_cap" => "📈", "voltage_limit" => "🔌", _ => "🧭" },
                 "Holding the clock", "", id switch
                 {
                     "power_wall" => "the power limit",
+                    "current_limit" => "a rail's current limit",
                     "power_policy" => "a power sub-limit",
                     "voltage_limit" => "the voltage limit",
                     "curve_cap" => "the top of the V/F curve",

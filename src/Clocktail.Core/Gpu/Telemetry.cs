@@ -20,7 +20,33 @@ public sealed record TelemetrySnapshot(
     ulong? VramTotalBytes,
     ulong? VramUsedBytes,
     IReadOnlyList<uint> FanPercent,
-    IReadOnlyList<string> ThrottleReasons);
+    IReadOnlyList<string> ThrottleReasons,
+    double? PowerInstantWatts = null,
+    int? TempMarginC = null);
+
+/// <summary>
+/// NVML's cumulative time-in-limit counters at one moment, nanoseconds since the driver loaded. Two of them give the share
+/// of the time between that each reason held the clock, with nothing missed between samples (a 2-4 Hz look at the reason
+/// bits can miss a short cap). Power is NVML's power policy: the board wall and the rails' current limits alike set it.
+/// </summary>
+public sealed record LimitCounters(DateTimeOffset At, ulong? PowerNs, ulong? ThermalNs, ulong? SwThermalNs, ulong? HwThermalNs, ulong? ReliabilityNs)
+{
+    /// <summary>The percentage of the time from <paramref name="start"/> to this one each counter ran, rounded to 0.1;
+    /// null for a counter missing at either end (or one that went backwards: the driver restarted).</summary>
+    public IReadOnlyDictionary<string, double?> SharesSince(LimitCounters start)
+    {
+        double ns = (At - start.At).Ticks * 100.0;
+        double? Share(ulong? a, ulong? b) => a is { } x && b is { } y && y >= x && ns > 0 ? Math.Round(Math.Min(100, (y - x) / ns * 100), 1) : null;
+        return new Dictionary<string, double?>
+        {
+            ["power_capped_pct"] = Share(start.PowerNs, PowerNs),
+            ["thermal_policy_pct"] = Share(start.ThermalNs, ThermalNs),
+            ["sw_thermal_slowdown_pct"] = Share(start.SwThermalNs, SwThermalNs),
+            ["hw_thermal_slowdown_pct"] = Share(start.HwThermalNs, HwThermalNs),
+            ["reliability_pct"] = Share(start.ReliabilityNs, ReliabilityNs),
+        };
+    }
+}
 
 public static class Telemetry
 {
@@ -55,6 +81,7 @@ public static class Telemetry
         var names = Reasons.Where(r => (tr & r.Bit) != 0).Select(r => r.Name).ToList();
 
         static double? W(uint? mw) => mw == null ? null : mw.Value / 1000.0;
+        var instant = nvml.FieldValues(h, NvmlField.PowerInstantMw)?[0].Value;
         return new TelemetrySnapshot(
             Try(() => (double)nvml.TemperatureC(h)),
             W(Try(() => nvml.PowerUsageMw(h))),
@@ -67,6 +94,18 @@ public static class Telemetry
             Try(() => nvml.ClockMhz(h, NvmlClock.Memory)),
             Try(() => nvml.MaxClockMhz(h, NvmlClock.Graphics)),
             Try(() => nvml.MaxClockMhz(h, NvmlClock.Memory)),
-            util?.Gpu, util?.Memory, mem?.Total, mem?.Used, fans, names);
+            util?.Gpu, util?.Memory, mem?.Total, mem?.Used, fans, names,
+            instant / 1000.0, nvml.MarginTemperatureC(h));
+    }
+
+    /// <summary>The time-in-limit counters now; null when this NVML has no field call.</summary>
+    public static LimitCounters? Counters(GpuDevice gpu, NvmlApi nvml)
+    {
+        if (!gpu.HasNvml) return null;
+        var v = nvml.FieldValues(gpu.NvmlHandle, NvmlField.PowerPolicyNs, NvmlField.ThermalPolicyNs, NvmlField.SwThermalSlowdownNs,
+            NvmlField.HwThermalSlowdownNs, NvmlField.ReliabilityNs);
+        if (v == null) return null;
+        ulong? Ns(int i) => v[i].Status != 0 ? null : v[i].Type == 3 ? v[i].Raw : v[i].Value is { } d ? (ulong)d : null;   // ns as 64-bit, no double rounding
+        return new LimitCounters(DateTimeOffset.UtcNow, Ns(0), Ns(1), Ns(2), Ns(3), Ns(4));
     }
 }

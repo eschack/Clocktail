@@ -97,6 +97,31 @@ public sealed class LimiterTests
     }
 
     [Fact]
+    public void Sw_power_cap_with_instantaneous_peaks_at_the_wall_is_the_wall()
+    {
+        // Kingdom Come 2 under a 600 W wall: a 552 W average, instantaneous peaks to 593 W, sw_power_cap set.
+        var game = new LimiterReading(552, 600, 2_900, 960_000, 99, ["sw_power_cap"], PeakW: 593);
+        Assert.Equal([ClockLimit.Power], Limiter.Holding(game, Max, Top(Curve())));
+        // The same average with peaks well under the wall stays a sub-policy; and without sw_power_cap a peak means nothing.
+        Assert.Equal([ClockLimit.PowerPolicy], Limiter.Holding(game with { PeakW = 560 }, Max, Top(Curve())));
+        Assert.Equal([ClockLimit.None], Limiter.Holding(game with { Reasons = [] }, Max, Top(Curve())));
+    }
+
+    [Fact]
+    public void A_rail_at_its_current_limit_is_the_current_limit_not_a_sub_policy()
+    {
+        // A trial's NVVDD limit of 300 A: the rail regulates 1-2 % under it, the board far under the wall.
+        var r = new LimiterReading(420, Wall, 2_600, 900_000, 99, ["sw_power_cap"], NvvddA: 296, NvvddLimitA: 300, MsvddA: 40, MsvddLimitA: 180);
+        Assert.Equal([ClockLimit.Current], Limiter.Holding(r, Max, Top(Curve())));
+        Assert.Equal("current_limit", Limiter.Key(Limiter.Holding(r, Max, Top(Curve()))));
+        // 10 % under the limit is not at it; without the cap bit the current alone is not taken for a limit.
+        Assert.Equal([ClockLimit.PowerPolicy], Limiter.Holding(r with { NvvddA = 270 }, Max, Top(Curve())));
+        Assert.Equal([ClockLimit.None], Limiter.Holding(r with { Reasons = [] }, Max, Top(Curve())));
+        // At the wall and at a current limit at once: both, the wall first.
+        Assert.Equal([ClockLimit.Power, ClockLimit.Current], Limiter.Holding(r with { BoardW = 595 }, Max, Top(Curve())));
+    }
+
+    [Fact]
     public void The_reliability_voltage_reason_counts_only_when_the_voltage_is_unread()
     {
         // The 5090 sets it at idle, far under MAX: with NVVDD and MAX read, the voltage decides.

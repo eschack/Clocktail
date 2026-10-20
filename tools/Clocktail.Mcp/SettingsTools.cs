@@ -96,9 +96,11 @@ public sealed partial class SettingsTools(Card card)
     });
 
     [McpServerTool(Name = "limiter"), Description(
-        "What holds the core clock back right now, judged on 5 samples 200 ms apart (the verdict most of them agree on): " +
-        "power_wall (board power within 10 W of the limit in force), power_policy (NVML's sw_power_cap with the board far " +
-        "under the wall: a sub-policy, not the wall), voltage_limit (NVVDD within 12.5 mV of its MAX; the driver's " +
+        "What holds the core clock back right now, judged on 5 samples 200 ms apart (the verdict most of them agree on), the " +
+        "instantaneous power watched every 20 ms between them: power_wall (board power within 10 W of the limit in force, or " +
+        "sw_power_cap with instantaneous peaks within 15 W of it: the wall answers short peaks, so a game's average can sit " +
+        "30-60 W under it), current_limit (sw_power_cap with NVVDD or MSVDD drawing within 3 % of its current limit), " +
+        "power_policy (sw_power_cap with none of those: a sub-policy), voltage_limit (NVVDD within 12.5 mV of its MAX; the driver's " +
         "reliability_voltage reason only when NVVDD is unread, since a 5090 sets it at idle), curve_cap (the clock within 15 MHz of the highest frequency the V/F curve reaches " +
         "below MAX: the curve's own top), thermal and hardware_slowdown (NVML's own reasons), idle (under 120 W, or gpu_idle " +
         "at under 10 % utilization) or no_limit (loaded, nothing reached: the load asks for less). Several can hold at once " +
@@ -113,10 +115,9 @@ public sealed partial class SettingsTools(Card card)
         var samples = new List<(Card.Sample S, LimiterReading R, IReadOnlyList<ClockLimit> Held)>();
         for (int i = 0; i < LimiterSamples; i++)
         {
-            if (i > 0) Thread.Sleep(LimiterGap);
+            double? peak = card.PeakInstantW(LimiterGap);   // the gap is watched: the wall answers peaks the average hides
             var s = card.ReadSample();
-            if (s.Telemetry is not { } t) continue;
-            var r = new LimiterReading(t.PowerWatts, t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.GraphicsClockMhz, s.NvvddUv, t.GpuUtilPercent, t.ThrottleReasons);
+            if (s.Reading(peak) is not { } r) continue;
             samples.Add((s, r, Limiter.Holding(r, max, top?.EffectiveKhz)));
         }
         var verdict = Limiter.Majority(samples.Select(x => x.Held).ToList())
@@ -138,6 +139,12 @@ public sealed partial class SettingsTools(Card card)
                 board_w = board,
                 power_limit_w = limit,
                 power_headroom_w = R(limit - board),
+                peak_w = R(behind.Max(x => x.R.PeakW)),
+                peak_headroom_w = R(limit - behind.Max(x => x.R.PeakW)),
+                nvvdd_a = Median(behind.Select(x => x.R.NvvddA)),
+                nvvdd_limit_a = Median(behind.Select(x => x.R.NvvddLimitA)),
+                msvdd_a = Median(behind.Select(x => x.R.MsvddA)),
+                msvdd_limit_a = Median(behind.Select(x => x.R.MsvddLimitA)),
                 nvvdd_mv = nvvdd,
                 nvvdd_max_mv = maxMv,
                 nvvdd_below_max_mv = R(maxMv - nvvdd),
@@ -153,6 +160,7 @@ public sealed partial class SettingsTools(Card card)
             {
                 verdict = Limiter.Key(x.Held),
                 board_w = R(x.R.BoardW),
+                peak_w = R(x.R.PeakW),
                 nvvdd_mv = x.R.NvvddUv / 1000.0,
                 clock_mhz = x.R.ClockMhz,
                 util_pct = x.R.UtilPct,
