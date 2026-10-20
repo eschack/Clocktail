@@ -44,6 +44,8 @@ public sealed partial class SettingsTools
         "this card (or the range measured on the reference card), so nothing strains the hardware; ⚠️ outside them, worth a " +
         "look; ⛔ act now; ℹ️ information. Safety, not stability: whether it holds in every game is what stress_test and play " +
         "decide. Show 'table' to the person exactly as it is (Markdown with emoji), then add one or two sentences of your own. " +
+        "Between the two tables is the V/F curve drawn in Braille dots like btop (a code block, monochrome): the curve now " +
+        "solid, stock dotted, ● where the card runs now; show it as it is too. " +
         "Run it with a game or stress test loaded for meaningful live rows; idle is fine for the settings. Its last row is " +
         "Clocktail's own version: when a newer one is out (update_available), tell the person and how to update.")]
     public string CardReport() => Guard(() =>
@@ -69,6 +71,7 @@ public sealed partial class SettingsTools
             live.Add(new("🧪", "Tested on", "", $"driver {driver}, VBIOS {Str(s, "vbios")}", "", Info, tested));
         var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
         live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
+        var chart = CurveChart(s, l);
         var all = rows.Concat(live).ToList();
         var act = all.Where(r => r.Mark == Act).ToList();
         var look = all.Where(r => r.Mark == Look).ToList();
@@ -84,7 +87,8 @@ public sealed partial class SettingsTools
             settings = rows.Select(Plain),
             live = live.Select(Plain),
             update_available = newer,
-            table = Table(Str(s, "gpu") ?? "GPU", rows, live, verdict),
+            vf_chart = chart.Count == 0 ? null : string.Join('\n', chart),
+            table = Table(Str(s, "gpu") ?? "GPU", rows, chart, live, verdict),
         });
     });
 
@@ -345,7 +349,31 @@ public sealed partial class SettingsTools
         return off;
     }
 
-    private static string Table(string gpu, List<ReportRow> rows, List<ReportRow> live, string verdict)
+    /// <summary>
+    /// The V/F curve as text (<see cref="VfChart"/>): now solid, stock dotted, ● where the card runs, under a legend line.
+    /// Empty when the curve cannot be read; the settings row says so then.
+    /// </summary>
+    private List<string> CurveChart(JsonElement s, JsonElement l)
+    {
+        VfCurveSnapshot curve;
+        try { curve = card.WithDriver(VfReader.Read); }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return []; }
+        var now = curve.Points.Select(p => (p.VoltageUv / 1000.0, p.EffectiveKhz / 1000.0)).ToList();
+        var stock = curve.Points.Select(p => (p.VoltageUv / 1000.0, p.BaseKhz / 1000.0)).ToList();
+        double? max = Num(s, "vf_curve", "nvvdd_max_mv");
+        double? clock = Num(l, "readings", "clock_mhz"), mv = Num(l, "readings", "nvvdd_mv");
+        (double, double)? at = clock is { } c && mv is { } v ? (v, c) : null;
+        var lines = VfChart.Draw(now, stock, at, max).ToList();
+        if (lines.Count == 0) return lines;
+        var (x0, x1, y0, y1) = VfChart.Bounds(now, stock, max);
+        string where = at is not { } a ? "" : VfChart.Contains(a, x0, x1, y0, y1)
+            ? $"   {VfChart.Running} running {F(a.Item2)} MHz @ {F(a.Item1)} mV"
+            : $"   {VfChart.Running} running {F(a.Item2)} MHz @ {F(a.Item1)} mV, off the chart{(a.Item2 < y0 ? ": below the curve, as at idle or light load" : "")}";
+        lines.Insert(0, $"V/F curve   ⣀⣀ now   ⠁⠈ stock{where}");
+        return lines;
+    }
+
+    private static string Table(string gpu, List<ReportRow> rows, List<string> chart, List<ReportRow> live, string verdict)
     {
         var b = new StringBuilder();
         b.AppendLine($"### 🩺 Card report · {gpu}");
@@ -354,6 +382,13 @@ public sealed partial class SettingsTools
         b.AppendLine("|---|---|---|---|---|---|---|");
         foreach (var r in rows) b.AppendLine($"| {r.Icon} | {r.Name} | {r.Original} | {r.Now} | {r.Change} | {r.Mark} | {r.Note} |");
         b.AppendLine();
+        if (chart.Count > 0)
+        {
+            b.AppendLine("```text");
+            foreach (var line in chart) b.AppendLine(line);
+            b.AppendLine("```");
+            b.AppendLine();
+        }
         b.AppendLine("| | Right now | | Safe | Note |");
         b.AppendLine("|---|---|---|---|---|");
         foreach (var r in live) b.AppendLine($"| {r.Icon} | {r.Name} | {r.Now} | {r.Mark} | {r.Note} |");

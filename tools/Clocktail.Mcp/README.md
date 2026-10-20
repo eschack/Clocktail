@@ -10,7 +10,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 
 | Tool | What |
 |---|---|
-| `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict. |
+| `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). |
 | `manual` | The agent's manual: the method phase by phase and why, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
 | `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM. |
