@@ -94,4 +94,17 @@ public class DriverResetResponderTests
         r.ApplyAtStart([]);
         Assert.Contains("daily profile at start: failed", _log[^1]);
     }
+
+    [Fact]
+    public void Waking_up_asks_for_the_profile_once_the_GPU_is_idle()
+    {
+        var busy = new Queue<bool>([false, true, true, true]);
+        var r = new DriverResetResponder(req => { _profile.Add(req); return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true, skipped = "a trial is in force: the agent running it decides" })); },
+            ["gpu-A"], _log.Add, () => _now, t => _now += t, _ => busy.Count == 0 || busy.Dequeue());
+        r.AfterSleep("Kernel-Power 107");
+        Assert.Equal("resume", _profile.Single().Kind);
+        Assert.Equal("Kernel-Power 107", _profile.Single().Value);
+        Assert.Empty(busy);   // it waited for three idle looks first
+        Assert.Contains("after waking up: not applied: a trial is in force", _log[^1]);
+    }
 }

@@ -17,7 +17,8 @@ const LOCAL = process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local');
 const INSTALL_DIR = path.join(LOCAL, 'Programs', 'Clocktail');
 const STATE_DIR = path.join(LOCAL, 'Clocktail');
 const DIST = path.join(__dirname, '..', 'dist');
-const FILES = ['clocktail-mcp.exe', 'Clocktail.Broker.exe'];
+// PresentMon (Intel, MIT) is the service's frame-rate capture; its licence files go with it.
+const FILES = ['clocktail-mcp.exe', 'Clocktail.Broker.exe', 'PresentMon.exe', 'PresentMon-LICENSE.txt', 'PresentMon-THIRD_PARTY.txt'];
 const SERVER = path.join(INSTALL_DIR, 'clocktail-mcp.exe');
 const BROKER = path.join(INSTALL_DIR, 'Clocktail.Broker.exe');
 const NAME = 'clocktail';

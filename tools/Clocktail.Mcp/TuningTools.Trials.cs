@@ -163,14 +163,18 @@ public sealed partial class TuningTools
         "Sample the card for a stretch while the person plays (twice a second) and summarize it: p10/p50/p90 of the core clock, " +
         "NVVDD, MSVDD, XBAR, board power and temperature over the samples under load (50 %+ utilization and 120 W+: menus and " +
         "loading screens are left out), how much of the time it sat on the wall, the curve point it ran on, and NVML's limit " +
-        "reasons. This is how a game run is judged: its p90 clock at its voltage against what stress_test passed there (games " +
+        "reasons; and the game's frame rate over the same stretch (average, 1 % and 0.1 % lows, frame times; through the " +
+        "service's PresentMon capture, nothing injected into the game), so a change is judged on frames, not only clocks. " +
+        "This is how a game run is judged: its p90 clock at its voltage against what stress_test passed there (games " +
         "need 30-60 MHz more margin). The summary goes into the tuning log. Blocks for the stretch; 60-300 s is typical.")]
     public string Watch(
         [Description("How long to sample, seconds (10..600; default 120).")] int seconds = 120,
-        [Description("What is being played (game, scene, settings), for the log.")] string? note = null) => Guard(() =>
+        [Description("What is being played (game, scene, settings), for the log.")] string? note = null,
+        [Description("The game's process name for the frame rate (e.g. \"Cyberpunk2077\"); omit for the application that drew the most frames.")] string? process = null) => Guard(() =>
     {
         if (seconds < 10 || seconds > MaxWatchSeconds) throw new ArgumentException($"seconds is 10..{MaxWatchSeconds} (CLOCKTAIL_MCP_MAX_WATCH_S)");
         var curve = card.Read().Curve;
+        var frames = FrameFeed.Start(card, seconds, process, out var noFrames);
         var samples = new List<Card.Sample>();
         var until = DateTime.UtcNow.AddSeconds(seconds);
         while (DateTime.UtcNow < until)
@@ -185,11 +189,14 @@ public sealed partial class TuningTools
         var point = p50Mv is { } mv && Nearest(curve, (uint)(mv * 1000)) is { } pt
             ? new { index = pt.Index, mv = pt.VoltageUv / 1000.0, curve_mhz = pt.EffectiveKhz / 1000.0 } : null;
         var reasons = loaded.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
+        frames?.Settle(TimeSpan.FromSeconds(3));
+        var fps = frames?.Total();
         var p50 = WatchStats(loaded, 0.5);
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Watched {seconds} s: {loaded.Count} of {samples.Count} samples under load. P50 {p50.clock_mhz} MHz @ NVVDD {p50.nvvdd_mv} mV (curve point {point?.index}), " +
             $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} MHz, board {p50.board_w} W, " +
             $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C, VRAM {p50.vram_used_gib} GiB; limit reasons [{string.Join(", ", reasons)}]")
+            + (frames != null ? $"; {FrameFeed.Words(fps)}" : "")
             + (note != null ? $". Playing: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         return Out(new
@@ -203,6 +210,11 @@ public sealed partial class TuningTools
             on_the_wall_pct = atWall,
             curve_point = point,
             limit_reasons = reasons,
+            fps = FrameFeed.Show(fps) ?? (object)new
+            {
+                unavailable = noFrames ?? (process != null ? $"no frames from {process}: is that the game's process name?" : "no application drew frames: was the game running?"),
+            },
+            fps_csv = frames?.Path,
             note = loaded.Count == 0 ? "no sample was under load: was the game running in the foreground?" : null,
         });
     });

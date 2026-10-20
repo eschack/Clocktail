@@ -4,6 +4,8 @@ The agent's hands. Each change is a **trial** in a session; the person plays, th
 
 `npx -y clocktail setup` installs it and connects your agents. By hand: it is a stdio MCP server, so point any MCP client at `clocktail-mcp.exe` (`%LocalAppData%\Programs\Clocktail` after setup, or `tools\Clocktail.Mcp\bin\Release\net10.0` after `dotnet build -c Release tools/Clocktail.Mcp`). The service must be installed: it does every write, and `install_service` installs it.
 
+What the agent starts is a relay that loads no driver library and runs the same program again with `--worker`, which holds the GPU. When the driver goes away (a reset, an update, a device restart) the worker ends or dies in it, and the relay answers the calls it had in flight, starts a new worker and goes on: the agent keeps its tools. `CLOCKTAIL_MCP_DIRECT=1` runs it as one process. A read waits for the driver at most 5 s (`CLOCKTAIL_MCP_DRIVER_WAIT_S`) and then says so.
+
 ## Tools
 
 | Tool | What |
@@ -11,12 +13,12 @@ The agent's hands. Each change is a **trial** in a session; the person plays, th
 | `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict. |
 | `manual` | The agent's manual: the method phase by phase and why, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
-| `gpu_status` | Where the card runs now: voltages, clock, the curve point, power vs limit. |
+| `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM. |
 | `card_settings` | Everything set on the card, next to stock and the daily profile. |
 | `limiter` | What holds the clock back right now. |
 | `curve_around` | Curve points near a voltage. |
-| `watch` | Sample one stretch of play: p10/p50/p90 of clock, voltage, XBAR, power, temperature; time on the wall. |
-| `live_start` / `live_read` / `live_stop` | Watch a whole session of play live: 4 samples a second, a line every 10 s under load (clock, voltage and curve point, MSVDD, XBAR, power vs the wall, temperature, fans, what held the clock), and a line when load starts or stops, the clock freezes, the card stops answering or runs hot. The log can be followed as it is written (Claude Code's Monitor); every sample goes to a CSV. |
+| `watch` | Sample one stretch of play: p10/p50/p90 of clock, voltage, XBAR, power, temperature, VRAM; time on the wall; the game's fps and its 1 % and 0.1 % lows (PresentMon, run by the service). |
+| `live_start` / `live_read` / `live_stop` | Watch a whole session of play live: 4 samples a second, a line every 10 s under load (clock, voltage and curve point, MSVDD, XBAR, power vs the wall, temperature, fans, what held the clock), and a line when load starts or stops, the clock freezes, the card stops answering or runs hot; each line ends with the game's fps. The log can be followed as it is written (Claude Code's Monitor); every sample goes to a CSV. |
 | `list_presets` / `load_preset` | The profiles that ship with Clocktail and the ones saved by name; load one as the daily profile. Ask the person first. |
 | `save_profile` / `delete_profile` | Save the daily profile under a name ("quiet", "games") to switch back to later; delete a saved one. |
 | `set_daily_power_limit` | The daily power limit. Ask the person first. |

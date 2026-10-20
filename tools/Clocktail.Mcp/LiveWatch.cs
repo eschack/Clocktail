@@ -66,6 +66,8 @@ public sealed class LiveWatch(Card card) : IDisposable
         public DateTimeOffset? Ended;
         public string? EndReason;
         public string? Summary;
+        /// <summary>The game's frame rate (the broker's capture); null when it could not start.</summary>
+        public FrameFeed? Frames;
     }
 
     private readonly object _gate = new();
@@ -73,7 +75,10 @@ public sealed class LiveWatch(Card card) : IDisposable
 
     public bool Running { get { lock (_gate) return _run is { Ended: null }; } }
 
-    public object Start(int intervalMs, int everySeconds, string? note)
+    /// <summary>The longest frame-rate capture the service runs.</summary>
+    public const int MaxFrameSeconds = 4 * 3600;
+
+    public object Start(int intervalMs, int everySeconds, string? note, string? process = null)
     {
         if (intervalMs < MinIntervalMs || intervalMs > MaxIntervalMs) throw new ArgumentException($"intervalMs is {MinIntervalMs}..{MaxIntervalMs}");
         if (everySeconds < MinEverySeconds || everySeconds > MaxEverySeconds) throw new ArgumentException($"everySeconds is {MinEverySeconds}..{MaxEverySeconds}");
@@ -93,6 +98,8 @@ public sealed class LiveWatch(Card card) : IDisposable
             run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv");
             Emit(run, string.Create(CultureInfo.InvariantCulture, $"🟢 live watch started: a line every {everySeconds} s under load, sampled every {intervalMs} ms")
                 + (note != null ? $". Playing: {note}" : ""));
+            run.Frames = FrameFeed.Start(card, Math.Min(MaxHours * 3600, MaxFrameSeconds), process, out var noFrames);
+            Emit(run, run.Frames != null ? "🎞️ frame rates on: each line under load ends with the game's fps" : $"ℹ️ no frame rates this time: {noFrames}");
             run.LastAnswer = now;
             run.Watchdog = new System.Threading.Timer(_ => Watch(run), null, 500, 500);
             run.Loop = Task.Factory.StartNew(() => Sample(run), TaskCreationOptions.LongRunning);
@@ -260,7 +267,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                         notLoadedSince ??= now;
                         if (now - notLoadedSince >= LoadGap)
                         {
-                            if (window.Count > 0) Emit(run, WindowLine(window, curve));
+                            if (window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
                             window.Clear();
                             inLoad = false;
                             Emit(run, $"⏸️ load stopped after {Duration(notLoadedSince.Value - loadSince)}");
@@ -268,7 +275,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                     }
                     if (inLoad && now - windowStart >= every)
                     {
-                        if (window.Count > 0) Emit(run, WindowLine(window, curve));
+                        if (window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
                         window.Clear();
                         windowStart = now;
                     }
@@ -285,7 +292,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         }
         finally
         {
-            if (inLoad && window.Count > 0) Emit(run, WindowLine(window, curve));
+            if (inLoad && window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
             Finish(run);
         }
     }
@@ -303,9 +310,18 @@ public sealed class LiveWatch(Card card) : IDisposable
         Emit(run, "⛔ the card has not answered for 3 s: a hang, or a driver reset under way. After a crash the service puts the daily profile back on its own; ask what the person saw, then mark_crash");
     }
 
+    /// <summary>The game's frame rate since the last line, for a window's line; nothing without a capture.</summary>
+    private static string Fps(Run run)
+    {
+        if (run.Frames is not { } f) return "";
+        try { return " · " + FrameFeed.Words(f.TakeWindow()); }
+        catch (IOException) { return ""; }
+    }
+
     private void Finish(Run run)
     {
         run.EndReason ??= "live_stop";
+        run.Frames?.Stop();
         string summary = SummaryLine(run);
         Emit(run, $"⏹️ live watch ended ({run.EndReason}). {summary}");
         lock (run) { run.Summary = summary; run.Ended = DateTimeOffset.Now; }
@@ -373,6 +389,8 @@ public sealed class LiveWatch(Card card) : IDisposable
                 .Select(g => new { point = g.Key, mv = Pct(g.Select(p => p.NvvddMv), 0.5), p50_mhz = Pct(g.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList(), 0.5), pct = Math.Round(100.0 * g.Count() / l.Count) }),
             held_by = l.GroupBy(p => p.HeldBy).OrderByDescending(g => g.Count())
                 .Select(g => new { what = Words(g.Key), pct = Math.Round(100.0 * g.Count() / l.Count) }),
+            fps = FrameFeed.Show(SafeTotal(run)),
+            fps_csv = run.Frames?.Path,
         };
     }
 
@@ -389,7 +407,13 @@ public sealed class LiveWatch(Card card) : IDisposable
         return string.Create(CultureInfo.InvariantCulture,
             $"{minutes:0.#} min, {l.Count * run.IntervalMs / 60000.0:0.#} min of it under load in {stretches} stretch(es). P50 {Pct(clocks, 0.5):0} MHz @ {Pct(l.Select(p => p.NvvddMv), 0.5):0} mV (point {point}), " +
             $"P10 {Pct(clocks, 0.1):0}, P90 {Pct(clocks, 0.9):0}; {100.0 * l.Count(p => p.OnWall) / l.Count:0} % on the wall; max {l.Max(p => p.TempC):0} °C, {l.Max(p => p.BoardW):0} W; {held}")
-            + (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "") + (run.Note != null ? $". Playing: {run.Note}" : "");
+            + (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "")
+            + (run.Frames != null ? $"; {FrameFeed.Words(SafeTotal(run))}" : "") + (run.Note != null ? $". Playing: {run.Note}" : "");
+    }
+
+    private static Clocktail.Domain.Fps.FrameStats.App? SafeTotal(Run run)
+    {
+        try { return run.Frames?.Total(); } catch (IOException) { return null; }
     }
 
     private static string Row(Point p) => string.Create(CultureInfo.InvariantCulture,

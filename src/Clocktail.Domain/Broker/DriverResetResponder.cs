@@ -114,6 +114,20 @@ public sealed class DriverResetResponder(
         }
     }
 
+    /// <summary>
+    /// After the PC wakes up: each GPU's daily profile again once it is idle, through "resume", which writes only what
+    /// differs (nothing, when sleep kept it all) and leaves a trial in force alone.
+    /// </summary>
+    public void AfterSleep(string evidence)
+    {
+        sleep(SettleFor);
+        foreach (var id in gpuIds)
+        {
+            try { Profile(id, "resume", evidence, "after waking up"); }
+            catch (Exception e) { log($"gpu {id}: daily profile after waking up: failed: {e}"); }
+        }
+    }
+
     private bool Profile(string gpuId, string kind, string? evidence, string when, uint crashUv = 0)
     {
         if (!WaitIdle(gpuId))
@@ -142,6 +156,8 @@ public sealed class DriverResetResponder(
 
     public static string ProfileSummary(BrokerResponse r)
     {
+        if (r.Result is { } skip && skip.TryGetProperty("skipped", out var why) && why.ValueKind == System.Text.Json.JsonValueKind.String)
+            return $"not applied: {why.GetString()}";
         if (r.Result is not { } res || !res.TryGetProperty("profile", out var p) || p.ValueKind != System.Text.Json.JsonValueKind.Object)
             return r.Ok ? "none kept" : r.Error ?? "failed";
         if (p.GetProperty("Suspended").GetBoolean()) return "suspended, the card stays at stock";

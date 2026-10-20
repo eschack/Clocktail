@@ -16,6 +16,8 @@ When a tool fails, when the card or the service misbehaves, and where things liv
 | Power limit back to 575 W after a crash | normal: a driver reset restores the stock wall | the service puts the daily wall back first |
 | card_report's last row says a newer Clocktail is out | updates never install themselves | tell the person; with their yes, run `npx -y clocktail@latest setup --plan` and follow it (nothing needs closing), then they restart their agents; the card, the daily profile and saved profiles stay. The check reads only the latest version number from registry.npmjs.org; `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off |
 | Fan curve looks stock after a reset or reboot | not yet verified whether the firmware keeps it | the daily profile writes it again |
+| Settings look different after the PC woke from sleep | whether the card keeps them through sleep is not measured (sleep is off on the reference machine); the service puts the daily profile on again once the GPU is idle after a wake-up, writing only what changed, and leaves a trial in force alone | wait a minute; `card_report` says whether it is on the card; under a trial, `back_to_daily` if they differ |
+| `watch` or a live line says there are no frame rates | the capture did not start (an older service: run the setup again; PresentMon missing), the process name given matches nothing, the game draws nothing (a menu in the background), or its anti-cheat refuses the capture | leave out the process name (the busiest app is taken), bring the game to the front; otherwise ask the person for the number |
 
 ## Where things live
 - Programs: `%LocalAppData%\Programs\Clocktail` (server, service); the running service: `C:\Program Files\Clocktail`, scheduled task `ClocktailBroker`.

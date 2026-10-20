@@ -907,4 +907,29 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(r.Ok);
         Assert.Equal(BrokerCode.Failed, r.Code);
     }
+
+    /// <summary>Waking up from sleep: the profile again, writing only what sleep took, and never under an agent's trial.</summary>
+    [Fact]
+    public void Waking_up_puts_back_only_what_sleep_took_and_leaves_a_trial_alone()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+
+        var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "resume", Value: "Kernel-Power 107"));
+        Assert.True(kept.Ok, kept.Error);
+        Assert.Equal("NoChange", kept.Result!.Value.GetProperty("applied")[0].GetProperty("outcome").GetString());   // sleep kept it
+
+        _requests[0xfe] = 575_000;   // sleep took it: the card back at its stock wall
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "resume", Value: "Kernel-Power 107")).Ok);
+        Assert.Equal(560_000u, _requests[0xfe]);
+
+        _requests[0xfe] = 575_000;
+        new Experiment("RE4", null, DateTimeOffset.Now, new ExperimentTrial(DateTimeOffset.Now, "0*127", "+15 MHz", null, null))
+            .Save(Experiment.PathBeside(_journal.Path));
+        var trial = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "resume", Value: "Kernel-Power 107"));
+        Assert.True(trial.Ok, trial.Error);
+        Assert.Contains("a trial is in force", trial.Result!.Value.GetProperty("skipped").GetString());
+        Assert.Equal(575_000u, _requests[0xfe]);   // nothing written under the trial
+    }
 }

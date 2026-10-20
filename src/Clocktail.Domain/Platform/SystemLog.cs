@@ -18,6 +18,9 @@ public static class SystemLog
     /// <summary>The driver-reset events as a whole query (the broker's subscription).</summary>
     public const string DriverResetQuery = "*[System[" + DriverResetFilter + "]]";
 
+    /// <summary>The PC woke up: Kernel-Power 107 (resumed from sleep) and 507 (left Modern Standby).</summary>
+    public const string WakeQuery = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=107 or EventID=507)]]";
+
     private const uint QueryChannelPath = 0x1;
 
     [DllImport("wevtapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]

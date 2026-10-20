@@ -17,13 +17,16 @@ public sealed class LiveTools(LiveWatch live)
         "ran on, MSVDD, XBAR, power against the wall and how much of the time it sat on it, temperature, fans, and what held the clock. " +
         "Plus a line the moment load starts or stops, the card stops answering (a hang or a driver reset), or it runs hot. Returns at " +
         "once with the log's path. In Claude Code, follow the log with the Monitor tool (the command is in 'follow') and comment as " +
-        "lines arrive; any agent can call live_read whenever the person talks. Every sample also goes to a CSV beside the log. Ends " +
+        "lines arrive; any agent can call live_read whenever the person talks. Every sample also goes to a CSV beside the log. Each " +
+        "line under load ends with the game's frame rate over those seconds (average, 1 % and 0.1 % lows), from the service's " +
+        "PresentMon capture (nothing injected into the game); the summary has the whole run's. Ends " +
         "on live_stop, after 6 h, or when the server stops. Use watch instead for one fixed stretch you wait for.")]
     public string Start(
         [Description("A line every this many seconds under load (2..120; default 10).")] int everySeconds = 10,
         [Description("Sample interval, ms (100..2000; default 250).")] int intervalMs = 250,
-        [Description("What is being played (game, scene, settings), for the log.")] string? note = null) =>
-        Guard(() => live.Start(intervalMs, everySeconds, note));
+        [Description("What is being played (game, scene, settings), for the log.")] string? note = null,
+        [Description("The game's process name for the frame rate (e.g. \"Cyberpunk2077\"); omit for the application that draws the most frames.")] string? process = null) =>
+        Guard(() => live.Start(intervalMs, everySeconds, note, process));
 
     [McpServerTool(Name = "live_read", ReadOnly = true, OpenWorld = false), Description(
         "The live watch's lines since the last live_read (the newest 'max' of them), and the run so far: time under load, " +

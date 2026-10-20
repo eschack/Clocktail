@@ -12,11 +12,27 @@ for p in src/Clocktail.Broker tools/Clocktail.Mcp src/Clocktail.Cli; do
 done
 mv "$out/bin/Clocktail.Cli.exe" "$out/bin/clocktail.exe"
 
+# PresentMon (Intel, MIT): the console build the service runs for game frame rates, pinned by version and SHA-256 (the
+# same hash the service checks before it runs it, FrameCapture.PinnedSha256), with its licence and third-party notices.
+pm_ver=2.6.0
+pm_sha=b2a706bc6ad475749e3b7e3409263aa1e6906d45bdcf993f6dbc0f660188f1af
+grep -q "PinnedSha256 = \"$pm_sha\"" "$root/src/Clocktail.Broker/FrameCapture.cs" || { echo "release.sh and FrameCapture.cs pin different PresentMon hashes"; exit 1; }
+pm_cache="$root/build/cache/PresentMon-$pm_ver-x64.exe"
+if [ ! -f "$pm_cache" ]; then
+  mkdir -p "$(dirname "$pm_cache")"
+  curl -fsSL -o "$pm_cache" "https://github.com/GameTechDev/PresentMon/releases/download/v$pm_ver/PresentMon-$pm_ver-x64.exe"
+fi
+echo "$pm_sha *$pm_cache" | sha256sum -c --quiet || { echo "PresentMon $pm_ver is not the pinned build"; rm -f "$pm_cache"; exit 1; }
+cp "$pm_cache" "$out/bin/PresentMon.exe"
+for f in LICENSE THIRD_PARTY; do
+  curl -fsSL -o "$out/bin/PresentMon-$f.txt" "https://raw.githubusercontent.com/GameTechDev/PresentMon/v$pm_ver/$f.txt"
+done
+
 # npm: the genie ships the server and the service (the CLI stays in the zip).
 pkg="$out/npm"
 cp -r "$root/npm" "$pkg"
 mkdir -p "$pkg/dist"
-cp "$out/bin/clocktail-mcp.exe" "$out/bin/Clocktail.Broker.exe" "$pkg/dist/"
+cp "$out/bin/clocktail-mcp.exe" "$out/bin/Clocktail.Broker.exe" "$out/bin"/PresentMon* "$pkg/dist/"
 cp "$root/README.md" "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$pkg/"
 (cd "$pkg" && npm pkg set version="$ver" >/dev/null && npm pack --pack-destination "$out" >/dev/null)
 

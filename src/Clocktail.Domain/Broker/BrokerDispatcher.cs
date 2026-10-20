@@ -68,14 +68,18 @@ public sealed class BrokerDispatcher
     /// <param name="canWrite">Whether this process may write to the driver (elevated). The broker passes true;
     /// a non-elevated in-process caller passes false and write ops report that instead of touching the driver.</param>
     /// <param name="judgeBusyReason">Returns why a write must wait (a live stability run), or null when the GPU is free.</param>
-    public BrokerDispatcher(NvClient hw, IGpuTargets gpus, IHost host, bool canWrite, Func<string?>? judgeBusyReason = null)
+    /// <param name="frames">The frame-rate capture (PresentMon); null where this process cannot run one.</param>
+    public BrokerDispatcher(NvClient hw, IGpuTargets gpus, IHost host, bool canWrite, Func<string?>? judgeBusyReason = null, Fps.IFrameCapture? frames = null)
     {
         _hw = hw;
         _gpus = gpus;
         _host = host;
         _canWrite = canWrite;
         _judgeBusyReason = judgeBusyReason ?? (() => null);
+        _frames = frames;
     }
+
+    private readonly Fps.IFrameCapture? _frames;
 
     public BrokerResponse Dispatch(BrokerRequest req)
     {
@@ -98,6 +102,7 @@ public sealed class BrokerDispatcher
                     BrokerRequest.OpOwnership => Ownership(target),
                     BrokerRequest.OpProfile => Profile(target, req),
                     BrokerRequest.OpExperiment => ExperimentOp(target, req),
+                    BrokerRequest.OpFps => FpsOp(target, req),
                     _ => Fail($"unknown operation '{req.Op}'", BrokerCode.UnknownOp),
                 };
 
@@ -271,6 +276,19 @@ public sealed class BrokerDispatcher
                 CloseTrial(target, Experiment.Survived, "the daily profile went back on");
                 var r = ApplyProfile(target, profile, path);
                 Log(target, "Daily profile applied", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                return r;
+            }
+            case "resume":
+            {
+                // Value: what woke it. The card may have lost what the profile wrote, or kept it all: applying again writes
+                // only what differs. A trial in force is left alone: the agent running it reads the card and decides.
+                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial != null)
+                {
+                    Log(target, "Woke up: a trial is in force, nothing written", [req.Value is { } w ? $"Reason: {w}" : null]);
+                    return Ok(new { success = true, skipped = "a trial is in force: the agent running it decides", profile });
+                }
+                var r = ApplyProfile(target, profile, path);
+                Log(target, "Daily profile applied after waking up", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "load":
@@ -882,5 +900,25 @@ public sealed class BrokerDispatcher
     private static JsonElement Element(object o) => JsonSerializer.SerializeToElement(o, BrokerResponse.Json);
     private static BrokerResponse Ok(object payload) => new(true, Result: Element(payload));
     /// <summary>A refusal before the op ran: the sentence for a person, the code for a program.</summary>
+    /// <summary>A frame-rate capture for the GPU's folder (fps\ beside its tuning log); not a write.</summary>
+    private BrokerResponse FpsOp(IGpuTarget target, BrokerRequest req)
+    {
+        if (_frames == null) return Fail("this service cannot capture frame rates (it is not the elevated broker)", BrokerCode.CannotWrite);
+        switch (req.Kind)
+        {
+            case "start":
+            {
+                var a = Args(req.Value);
+                int seconds = a.TryGetProperty("seconds", out var sv) && sv.TryGetInt32(out var n) ? n : throw new ArgumentException("start needs seconds");
+                string dir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(target.Journal.Path))!, "fps");
+                return Ok(_frames.Start(dir, seconds, Text(a, "process")));
+            }
+            case "stop":
+                return Ok(_frames.Stop());
+            default:
+                return Fail($"unknown fps request '{req.Kind}' (start, stop)", BrokerCode.BadRequest);
+        }
+    }
+
     private static BrokerResponse Fail(string error, string code) => new(false, error, Code: code);
 }

@@ -7,5 +7,6 @@ TestResults/
 .sync/
 .claude/settings.local.json
 out/
+build/cache/
 npm/dist/
 !npm/bin/

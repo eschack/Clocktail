@@ -204,6 +204,16 @@ internal static class Installer
             ? [self]
             : Directory.EnumerateFiles(src).Where(f => Path.GetExtension(f).ToLowerInvariant() is ".exe" or ".dll" or ".json").ToList();
 #pragma warning restore IL3000
+        // PresentMon goes with the broker, which runs it elevated from here (a folder only administrators can write). A
+        // capture still running from here would hold the file: it ends first.
+        if (Path.Combine(src, FrameCapture.ExeName) is var pm && File.Exists(pm) && !files.Contains(pm, StringComparer.OrdinalIgnoreCase))
+        {
+            files.Add(pm);
+            foreach (var p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(FrameCapture.ExeName)))
+                try { if (string.Equals(p.MainModule?.FileName, Path.Combine(dst, FrameCapture.ExeName), StringComparison.OrdinalIgnoreCase)) { p.Kill(); p.WaitForExit(5000); } }
+                catch (Exception e) when (e is Win32Exception or InvalidOperationException) { }
+                finally { p.Dispose(); }
+        }
         int n = 0;
         foreach (var file in files)
         {

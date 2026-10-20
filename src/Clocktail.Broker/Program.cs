@@ -109,7 +109,7 @@ static int Run()
         return busy;
     };
     var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
-    var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge);
+    var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
     var server = new BrokerServer(
         () => OperatingSystem.IsWindows() ? PipeFactory.Create(BrokerTransport.PipeName) : throw new PlatformNotSupportedException("the broker's pipe ACL is Windows-only"),
         dispatcher);
@@ -191,12 +191,19 @@ static int Run()
             }
         });
     }
-    DriverResetWatch? watch = null;
-    try { watch = new DriverResetWatch(OnReset, Log); Log("watching the System log for driver resets"); }
+    SystemLogWatch? watch = null, wakeWatch = null;
+    try { watch = new SystemLogWatch(SystemLog.DriverResetQuery, "nvlddmkm 153 / Display 4101 in the System log", OnReset, Log); Log("watching the System log for driver resets"); }
     catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"driver resets will not be answered: {e.Message}"); }
+    // Waking from sleep: whether the card keeps what the profile wrote is not measured (sleep is off on the reference
+    // machine), so the profile goes on again once the GPU is idle; only what differs is written, and a trial is left alone.
+    var wakes = new ResetBursts(TimeSpan.FromSeconds(30));
+    void OnWake(string evidence) { if (wakes.Starts(DateTimeOffset.Now)) Once("the daily profile after sleep", () => responder.AfterSleep(evidence)); }
+    try { wakeWatch = new SystemLogWatch(SystemLog.WakeQuery, "Kernel-Power 107 / 507 (the PC woke up)", OnWake, Log); Log("watching the System log for wake-ups"); }
+    catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"wake-ups will not be answered: {e.Message}"); }
 
     server.RunAsync(cts.Token).GetAwaiter().GetResult();
     watch?.Dispose();
+    wakeWatch?.Dispose();
     Console.WriteLine($"{DateTimeOffset.Now:u} broker down");
     return 0;
 }
