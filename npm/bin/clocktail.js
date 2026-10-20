@@ -209,18 +209,21 @@ async function setup(opts) {
   }
   say('');
 
-  // 1. The files.
+  // 1. The files. One already there with the same bytes stays: an agent may have it open, and connecting a second
+  // agent must not need the first one closed.
   fs.mkdirSync(INSTALL_DIR, { recursive: true });
+  let copied = 0;
   for (const f of FILES) {
-    const src = path.join(DIST, f);
+    const src = path.join(DIST, f), dst = path.join(INSTALL_DIR, f);
     if (!fs.existsSync(src)) return fail(`this package is missing ${f}; it was built wrong. Nothing was changed.`);
-    try { fs.copyFileSync(src, path.join(INSTALL_DIR, f)); }
+    if (sameFile(src, dst)) continue;
+    try { fs.copyFileSync(src, dst); copied++; }
     catch (e) {
-      if (e.code === 'EBUSY' || e.code === 'EPERM') return fail(`${f} is in use, probably by an agent that has Clocktail open. Close your agents and run setup again.`);
+      if (e.code === 'EBUSY' || e.code === 'EPERM') return fail(`${f} is in use, probably by an agent that has Clocktail open, and this version differs from the one installed. Close your agents and run setup again.`);
       throw e;
     }
   }
-  say(`  installed to ${INSTALL_DIR}`);
+  say(copied > 0 ? `  installed to ${INSTALL_DIR}` : `  already installed in ${INSTALL_DIR} (same version)`);
 
   // 2. The agents.
   for (const c of chosen) {
@@ -406,6 +409,15 @@ function writeJson(file, value) {
 
 function backup(file) { if (fs.existsSync(file)) fs.copyFileSync(file, file + '.clocktail.bak'); }
 
+/** True when `dst` exists with the same bytes as `src`. Reading is fine while an agent runs the file; writing is not. */
+function sameFile(src, dst) {
+  try {
+    if (!fs.existsSync(dst) || fs.statSync(src).size !== fs.statSync(dst).size) return false;
+    const hash = p => require('crypto').createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    return hash(src) === hash(dst);
+  } catch { return false; }
+}
+
 /** The TOML text without the table `[name]` and its keys (up to the next table header). */
 function withoutTomlTable(text, name) {
   const out = [];
@@ -439,7 +451,7 @@ function fail(msg) { say(`\n  ${msg}\n`); process.exit(1); }
 // ---- entry --------------------------------------------------------------------------------------------------------
 
 // Loaded by the tests as a module: hand them the agents and run nothing.
-if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable }; return; }
+if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile }; return; }
 
 const argv = process.argv.slice(2);
 const opts = {

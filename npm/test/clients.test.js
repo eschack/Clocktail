@@ -31,7 +31,7 @@ for (const d of [h('.codeium', 'windsurf'), h('.gemini', 'config'), h('.commandc
   h('.workbuddy'), h('.grok'), h('.omp', 'agent'), h('.pi', 'agent'), h('.qoder'), h('.factory'), path.join(appdata, 'devin'), path.join(appdata, 'Claude')])
   fs.mkdirSync(d, { recursive: true });
 
-const { CLIENTS, SERVER } = require('../bin/clocktail.js');
+const { CLIENTS, SERVER, sameFile } = require('../bin/clocktail.js');
 const byId = id => CLIENTS.find(c => c.id === id);
 const read = f => JSON.parse(fs.readFileSync(f, 'utf8'));
 
@@ -76,6 +76,18 @@ test('a file with comments is left alone', () => {
   fs.writeFileSync(f, '{ // mine\n "mcpServers": {} }');
   assert.throws(() => byId('cursor').add(), /not plain JSON/);
   assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ // mine\n "mcpServers": {} }');
+});
+
+// Setup leaves a file that is already installed alone: an agent running it would make the copy fail (2026-10-20, a
+// second agent could not be connected while Claude Code had Clocktail open).
+test('an installed file with the same bytes counts as the same; a changed or missing one does not', () => {
+  const a = h('same-a.exe'), b = h('same-b.exe'), c = h('same-c.exe');
+  put(a, 'MZ clocktail 0.1.2');
+  put(b, 'MZ clocktail 0.1.2');
+  put(c, 'MZ clocktail 0.1.3');
+  assert.strictEqual(sameFile(a, b), true);
+  assert.strictEqual(sameFile(a, c), false, 'same size, other bytes');
+  assert.strictEqual(sameFile(a, h('missing.exe')), false);
 });
 
 test.after(() => fs.rmSync(home, { recursive: true, force: true }));
