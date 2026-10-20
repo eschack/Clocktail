@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Clocktail.Broker/Clocktail.Broker.csproj" />
+    <Project Path="src/Clocktail.Cli/Clocktail.Cli.csproj" />
+    <Project Path="src/Clocktail.Core/Clocktail.Core.csproj" />
+    <Project Path="src/Clocktail.Domain/Clocktail.Domain.csproj" />
+    <Project Path="src/Clocktail.Hw/Clocktail.Hw.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Clocktail.Tests/Clocktail.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Clocktail.Mcp/Clocktail.Mcp.csproj" />
+  </Folder>
+</Solution>

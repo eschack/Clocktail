@@ -1,0 +1,50 @@
+using System.ComponentModel;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using ModelContextProtocol.Server;
+
+namespace Clocktail.Mcp;
+
+/// <summary>Watching a whole session of play as it happens: the sampler is <see cref="LiveWatch"/>; these are its verbs.</summary>
+[McpServerToolType]
+public sealed class LiveTools(LiveWatch live)
+{
+    private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
+    [McpServerTool(Name = "live_start"), Description(
+        "Watch the card live while the person plays or runs a benchmark, for as long as it takes: sampled 4 times a second in the " +
+        "background (read-only), and every 10 s under load one line: the clock range and median, the voltage and the curve point it " +
+        "ran on, MSVDD, XBAR, power against the wall and how much of the time it sat on it, temperature, fans, and what held the clock. " +
+        "Plus a line the moment load starts or stops, the card stops answering (a hang or a driver reset), or it runs hot. Returns at " +
+        "once with the log's path. In Claude Code, follow the log with the Monitor tool (the command is in 'follow') and comment as " +
+        "lines arrive; any agent can call live_read whenever the person talks. Every sample also goes to a CSV beside the log. Ends " +
+        "on live_stop, after 6 h, or when the server stops. Use watch instead for one fixed stretch you wait for.")]
+    public string Start(
+        [Description("A line every this many seconds under load (2..120; default 10).")] int everySeconds = 10,
+        [Description("Sample interval, ms (100..2000; default 250).")] int intervalMs = 250,
+        [Description("What is being played (game, scene, settings), for the log.")] string? note = null) =>
+        Guard(() => live.Start(intervalMs, everySeconds, note));
+
+    [McpServerTool(Name = "live_read"), Description(
+        "The live watch's lines since the last live_read (the newest 'max' of them), and the run so far: time under load, " +
+        "p10/p50/p90 clock, the curve points it spent most time on, how much of it sat on the wall, max temperature and power, " +
+        "and what held the clock how often. After a crash or a stutter, tailSeconds returns every sample of the last seconds " +
+        "(up to 30). Works after live_stop too, for the last run.")]
+    public string Read(
+        [Description("At most this many new lines (default 30; the rest stay in the log).")] int max = 30,
+        [Description("Also return every sample of the last N seconds (0..30; default 0).")] int tailSeconds = 0) =>
+        Guard(() => live.Read(max, tailSeconds));
+
+    [McpServerTool(Name = "live_stop"), Description(
+        "End the live watch: the summary of the whole run (also written to the tuning log), the lines not read yet, and the totals.")]
+    public string Stop() => Guard(live.Stop);
+
+    private static string Guard(Func<object> tool)
+    {
+        try { return JsonSerializer.Serialize(tool(), Json); }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            return JsonSerializer.Serialize(new { success = false, error = e.Message }, Json);
+        }
+    }
+}

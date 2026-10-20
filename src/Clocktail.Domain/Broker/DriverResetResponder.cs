@@ -1,0 +1,153 @@
+﻿namespace Clocktail.Domain.Broker;
+
+/// <summary>
+/// What the broker does when the display driver resets (a TDR: nvlddmkm 153 or Display 4101 in the System log).
+/// A TDR is not a reboot: the driver comes back with every offset this program wrote still applied (V/F point 84
+/// at +450 MHz after the +120 in-game hang, 2026-10-18), so a curve that hung a game hangs it again. Each GPU's
+/// held cells are given back through the ordinary recovery op, the first attempt putting them on record in the
+/// crash log. Then the daily profile, if one is kept, goes back on unchanged: its power limit at once, the rest once
+/// the GPU is idle. A trial in force when it crashed becomes a data point. There is no step-down: the person is at the
+/// machine when a game crashes, and the agent adjusts through the MCP server (the user, 2026-10-19). The give-back is a
+/// write like any other, so it waits for the window and for a stability run to let go rather than going around either,
+/// and it retries until <see cref="GiveUpAfter"/>.
+/// </summary>
+public sealed class DriverResetResponder(
+    Func<BrokerRequest, BrokerResponse> perform,
+    IReadOnlyList<string> gpuIds,
+    Action<string> log,
+    Func<DateTimeOffset> now,
+    Action<TimeSpan> sleep,
+    Func<string, bool>? idle = null)
+{
+    /// <summary>
+    /// The daily profile goes back on only once the GPU has been idle for this many looks in a row: two of three hangs
+    /// on 2026-10-18 came within ten seconds of a curve written under full load. Giving back to stock does not wait;
+    /// it only ever lowers.
+    /// </summary>
+    public const int IdleLooks = 3;
+    public static readonly TimeSpan IdleWaitAtMost = TimeSpan.FromHours(4);
+
+    /// <summary>Between the reset and the first look: the driver is still re-initialising when the event is written.</summary>
+    public static readonly TimeSpan SettleFor = TimeSpan.FromSeconds(3);
+    public static readonly TimeSpan RetryEvery = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan GiveUpAfter = TimeSpan.FromMinutes(15);
+
+    private readonly SemaphoreSlim _signal = new(0);
+    private sealed record Seen(string Evidence, IReadOnlyDictionary<string, uint> CrashUv);
+    private Seen _last = new("", new Dictionary<string, uint>());
+
+    /// <summary>
+    /// Called once a reset is seen: a burst of events is answered once. <paramref name="crashUv"/> is each GPU's core
+    /// voltage at the hang from the flight recorder, where it found one, for the record.
+    /// </summary>
+    public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null)
+    {
+        Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>()));
+        _signal.Release();
+    }
+
+    public async Task RunAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try { await _signal.WaitAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            sleep(SettleFor);
+            while (_signal.Wait(0)) { }   // the events of one reset arrive together
+            var (evidence, crashUv) = Volatile.Read(ref _last);
+            Respond(evidence, crashUv);
+        }
+    }
+
+    /// <summary>Gives back every GPU's held cells; true when each one ended clean.</summary>
+    public bool Respond(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null)
+    {
+        bool clean = true;
+        foreach (var id in gpuIds) clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0);
+        return clean;
+    }
+
+    private bool RespondFor(string gpuId, string evidence, uint crashUv)
+    {
+        var deadline = now() + GiveUpAfter;
+        bool recorded = false;
+        while (true)
+        {
+            // Only the first attempt that reaches recovery records the crash; a retry is the same reset.
+            var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? null : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
+            recorded |= r.Result != null;
+            if (r.Ok)
+            {
+                log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
+                // The power limit at once (the reset put it back to 575 W; stock clocks under it are safe), the curve once idle.
+                var power = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "apply-power"));
+                log($"gpu {gpuId}: daily profile's power limit after the reset: {ProfileSummary(power)}");
+                return Profile(gpuId, "reset", evidence, "after the reset", crashUv);
+            }
+            bool retry = r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy or BrokerCode.Failed || r.Result != null;
+            if (!retry || now() + RetryEvery > deadline)
+            {
+                log($"gpu {gpuId}: driver reset ({evidence}): not given back{(retry ? $" after {GiveUpAfter.TotalMinutes:0} min" : "")}: {r.Error ?? Summary(r)}");
+                return false;
+            }
+            log($"gpu {gpuId}: driver reset ({evidence}): waiting ({r.Code ?? "give-back incomplete"}): {r.Error ?? Summary(r)}");
+            sleep(RetryEvery);
+        }
+    }
+
+    /// <summary>
+    /// At start: each GPU's daily profile, unchanged. A GPU whose machine went down holding cells (a write window open,
+    /// or an unclean shutdown) goes through the crash step, which records it (and a trial in force as a data point).
+    /// </summary>
+    public void ApplyAtStart(IReadOnlyCollection<string> crashed)
+    {
+        foreach (var id in gpuIds)
+        {
+            bool down = crashed.Contains(id);
+            Profile(id, down ? "reset" : "apply", down ? "the machine went down holding the profile" : "the broker started", "at start");
+        }
+    }
+
+    private bool Profile(string gpuId, string kind, string? evidence, string when, uint crashUv = 0)
+    {
+        if (!WaitIdle(gpuId))
+        {
+            log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
+            return false;
+        }
+        var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence, Uv: crashUv));
+        log($"gpu {gpuId}: daily profile {when}: {ProfileSummary(p)}");
+        return p.Ok;
+    }
+
+    private bool WaitIdle(string gpuId)
+    {
+        if (idle == null) return true;
+        var deadline = now() + IdleWaitAtMost;
+        for (int run = 0; run < IdleLooks;)
+        {
+            run = idle(gpuId) ? run + 1 : 0;
+            if (run == IdleLooks) break;
+            if (now() > deadline) return false;
+            sleep(RetryEvery);
+        }
+        return true;
+    }
+
+    public static string ProfileSummary(BrokerResponse r)
+    {
+        if (r.Result is not { } res || !res.TryGetProperty("profile", out var p) || p.ValueKind != System.Text.Json.JsonValueKind.Object)
+            return r.Ok ? "none kept" : r.Error ?? "failed";
+        if (p.GetProperty("Suspended").GetBoolean()) return "suspended, the card stays at stock";
+        int n = res.TryGetProperty("applied", out var a) ? a.GetArrayLength() : 0;
+        string last = p.TryGetProperty("History", out var h) && h.ValueKind == System.Text.Json.JsonValueKind.Array && h.GetArrayLength() > 0 ? h[h.GetArrayLength() - 1].GetString()! : "";
+        return r.Ok ? $"{n} write(s) applied; {last}" : $"not applied: {r.Error}; {last}";
+    }
+
+    private static string Summary(BrokerResponse r)
+    {
+        if (r.Result is not { } res || !res.TryGetProperty("items", out var items)) return r.Error ?? "no result";
+        var each = items.EnumerateArray().Select(i => $"{i.GetProperty("Kind").GetString()}/{i.GetProperty("Key").GetString()} {i.GetProperty("action").GetString()}").ToList();
+        return each.Count == 0 ? "nothing was held" : string.Join(", ", each);
+    }
+}

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The MCP server for tuning the curve live in a game (stdio). Not elevated: it reads the card itself, as the tray
+       does, and sends every write to the broker, which holds every limit. Not in Clocktail.sln, like the other tools. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Clocktail.Core\Clocktail.Core.csproj" />
+    <ProjectReference Include="..\..\src\Clocktail.Domain\Clocktail.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+  </ItemGroup>
+
+  <!-- The agent's manual (ManualTools): one topic per file, instructions.md is what every agent gets on connecting. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Manual\*.md" LogicalName="manual.%(Filename).md" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>clocktail-mcp</AssemblyName>
+  </PropertyGroup>
+
+</Project>

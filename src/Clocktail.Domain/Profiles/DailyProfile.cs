@@ -1,0 +1,75 @@
+using System.Text.Json;
+using Clocktail.Domain.Clocks;
+using Clocktail.Domain.Fan;
+using Clocktail.Domain.Platform;
+using Clocktail.Domain.Power;
+using Clocktail.Domain.Rails;
+using Clocktail.Domain.Vf;
+
+namespace Clocktail.Domain.Profiles;
+
+/// <summary>One write of the daily profile, in the registry's own terms.</summary>
+public sealed record ProfileWrite(string Kind, string Key, string Value);
+
+/// <summary>
+/// The state the user keeps on the card day to day ("daily profile"), held by the broker: applied when it starts, and put back
+/// unchanged after a display driver reset (which leaves the offsets on the card but puts the power limit back to stock).
+/// It changes only when someone keeps a new one: the person, or an agent through the MCP server. There is no automatic
+/// step-down (the user, 2026-10-19: a crash happens with the person at the machine, and the agent adjusts from there).
+/// The journal's originals stay the card's stock; this is the last-known-good above it. <see cref="Suspended"/> means
+/// stock until someone loads or keeps a profile again.
+/// </summary>
+public sealed record DailyProfile(
+    IReadOnlyList<ProfileWrite> Writes,
+    DateTimeOffset KeptAt,
+    bool Suspended = false,
+    IReadOnlyList<string>? History = null)
+{
+    public const string FileName = "profile.json";
+
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+
+    public static string PathBeside(string journalPath) =>
+        Path.Combine(Path.GetDirectoryName(Path.GetFullPath(journalPath))!, FileName);
+
+    /// <summary>The profile on disk, or null. Fields an older build wrote and this one no longer has (the step-down's
+    /// Down and LastResetAt) are skipped.</summary>
+    public static DailyProfile? Load(string path)
+    {
+        var bytes = AtomicFile.Read(path, 1024 * 1024);
+        if (bytes == null) return null;
+        try { return JsonSerializer.Deserialize<DailyProfile>(bytes, Json); }
+        catch (JsonException) { return null; }
+    }
+
+    public void Save(string path) => AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(this, Json));
+
+    /// <summary>Power first (a driver reset puts the limit back to 575 W), then the fan curve (it touches nothing else, and
+    /// the cooling is on before the clocks are), then P0 offsets, the rails' offsets and the domains' voltage demands
+    /// before the XBAR/SYS/Video clock offsets (the voltage before the clock it carries), the V/F curve last: a Pstates20
+    /// write resets every V/F point offset.</summary>
+    public static IReadOnlyList<ProfileWrite> InWriteOrder(IEnumerable<ProfileWrite> writes) =>
+        writes.OrderBy(w => Rank(w.Kind)).ToList();
+
+    /// <summary>Where a kind goes in a run of writes: a P0 write (the memory offset) zeroes the V/F points, so the curve
+    /// goes last, and a voltage demand before the clock offset it carries.</summary>
+    public static int Rank(string kind) => kind switch
+    {
+        PowerCap.Kind => 0, FanPolicyWrites.Kind => 1, ClockOffsets.Kind => 2, RailWrites.Kind => 3,
+        ClockVdemand.Kind => 5, ClockDomainOffsets.Kind => 6, VfWrites.Kind => 7, _ => 4,
+    };
+
+    /// <summary>What keep takes from the card even when a profile is kept already: everything an agent tunes in a trial,
+    /// the curves (V/F, fan), the memory offset, the MSVDD rail's offsets and the XBAR/SYS/Video clock offsets and
+    /// voltage demands (the user, 2026-10-20: the agent does everything we did by hand). The wall stays as kept, so a
+    /// wall lowered in a trial to sample the curve never becomes the daily one; the daily wall is set on its own
+    /// ("wall"). The core P0 offset stays as kept too: nothing here tunes with it.</summary>
+    public static bool KeptFromCard(string kind, string key) =>
+        kind is VfWrites.Kind or FanPolicyWrites.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind
+        || (kind == ClockOffsets.Kind && key == ClockOffsets.Key(ClockDomain.Memory))
+        || (kind == RailWrites.Kind && key == RailWrites.Key(Rail.Msvdd));
+
+    /// <summary>The profile with one more line of history (the last 20 are kept).</summary>
+    public DailyProfile Noted(DateTimeOffset at, string line) =>
+        this with { History = [.. (History ?? []).TakeLast(19), $"{at:u} {line}"] };
+}

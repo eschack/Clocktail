@@ -1,0 +1,147 @@
+using System.Text.Json;
+using Clocktail.Core.Gpu;
+using Clocktail.Domain.Broker;
+using Clocktail.Domain.Power;
+using Clocktail.Domain.Rails;
+using Rail = Clocktail.Domain.Rails.Rail;
+using Clocktail.Domain.Vf;
+using Clocktail.Hw;
+
+namespace Clocktail.Mcp;
+
+/// <summary>
+/// The first GPU, read the way the tray reads it (no elevation needed: NVML, the rails' status, the V/F curve), and the
+/// broker for everything that writes or keeps state. Driver calls go one at a time: the SDK may call tools in parallel.
+/// </summary>
+public sealed class Card : IDisposable
+{
+    private readonly GpuManager _mgr;
+    private readonly GpuDevice _gpu;
+    private readonly NvClient _hw;
+    private readonly GpuSession _session;
+    private readonly object _lane = new();
+    private uint? _railMask;
+
+    public Card()
+    {
+        _mgr = GpuManager.Open();
+        _gpu = _mgr.Gpus[0];
+        _hw = new NvClient(_mgr.NvApi);
+        _session = new GpuSession(_gpu.NvapiHandle, _gpu.Identity.Name);
+    }
+
+    public string StableId => _gpu.Identity.StableId;
+    public string Name => _gpu.Identity.Name;
+
+    /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and the Core curve, and
+    /// from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
+    public sealed record Look(TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, uint? NvvddMaxUv, VfCurveSnapshot Curve,
+        CurrentLimits? Limits = null, MonitorReading? NvvddOut = null, MonitorReading? MsvddOut = null, RailRecord? Msvdd = null);
+
+    public Look Read()
+    {
+        lock (_lane)
+        {
+            TelemetrySnapshot? t = null;
+            if (_mgr.Nvml != null && _gpu.HasNvml)
+                try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
+            _railMask ??= RailsReader.Mask(_hw, _session);
+            uint? nvvdd = null, msvdd = null, max = null;
+            if (_railMask is { } mask)
+            {
+                nvvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd);
+                msvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Msvdd);
+            }
+            RailRecord? msvddRail = null;
+            try
+            {
+                var rails = RailsReader.Read(_hw, _session);
+                max = rails.Get(Rail.Nvvdd)?.Limits.MaxUv;
+                msvddRail = rails.Get(Rail.Msvdd);
+            }
+            catch (InvalidOperationException) { }
+            CurrentLimits? limits = null;
+            MonitorReading? nvvddOut = null, msvddOut = null;
+            try
+            {
+                limits = CurrentLimitsReader.Read(_hw, _session);
+                var readings = CurrentLimitsReader.Monitor(_hw, _session, limits.Channels);
+                nvvddOut = limits.Output(Rail.Nvvdd, readings);
+                msvddOut = limits.Output(Rail.Msvdd, readings);
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
+            return new Look(t, nvvdd, msvdd, max, VfReader.Read(_hw, _session), limits, nvvddOut, msvddOut, msvddRail);
+        }
+    }
+
+    /// <summary>A light sample for a stress run's 2 Hz log: telemetry, both rails' present voltage, and each rail's output
+    /// from the power monitor (its channels read once and kept). No curve and no limits: those do not move under load.</summary>
+    public sealed record Sample(DateTimeOffset At, TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, MonitorReading? NvvddOut, MonitorReading? MsvddOut,
+        IReadOnlyDictionary<int, uint>? ClocksKhz = null)
+    {
+        /// <summary>A domain's clock from the driver's clock table (AllClocksLayout ids), MHz.</summary>
+        public double? Mhz(int domain) => ClocksKhz != null && ClocksKhz.TryGetValue(domain, out var k) ? Math.Round(k / 1000.0) : null;
+    }
+
+    private CurrentLimits? _monitorLayout;
+
+    public Sample ReadSample()
+    {
+        lock (_lane)
+        {
+            TelemetrySnapshot? t = null;
+            if (_mgr.Nvml != null && _gpu.HasNvml)
+                try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
+            _railMask ??= RailsReader.Mask(_hw, _session);
+            uint? nvvdd = null, msvdd = null;
+            if (_railMask is { } mask)
+            {
+                nvvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd);
+                msvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Msvdd);
+            }
+            MonitorReading? nvvddOut = null, msvddOut = null;
+            try
+            {
+                _monitorLayout ??= CurrentLimitsReader.Read(_hw, _session);
+                var readings = CurrentLimitsReader.Monitor(_hw, _session, _monitorLayout.Channels);
+                nvvddOut = _monitorLayout.Output(Rail.Nvvdd, readings);
+                msvddOut = _monitorLayout.Output(Rail.Msvdd, readings);
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
+            IReadOnlyDictionary<int, uint>? clocks = null;
+            try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (InvalidOperationException) { }
+            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks);
+        }
+    }
+
+    /// <summary>The lightest look, for the residency sampler: NVVDD's present voltage, core clock, utilization, board W.</summary>
+    public (uint? Uv, uint? Mhz, uint? Util, double? W) ReadPoint()
+    {
+        lock (_lane)
+        {
+            TelemetrySnapshot? t = null;
+            if (_mgr.Nvml != null && _gpu.HasNvml)
+                try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
+            _railMask ??= RailsReader.Mask(_hw, _session);
+            uint? uv = _railMask is { } mask ? RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd) : null;
+            return (uv, t?.GraphicsClockMhz, t?.GpuUtilPercent, t?.PowerWatts);
+        }
+    }
+
+    /// <summary>Any other read of the driver, in the same lane as every read above (a read that writes nothing needs no
+    /// broker and no elevation, as the CLI's reads do). What <paramref name="f"/> throws reaches the caller.</summary>
+    public T WithDriver<T>(Func<NvClient, GpuSession, T> f)
+    {
+        lock (_lane) return f(_hw, _session);
+    }
+
+    /// <summary>A broker op for this GPU. Null result with an error when the broker does not answer.</summary>
+    public (bool Ok, JsonElement? Result, string? Error) Broker(string op, string? kind = null, string? value = null)
+    {
+        var r = BrokerClient.TryCall(new BrokerRequest(op, StableId, Kind: kind, Value: value));
+        if (r == null) return (false, null, "the Clocktail service does not answer: if it was never installed, call install_service (one UAC prompt); otherwise check the ClocktailBroker scheduled task");
+        return (r.Ok, r.Result, r.Error ?? (r.Ok ? null : r.Code ?? "failed"));
+    }
+
+    public void Dispose() => _mgr.Dispose();
+}

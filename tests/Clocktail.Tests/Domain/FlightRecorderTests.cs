@@ -1,0 +1,83 @@
+using Clocktail.Domain.Profiles;
+
+namespace Clocktail.Tests.Domain;
+
+public class FlightRecorderTests
+{
+    private static readonly DateTimeOffset T0 = new(2026, 10, 18, 14, 0, 0, TimeSpan.Zero);
+
+    private static FlightSample S(double sec, uint mhz, uint mv, double w, uint util = 99, int readMs = 5) =>
+        new(T0.AddSeconds(sec), readMs, mhz, mv, w, 70, util, 0x4);
+
+    [Fact]
+    public void Only_the_last_sixty_seconds_are_kept()
+    {
+        var r = new FlightRecorder(FlightRecorder.DefaultKeep);
+        for (int i = 0; i <= 480; i++) r.Add(S(i * 0.25, 2800, 950, 590));
+        var w = r.Freeze();
+        Assert.Equal(241, w.Count);
+        Assert.Equal(T0.AddSeconds(60), w[0].At);
+    }
+
+    [Fact]
+    public void The_crash_point_is_the_last_loaded_sample_before_the_reads_block_not_the_wall_letting_go()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.25, 2820, 955, 597));          // 0 .. 9.75 s in game
+        w.Add(S(10.0, 3150, 1035, 120, readMs: 2300));                             // hung: blocked read, wall gone
+        w.Add(S(12.5, 3150, 1035, 110));
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(14));
+        Assert.NotNull(p);
+        Assert.Equal(955u, p!.Sample.CoreMv);
+        Assert.Equal(T0.AddSeconds(9.75), p.Sample.At);
+    }
+
+    [Fact]
+    public void Without_a_blocked_read_the_low_power_tail_and_the_last_two_seconds_are_left_out()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 20; i++) w.Add(S(i * 0.5, 2805, 940, 598));            // 0 .. 9.5 s
+        w.Add(S(10, 3150, 1035, 140));                                             // the wall let go: low power
+        w.Add(S(11.5, 2805, 940, 598));                                            // within 2 s of the reset: may be the hang
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(13));
+        Assert.Equal(T0.AddSeconds(9.5), p!.Sample.At);
+        Assert.Null(FlightRecorder.Pick([S(1, 210, 750, 30, util: 2)], T0.AddSeconds(5)));   // idle: no point
+    }
+
+    // 2026-10-18 17:59Z: the hung GPU kept answering without blocking, 3180 MHz at 995–1000 mV, util 100 %, ~125 W,
+    // for ~30 s until Windows logged the reset.
+    private static IEnumerable<FlightSample> Frozen(double from, double to)
+    {
+        for (double t = from; t < to; t += 0.25) yield return S(t, 3180, ((int)(t * 4) % 7 == 0) ? 995u : 1000u, 126 - (t - from) * 0.08, util: 100);
+    }
+
+    [Fact]
+    public void A_hang_that_keeps_answering_is_cut_off_at_the_load_drop()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 120; i++) w.Add(S(i * 0.25, (uint)(2880 + i % 3 * 7), (uint)(915 - i % 2 * 5), 598));   // 0 .. 29.75 s at the wall
+        w.AddRange(Frozen(30, 60));
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(60.5));
+        Assert.NotNull(p);
+        Assert.Equal(T0.AddSeconds(29.75), p!.Sample.At);
+        Assert.InRange(p.Sample.CoreMv!.Value, 910u, 915u);
+        Assert.Contains("froze", p.Why);
+    }
+
+    [Fact]
+    public void A_window_that_is_frozen_throughout_gives_no_crash_point_rather_than_a_false_one()
+    {
+        Assert.Null(FlightRecorder.Pick([.. Frozen(0, 20)], T0.AddSeconds(20.5)));
+    }
+
+    [Fact]
+    public void A_steady_load_at_the_curve_cap_is_not_taken_for_a_hang()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.25, (uint)(3120 + i % 2 * 15), 1040, 310));   // light load around the cap
+        for (int i = 40; i < 80; i++) w.Add(S(i * 0.25, 3150, 1040, 305));                      // pinned at the cap for 10 s
+        Assert.Null(FlightRecorder.FrozenFrom(w));
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(22));
+        Assert.Equal(3150u, p!.Sample.ClockMhz);
+    }
+}

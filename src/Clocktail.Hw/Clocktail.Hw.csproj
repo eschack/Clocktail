@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Clocktail.Hw</RootNamespace>
+    <Description>Hardware access layer: the only code that touches the NVIDIA driver.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The slot table as data; a unit test keeps Slots.cs in sync with it. -->
+    <EmbeddedResource Include="Slots\nvapi_slots.csv" LogicalName="nvapi_slots.csv" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- NvmlApi.FromExports: NVML bound to stand-in entry points, so its loss latch is tested without a driver. -->
+    <InternalsVisibleTo Include="Clocktail.Tests" />
+  </ItemGroup>
+
+</Project>

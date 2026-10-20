@@ -1,0 +1,77 @@
+﻿slot,id,name,domain,rw,struct,confidence
+0,0x2c73afdc,VoltVoltRailsGetInfo,voltage rails,R,0x184c r2; +4 rail mask; entries 0xc0 stride @0x4c,High
+1,0x5d0634ee,VoltVoltRailsGetStatus,voltage rails,R,0x1620 r2; +4 = slot0 mask,High
+2,0xa3070db0,VoltVoltRailsGetControl,voltage rails,R,0xac8 r2,High
+3,0x87c55c8a,VoltVoltRailsSetControl,voltage rails,W,0xac8 r2; kind 1,High
+4,0x68789e2a,ClockAdcDevicesGetInfo,ADC,R,0x9f0 r2(0x209f0),Medium
+5,0x43d9b26a,ClockAdcDevicesGetStatus,ADC,R,0x9c8 r1; +4 = slot4 +4,High
+6,0x6ff81213,GetPstates20,P-state/offsets,R,0x1cf8 r2,High
+7,0x0f4dae6b,SetPstates20,P-state/offsets,W,same as above; kind 2/3,High
+8,0x34206d86,ClientPowerPoliciesGetInfo,power,R,0xb8 r1,Medium-high
+9,0x70916171,ClientPowerPoliciesGetStatus,power,R,0x48 r1,Medium-high
+10,0xad95f5ed,ClientPowerPoliciesSetStatus,power,W,0x48 r1; kind 4,High
+11,0x507b4b59,ClockClientClkVfPointsGetInfo,V/F,R,0x182c r1,High
+12,0x21537ad4,ClockClientClkVfPointsGetStatus,V/F,R,0x15b0c r2,High
+13,0x23f1b133,ClockClientClkVfPointsGetControl,V/F,R,0x2420 r1,High
+14,0x0733e009,ClockClientClkVfPointsSetControl,V/F,W,0x2420 r1; kind 7,High
+15,0xc12eb19e,PowerMonitorGetInfo,power monitor,R,0xca8 r3 (617.42 measured: r3 accepts only 0xca8); `+0x10` channel mask -> slot16; per channel provider/type @0x34/0x38+i*0x3c,High
+16,0xf40238ef,PowerMonitorGetStatus,power monitor,R,0x59c r1,High
+17,0x927da4f6,GetCurrentPstate,P-state,R,named probe,High
+18,0xedcf624e,ClientPowerTopologyGetStatus,power (read W),R,size unknown,Medium
+19,0x7f7f4600,GetPerfDecreaseInfo,throttle reasons,R,named probe,High
+20,0x64b43a6a,ClockClientClkDomainsGetInfo,clock domains,R,offset ranges; size unknown,Medium
+21,0x1bd69f49,GetAllClocks,clocks,R,named probe,High
+22,0x57b5a5df,ClockClkDomainsGetInfo,clock domains,R,0x86ac r4,High
+23,0xf58938f5,ClockClkDomainsGetControl,clock domains,R,0x61a4 r2; `@8` = domain mask,High
+24,0xd14b69cf,ClockClkDomainsSetControl,clock domains,W,0x61a4 r2; kind 6/12/13/14,High
+25,0x527fc458,(unnamed),single-domain frequency read,R,"0xc r1 `{ver,domain,value}`, 0xA5 sentinel; domain ids `0x14,0x1f,6,3,0x16`",Medium (usage) / name unknown
+26,0xe440b867,PerfClientLimitsGetStatus,perf limits (boost lock),R,0x30c r2,High
+27,0x39442cfb,PerfClientLimitsSetStatus,perf limits,W,kind 8,High
+28,0xe826e4f0,ClockClkPropTopRelsGetInfo,clock propagation topology,R,0x75c same family,Medium
+29,0xcbff71d0,ClockClkPropTopRelsGetControl,clock propagation topology,R,0x75c r1 is accepted but the driver writes past it (617.42 measured; real size larger; to probe); `@4=0x3fff`,Medium
+30,0xef3d20ea,ClockClkPropTopRelsSetControl,clock propagation topology,W,kind 9 [inferred]; size unknown,Low
+31,0xfb85b01e,ClientFanCoolersGetInfo,fan,R,0x62c r1 (617.42 size scan; 0x928 is FanPolicy Info's size; see slot 58),High
+32,0x35aed5e8,ClientFanCoolersGetStatus,fan,R,0x6a8 r1 (617.42 size scan; no rev2),High
+33,0x814b209f,ClientFanCoolersGetControl,fan,R,one of 0x62c/0x6a8 r1,Medium
+34,0xa58971a5,ClientFanCoolersSetControl,fan,W,kind 16 (0x5ac) or 0x6a8,Medium
+35,0x67f31384,PowerPolicyGetInfo,power policy,R,raw policy table layout 1: 0xa70 r4 (617.42 measured; r1 also accepts 0x628/0x828/0xa3c; undecoded); records 0x3c+i*0x58,High
+36,0x8b3e7343,PowerPolicyGetControl,power policy,R,raw policy table layout 1 CONTROL: 0xa4c r1 (617.42 measured); +4 mask queries by record; records 0x1c+i*0x28,High
+37,0xaffc2279,PowerPolicySetControl,power policy,W,raw policy table write 0xa4c r1: kind 0x13 (current limit/OCP); kind 0x1b (board power record) not written,High
+38,0x65fe3aad,ThermChannelGetStatus,thermal channels,R,thermal read,Medium
+39,0x2eb3c140,RegisterOp,GPU register access,?,if real it is raw register read/write; highest risk; never called,Low / [unknown]
+40,0xc0599498,GetMemoryInfoEx(jNizM),memory info,R,read path unknown,Low
+41,0x7c955ac0,ClockPmumonClkDomainsGetSamples,clock samples,R,read path unknown,Low
+42,0x4d2c0a9c,PerfPerfLimitsGetInfo,perf limits,R,read path unknown,Low
+43,0x0b62b9e2,PerfPerfLimitsGetStatus,perf limits,R,same as above,Low
+44,0xdcb616c3,GetAllClockFrequencies,clocks,R,public API,Medium
+45,0x31b7a4cd,PowerPolicyGetStatus,power policy,R,0xca8 r3(0x30ca8) candidate,Low
+46,0x54924bf5,ClientPwrPoliciesGetInfo,power (watts/board),R,0x728 r1 (617.42 size scan; the F8/FE watt request family lives here),High
+47,0x33ab0353,ClientPwrPoliciesGetControl,same as above,R,0x528 r1 (+4 single board bit; command code at 0x28+board*0x28+4; 617.42 accepts only r1 0x528; echo verified),High
+48,0x17695269,ClientPwrPoliciesSetControl,same as above,W,0x528 r1; kind 0x14 (F8)/0x15 (FE); on by default after the live drill (2026-10-17),High
+49,0xa933ce98,ThermChannelGetControl,thermal input,R,"0x28cc r3; `@8=0xffff`; channels 1,3,4,5,2,0; entries 0x6c stride; override temperature field @+0x54",High
+50,0x8df19fa2,ThermChannelSetControl,thermal input,W,kind 0x16; never called,High
+51,0x9df23ca1,ClientVoltRailsGetControl,voltage boost %,R,0x28 r1,High
+52,0xb9306d9b,ClientVoltRailsSetControl,voltage boost %,W,kind 0x17,High
+53,0x8895b510,ClockClkVfPointsGetInfo,domain V/F,R,0x68604 r1(0x78604),Medium
+54,0xda025c3e,ClockClkVfPointsGetControl,domain V/F,R,0x424604 r5,Medium
+55,0x7fee9032,ClockClkVfPointsGetStatus,domain V/F,R,0x1e8604,Medium
+56,0x5a769461,ClockClkVfRelsGetInfo,domain V/F,R,0x12ee28,Medium
+57,0xfec00d04,ClockClkVfPointsSetControl,domain V/F,W,kind 0,High
+58,0x76a38d54,FanPolicyGetInfo,fan policy,R,0x928 r1 (617.42 measured); +4 policy mask; entries 0x28+i*0x48: +0 type +8 link +0x2f editable,High
+59,0x15b85505,FanPolicyGetStatus,fan policy,R,0x8a8 r1 (617.42 measured); query style: +4 takes the Info mask; entries 0x28+i*0x44,High
+60,0x0fe87b7f,FanPolicyGetControl,fan policy,R,0x14ac r2 (617.42 measured; r1 0xeac lacks the trailing 0x30); query style; entries 0x2c+i*0xa4; 3 points at +0x3c,High
+61,0x2b2a2a45,FanPolicySetControl,fan policy,W,kind 0x18 (0x14ac r2); mask holds only the changed policies,High
+62,0x2f69f8e5,ThermalPolicyGetInfo,thermal policy,R,read path unknown,Medium
+63,0xc4554575,ThermalPolicyGetControl,thermal policy,R,read path unknown,Medium
+64,0xe097144f,ThermalPolicySetControl,thermal policy,W,kind 0x19 0x303fc,Medium
+65,0xe3640a56,GetThermalSettings,temperature,R,"3 args `(gpu,sensor,buf)`",High
+66,0x60ded2ed,GetDynamicPstatesInfoEx,utilization,R,public,Medium
+67,0xb9da41d6,PerfVfeVarGetInfo,VFE variables,R,read path unknown,Low
+68,0x5d387298,GetControl,VFE variables,R,read path unknown,Low
+69,0xfc13ee11,GetVbiosImage,VBIOS,R,VBIOS image read,High
+70,0xa4218928,ManufacturingInfo,manufacturing info,R,read path unknown,Low
+71,0xda141340,GetCoolerSettings,legacy fan,R,legacy cooler read,High
+72,0x891fa0ae,SetCoolerLevels,legacy fan,W,0x1001c r1,High
+73,0x5f608315,GetTachReading,tachometer,R,fan,High
+74,0xfaceb39b,ClockClkProgsGetInfo,clock programs,R,read path unknown,Low
+75,0x57f7caac,GetRamType,memory type,R,"call shape `fn(gpu,&buf)` differs from the public GetRamType; purpose unconfirmed",Low

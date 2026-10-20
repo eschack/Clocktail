@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Clocktail.Domain</RootNamespace>
+    <Description>Transactions over driver structures, hardware ownership records and the pure rules of each tuning domain.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Clocktail.Hw\Clocktail.Hw.csproj" />
+    <EmbeddedResource Include="Profiles\Presets\*.json" LogicalName="preset.%(Filename).json" />
+  </ItemGroup>
+
+</Project>

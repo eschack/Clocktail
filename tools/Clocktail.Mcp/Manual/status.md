@@ -1,0 +1,44 @@
+# Reading the card
+What each status field means, what is normal, how to name the limiter, and the telemetry quirks that mislead.
+
+## gpu_status, field by field
+- `nvvdd_mv`, `msvdd_mv`: the two rails' requested voltages (5 mV steps). `nvvdd_max_mv` is NVVDD's MAX (lowest of REL/ALT/OV).
+- `clock_mhz`: core clock now. `memory_mhz`: the memory clock as NVML reports it (13801 MHz stock on the 5090, 14159 at +358).
+- `power_w` against `power_limit_w`: board power against the wall in force.
+- `temp_c`, `util_pct`, `limit_reasons`: NVML's own (see the quirks below before trusting `limit_reasons`).
+- `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
+- `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
+- `session`: the experiment in force, if any.
+
+## card_settings
+Everything Clocktail can write, as it is on the card now, next to stock and the daily profile: power limit, core and memory P0 offsets, the V/F curve (as offsets), each rail's REL/ALT/OV/VMIN offsets and the resulting limits, XBAR/SYS/Video clock offsets and voltage demands, fans and the fan curve, rail current limits, and the daily profile itself. Use it for "what is set on my card", "what is different from stock", and before any change.
+
+## limiter: naming what holds the clock
+The firmware climbs the curve and stops at the first limit; each leaves a trace:
+- **Power wall**: board power within 10 W of the wall.
+- **Power sub-policy**: NVML says `sw_power_cap` but the board is far from the wall. A rail or sub-policy hit its limit first. Memory-heavy work sets it the whole time at 336-361 W on a 575-600 W wall; that is normal.
+- **Voltage limit**: NVVDD within 12.5 mV of MAX. The firmware parks one step under MAX; under the wall it would sit 55-75 mV lower, so the two are easy to tell apart. NVML's "reliability voltage" bit alone means nothing on a 5090: it is set even at idle.
+- **Curve cap**: the clock is at the curve's highest point below MAX (within 15 MHz). Only a tuned curve has this; a stock curve that runs out is a voltage limit.
+- **Thermal / hardware slowdown**: only from NVML's own reasons. Never seen on the reference card.
+- **Idle**: under 120 W, or `gpu_idle` with utilization under 10 %.
+- **No limit reached**: loaded, nothing hit (often a CPU-bound or frame-capped game).
+
+## Quirks that mislead
+- **`gpu_idle` at full load**: on a curve with a flat top, NVML reports `gpu_idle` on almost every sample at 280-410 W and 100 % utilization. Never call a card idle from that bit alone. A hung GPU also reports it.
+- **`sw_power_cap` far below the wall**: see sub-policy above. Read `power_w` against `power_limit_w`, not the bit.
+- **The wall tracks short peaks**, not the 1 s average: a game can sit at 516-566 W average on a 600 W wall and still be wall-limited (10 Hz samples: median 552 W, p90 588 W, max 593 W). nvgwls full load is flat, so there average equals peak.
+- **NVML's max graphics clock (3090 MHz) is not a limit**; tuned cards run past it.
+- **NVML's memory offset reads double** the real P0 offset (+358 shows as +716).
+- **Game overlays show a lower clock than the curve** under a tight wall (very fast power throttling), but the voltage still follows the curve point, so stability is a property of the point, not of the overlay's number.
+- **Third-party tools** (HWiNFO and similar) misread rail voltages and rail power on this card; trust Clocktail's readings.
+- NVML temperature runs 1.5-2.5 C above the temperature the fan curve uses while heating.
+
+## Normal ranges on the reference card
+- Idle: ~800-835 mV, ~45 W, fans stopped below ~43 C.
+- Full load, stock, 575 W: ~2700 MHz at ~1025 mV, 75-81 C.
+- Full load, founders profile, 600 W: ~2840-2920 MHz at 930-945 mV, 61-82 C.
+- Games, founders profile: 2775-2985 MHz at 925-1015 mV, 315-600 W.
+- Current: NVVDD 250-330 A in games, 422 A at nvgwls full load (limit 600 A); MSVDD ~110 A (limit 180 A).
+
+## Explaining it to the person
+Lead with the one-line answer (what limits it, what it runs at), then the two or three numbers that prove it, then what you would change, if anything. Keep units. Do not dump raw JSON on them.
