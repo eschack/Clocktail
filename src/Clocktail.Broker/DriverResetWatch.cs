@@ -12,8 +12,7 @@ namespace Clocktail.Broker;
 [SupportedOSPlatform("windows")]
 internal sealed partial class DriverResetWatch : IDisposable
 {
-    public const string Query =
-        "*[System[(Provider[@Name='nvlddmkm'] and EventID=153) or (Provider[@Name='Display'] and EventID=4101)]]";
+    public const string Query = Domain.Platform.SystemLog.DriverResetQuery;
 
     private const uint SubscribeToFutureEvents = 1;
     private const int ActionDeliver = 1;

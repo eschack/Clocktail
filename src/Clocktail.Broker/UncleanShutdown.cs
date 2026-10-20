@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
 namespace Clocktail.Broker;
@@ -11,7 +10,7 @@ namespace Clocktail.Broker;
 /// starts at the boot (now minus the tick count).
 /// </summary>
 [SupportedOSPlatform("windows")]
-internal static partial class UncleanShutdown
+internal static class UncleanShutdown
 {
     private static readonly (string Provider, int Id, string Name)[] Signs =
     [
@@ -19,19 +18,6 @@ internal static partial class UncleanShutdown
         ("EventLog", 6008, "EventLog 6008"),
         ("Microsoft-Windows-WER-SystemErrorReporting", 1001, "BugCheck 1001"),
     ];
-
-    private const uint QueryChannelPath = 0x1;
-
-    [LibraryImport("wevtapi.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
-    private static partial IntPtr EvtQuery(IntPtr session, string path, string query, uint flags);
-
-    [LibraryImport("wevtapi.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool EvtNext(IntPtr resultSet, uint eventsSize, [Out] IntPtr[] events, uint timeout, uint flags, out uint returned);
-
-    [LibraryImport("wevtapi.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool EvtClose(IntPtr handle);
 
     /// <summary>The signs of an unclean end found since this boot started, joined ("Kernel-Power 41, BugCheck 1001"), or null.</summary>
     /// <exception cref="InvalidOperationException">The System log could not be queried.</exception>
@@ -42,19 +28,6 @@ internal static partial class UncleanShutdown
         return found.Count == 0 ? null : string.Join(", ", found);
     }
 
-    private static bool Any(string provider, int id, DateTime sinceUtc)
-    {
-        string query = $"*[System[Provider[@Name='{provider}'] and EventID={id} and TimeCreated[@SystemTime>='{sinceUtc:yyyy-MM-ddTHH:mm:ss.fffZ}']]]";
-        var results = EvtQuery(IntPtr.Zero, "System", query, QueryChannelPath);
-        if (results == IntPtr.Zero)
-            throw new InvalidOperationException($"could not query the System log (error {Marshal.GetLastPInvokeError()})");
-        try
-        {
-            var events = new IntPtr[1];
-            if (!EvtNext(results, 1, events, 1000, 0, out uint n) || n == 0) return false;
-            EvtClose(events[0]);
-            return true;
-        }
-        finally { EvtClose(results); }
-    }
+    private static bool Any(string provider, int id, DateTime sinceUtc) =>
+        Domain.Platform.SystemLog.Count($"Provider[@Name='{provider}'] and EventID={id}", sinceUtc, max: 1) > 0;
 }

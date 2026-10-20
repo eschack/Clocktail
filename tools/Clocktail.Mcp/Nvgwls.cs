@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using Clocktail.Domain.Platform;
 using Microsoft.Win32;
 
 namespace Clocktail.Mcp;
@@ -32,7 +34,8 @@ public static class Nvgwls
             : null;
     }
 
-    /// <summary>The exit codes as _nvtopps reads them; null is a run that did not end within its time plus 30 s.</summary>
+    /// <summary>The exit codes as _nvtopps reads them; null is a run that did not end within its time plus 30 s. Exit code 2
+    /// also ends a hang (after the driver resets): <see cref="Verdict(int?, int?)"/> tells them apart.</summary>
     public static string Verdict(int? code) => code switch
     {
         0 => "pass",
@@ -48,6 +51,36 @@ public static class Nvgwls
 
     /// <summary>A failure of the card, not of the run: what counts against the settings under test.</summary>
     public static bool Failed(int? code) => code is null or 3 or 4 or 5 or 6;
+
+    /// <summary>The verdict with the System log's word on it. A driver reset during the run is the card's failure whatever
+    /// the exit code: every hang measured on the reference card was a driver reset (nvlddmkm 153) followed by exit code 2,
+    /// which on its own reads as "could not run". <paramref name="resets"/> is null when the log could not be read.</summary>
+    public static string Verdict(int? code, int? resets) => resets switch
+    {
+        > 0 => string.Create(CultureInfo.InvariantCulture,
+            $"hang: the driver reset during the run ({resets} reset event{(resets == 1 ? "" : "s")} in the System log, exit code {code?.ToString(CultureInfo.InvariantCulture) ?? "none"})"),
+        null when code == 2 => "runtime error, or a hang if the driver reset (the System log could not be read to tell)",
+        _ => Verdict(code),
+    };
+
+    public static bool Failed(int? code, int? resets) => resets > 0 || Failed(code);
+
+    /// <summary>Driver resets (nvlddmkm 153, Display 4101) the System log holds since <paramref name="startedUtc"/>; null
+    /// when it cannot be read. A run that may have hung waits up to 5 s for the event, which the driver writes as it recovers.</summary>
+    public static int? DriverResets(DateTime startedUtc, int? code)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            for (int wait = 0; ; wait++)
+            {
+                int n = SystemLog.Count(SystemLog.DriverResetFilter, startedUtc);
+                if (n > 0 || code is not (null or 2 or 3) || wait >= 5) return n;
+                Thread.Sleep(1000);
+            }
+        }
+        catch (InvalidOperationException) { return null; }
+    }
 
     /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns.</summary>
     public static int? Run(string exe, int load, int seconds, Action sample)

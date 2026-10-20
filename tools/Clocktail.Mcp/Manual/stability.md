@@ -5,7 +5,7 @@ What nvgwls is and how to run it, why games need 30-60 MHz more margin, what a c
 - Ships with the driver (inside the driver store's NvContainer folder); NVIDIA App's auto-tune runs it. It only adds load; it never writes to the GPU.
 - Work: graphics (tessellation, Blinn-Phong, texturing, full-screen depth overdraw, mesh shaders, integer ALU), compute (all SMs in lockstep, FP16/32/64) and ray tracing (procedural spheres, triangles, shadow rays).
 - Judging: it renders once as the reference; every later result must match bit for bit (float images within 1e-6). It catches silent errors a game never shows.
-- Exit codes: 0 pass, 1 cancelled, 2 runtime error, 3 TDR, 4 crashed, 5 RC/Xid, 6 data error (silent corruption). Not exited 10 s after its run time: hung.
+- Exit codes: 0 pass, 1 cancelled, 2 runtime error, 3 TDR, 4 crashed, 5 RC/Xid, 6 data error (silent corruption). Not exited 30 s after its run time: hung (killed). A hang the driver recovers from also ends in code 2: `stress_test` reads the System log for a driver reset during the run (nvlddmkm 153, Display 4101) and calls that a hang, whatever the code (`driver_resets` in its answer).
 - `stress_test load=100`: continuous full load. On the reference card it pins the 600 W wall within 1 s (~2880-2917 MHz on the tuned curve, 930-945 mV). A good fast judge: it reproduced a bad curve's hang within 30 s.
 - `load` under 100: a 250 Hz square wave at that duty. `load=50` ran ~385 W at ~3055 MHz, the curve's top. Use it to test high-voltage points the wall never lets full load reach.
 - Combine with `set_power_limit` / `set_current_limit` to pin it lower down the curve.

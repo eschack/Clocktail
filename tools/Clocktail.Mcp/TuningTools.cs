@@ -338,7 +338,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
         "catches silent errors a game never shows. load 100 runs flat out (on this card it pins the board wall: 598 W, " +
         "~2900 MHz on the daily curve); under 100 it is a 250 Hz square wave at that duty (load 50: ~385 W, ~3055 MHz, " +
         "the curve's top). Combine with set_power_limit / set_current_limit to pin it lower down the curve. If it fails " +
-        "(TDR, Xid, data error, crash, hang) while a trial is in force, the trial is recorded as a crash and the daily " +
+        "(TDR, Xid, data error, crash, hang, or a driver reset in the System log during the run) while a trial is in force, " +
+        "the trial is recorded as a crash and the daily " +
         "profile goes back at once. The result goes into the tuning log. Blocks for the run's length.")]
     public string StressTest(
         [Description("0..100; 100 = continuous full load (default).")] int load = 100,
@@ -350,9 +351,11 @@ public sealed partial class TuningTools(Card card, Residency residency)
         string exe = Nvgwls.Find() ?? throw new InvalidOperationException("nvgwls.exe was not found beside the loaded driver");
         var before = card.Read();
         var samples = new List<Card.Sample>();
+        var started = DateTime.UtcNow;
         int? code = Nvgwls.Run(exe, load, seconds, () => samples.Add(card.ReadSample()));
-        string verdict = Nvgwls.Verdict(code);
-        bool failed = Nvgwls.Failed(code);
+        int? resets = Nvgwls.DriverResets(started, code);
+        string verdict = Nvgwls.Verdict(code, resets);
+        bool failed = Nvgwls.Failed(code, resets);
 
         // The first 2 s are the ramp; the rest is what the settings were tested at.
         var held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
@@ -398,9 +401,10 @@ public sealed partial class TuningTools(Card card, Residency residency)
         }
         return Out(new
         {
-            passed = code == 0,
+            passed = code == 0 && !failed,
             verdict,
             exit_code = code,
+            driver_resets = resets,
             load,
             seconds,
             samples = held.Count,
