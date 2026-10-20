@@ -2,6 +2,12 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Clocktail.Domain.Boost;
+using Clocktail.Domain.Clocks;
+using Clocktail.Domain.Fan;
+using Clocktail.Domain.Power;
+using Clocktail.Domain.Rails;
+using Clocktail.Domain.Vf;
 using ModelContextProtocol.Server;
 
 namespace Clocktail.Mcp;
@@ -240,10 +246,77 @@ public sealed partial class SettingsTools
         }
         string profile = daily == null ? "none: the card runs stock" : Bool(daily, "suspended") == true ? "suspended: stock until load_daily"
             : Str(daily.Value, "kept_at") is { Length: >= 10 } kept ? $"kept {kept[..10]}" : "kept";
-        rows.Add(new("💾", "Daily profile", "", profile, "", Info, daily != null && Bool(daily, "suspended") != true ? "the service puts it back after every boot and driver reset" : ""));
+        var off = DailyOffCard(s);
+        if (off is { Count: > 0 })
+            rows.Add(new("💾", "Daily profile", "", $"{profile}, not on the card", "", Look,
+                $"the card differs from it: {string.Join(", ", off)}. The service puts it on after a start or a driver reset once the GPU has idled a few seconds; if this stays, back_to_daily puts it on now"));
+        else
+            rows.Add(new("💾", "Daily profile", "", off != null ? $"{profile}, on the card" : profile, "", Info,
+                daily != null && Bool(daily, "suspended") != true ? "the service puts it back after every boot and driver reset" : ""));
         if (Bool(s, "trial_in_force") == true)
             rows.Add(new("🧪", "Trial on the card", "", Str(s, "session", "trial", "change") ?? "a trial", "", Info, "not kept yet: keep_as_daily or back_to_daily"));
         return rows;
+    }
+
+    /// <summary>
+    /// Where the card differs from the daily profile it should be running: each setting the profile keeps whose value on
+    /// the card is another ("memory offset +0 MHz (daily +358)"), or that cannot be read. Empty when the card is on it;
+    /// null when there is nothing to compare: no profile kept, it is suspended (stock is meant), or a trial is in force
+    /// (it is meant to differ). This catches every way the profile can fail to come back: a service that never started,
+    /// an apply that gave up or is still waiting for the GPU to idle, or anything else that wrote over it.
+    /// </summary>
+    public static List<string>? DailyOffCard(JsonElement s)
+    {
+        if (Obj(s, "daily_profile") is not { } dp || Str(dp, "error") != null || Bool(dp, "suspended") == true || Bool(s, "trial_in_force") == true)
+            return null;
+        var off = new List<string>();
+        void Cmp(string name, double? now, double? daily, string unit, bool signed = true)
+        {
+            if (now is not { } n || daily is not { } d) off.Add($"{name} unreadable");
+            else if (Math.Abs(n - d) > 0.5) off.Add(signed ? $"{name} {Sg(n)} {unit} (daily {Sg(d)})" : $"{name} {F(n)} {unit} (daily {F(d)})");
+        }
+        foreach (var kept in Arr(dp, "keeps"))
+        {
+            var parts = (kept.ValueKind == JsonValueKind.String ? kept.GetString() : null)?.Split('/', 2);
+            if (parts is not [var kind, var key]) continue;
+            string name = key.ToUpperInvariant();
+            switch (kind)
+            {
+                case PowerCap.Kind when key == PowerCap.Key(PowerRequestKind.Ordinary):
+                    Cmp("power limit", Num(s, "power", "limit_w"), Num(s, "power", "daily_w"), "W", signed: false);
+                    break;
+                case ClockOffsets.Kind:
+                    Cmp($"{key} offset", Num(s, "clock_offsets", key, "offset_mhz"), Num(s, "clock_offsets", key, "daily_mhz"), "MHz");
+                    break;
+                case VfWrites.Kind:
+                    if (Num(s, "vf_curve", "points_off_daily") is not { } n) off.Add("V/F curve unreadable");
+                    else if (n > 0) off.Add($"V/F curve ({F(n)} point{(n == 1 ? "" : "s")} off it)");
+                    break;
+                case RailWrites.Kind:
+                    foreach (var slot in new[] { "rel", "alt", "ov", "vmin" })
+                        Cmp($"{name} {slot.ToUpperInvariant()} offset", Num(s, "rails", key, "offsets_mv", slot), Num(s, "rails", key, "daily_offsets_mv", slot), "mV");
+                    break;
+                case ClockDomainOffsets.Kind:
+                    Cmp($"{name} offset", Num(s, "clock_domains", key, "offset_mhz"), Num(s, "clock_domains", key, "daily_offset_mhz"), "MHz");
+                    break;
+                case ClockVdemand.Kind:
+                    Cmp($"{name} voltage demand", Num(s, "clock_domains", key, "vdemand_mv"), Num(s, "clock_domains", key, "daily_vdemand_mv"), "mV");
+                    break;
+                case VoltBoost.Kind:
+                    Cmp($"voltage boost ({key})", Num(s, "voltage_boost", $"{key}_pct"), Num(s, "voltage_boost", $"daily_{key}_pct"), "%", signed: false);
+                    break;
+                case CurrentLimitWrites.Kind:
+                    Cmp($"{name} current limit", Num(s, "current_limits", key, "limit_a"), Num(s, "current_limits", key, "daily_a"), "A", signed: false);
+                    break;
+                case FanPolicyWrites.Kind:
+                    var c = Arr(s, "fans", "curves").FirstOrDefault(x => Num(x, "index") is { } i && i.ToString(Inv) == key);
+                    string? now = c.ValueKind == JsonValueKind.Object ? Str(c, "curve") : null, want = c.ValueKind == JsonValueKind.Object ? Str(c, "daily_curve") : null;
+                    if (now == null || want == null) off.Add($"fan curve {key} unreadable");
+                    else if (now != want) off.Add($"fan curve {key} ({Short(now)}; daily {Short(want)})");
+                    break;
+            }
+        }
+        return off;
     }
 
     private static string Table(string gpu, List<ReportRow> rows, List<ReportRow> live, string verdict)

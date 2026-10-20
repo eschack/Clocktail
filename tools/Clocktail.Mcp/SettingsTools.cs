@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Clocktail.Core.Gpu;
 using Clocktail.Domain;
@@ -44,8 +45,9 @@ public sealed partial class SettingsTools(Card card)
         "experiment session. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
         "journal), or the value now where Clocktail holds nothing; daily_* is the daily profile's value, absent where it " +
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
-        "absent when none is kept, session when none is open. A section that cannot be read is {\"error\"} and the rest " +
-        "still answer. Read-only.")]
+        "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
+        "the card does not hold now ([] = the card is on it; absent when none is kept, it is suspended or a trial is in " +
+        "force). A section that cannot be read is {\"error\"} and the rest still answer. Read-only.")]
     public string CardSettings() => Guard(() =>
     {
         // What every section compares against comes first, and fails soft like a section: without it only stock_* and
@@ -64,7 +66,7 @@ public sealed partial class SettingsTools(Card card)
         try { rails = card.WithDriver(RailsReader.Read); } catch (Exception e) when (Soft(e)) { railsError = e.Message; }
         var session = card.Broker(BrokerRequest.OpExperiment, "show");
 
-        return Out(new
+        string json = Out(new
         {
             gpu = card.Name,
             at = DateTimeOffset.Now,
@@ -86,6 +88,11 @@ public sealed partial class SettingsTools(Card card)
             session = Section(() => Session(session)),
             trial_in_force = Trial(session),
         });
+        using var doc = JsonDocument.Parse(json);
+        if (DailyOffCard(doc.RootElement) is not { } off) return json;
+        var node = JsonNode.Parse(json)!.AsObject();
+        node["daily_differs_on_card"] = new JsonArray([.. off.Select(x => (JsonNode?)x)]);
+        return node.ToJsonString(Json);
     });
 
     [McpServerTool(Name = "limiter"), Description(
