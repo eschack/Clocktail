@@ -66,6 +66,25 @@ npx -y clocktail uninstall
 
 显卡恢复出厂设置，服务、文件和 AI 助手里的配置都会删干净。你的调校记录默认保留在 `%LocalAppData%\Clocktail`，加 `--purge` 一起删。显卡不会记得发生过什么。
 
+## GitHub 上的 zip
+
+Clocktail 是围着 AI 助手设计的，不建议手动安装。Releases 页面上的 zip 是给你研究、检查、存档用的：里面是安装程序会装的 MCP 服务器和后台服务，外加一个命令行工具，想翻、想扫毒、想留底都行。
+
+你要是非把自己当机器人，亲手装一遍，步骤如下：
+
+1. 右键 zip → 属性 → 勾选“解除锁定”。不然 Windows 可能会对几个没签名、从网上下来的程序多问几句，这一点它倒也没说错。
+2. 解压到 `%LocalAppData%\Programs\Clocktail`。安装程序本来也装在这儿，以后换成 npx 能直接接手。
+3. 把 AI 助手连到 `clocktail-mcp.exe`：stdio 方式，不带参数。Claude Code 是：
+   ```
+   claude mcp add clocktail -s user -- "C:\Users\<你的用户名>\AppData\Local\Programs\Clocktail\clocktail-mcp.exe"
+   ```
+4. 在那个文件夹里打开终端，运行 `.\Clocktail.Broker.exe install`，同意一次管理员权限。懒得弄也行，AI 助手第一次要写显卡时会自己调用 `install_service`。
+5. 重启 AI 助手。
+
+升级：先关掉所有 AI 助手（Windows 不让覆盖正在运行的程序；安装程序有办法绕过去，你是手动的，没这待遇），把新 zip 解压覆盖，再运行一次 `.\Clocktail.Broker.exe install`，不然后台服务还是旧版。卸载：依次运行 `.\Clocktail.Broker.exe stock` 和 `.\Clocktail.Broker.exe uninstall`，从 AI 助手的配置里删掉 clocktail，再删掉文件夹。调校记录在 `%LocalAppData%\Clocktail`，想删得一干二净就连它一起删。
+
+当然，你也可以把上面“安装”那段话贴给 AI 助手，然后去泡杯茶。机器人的活，还是交给机器人干。
+
 ## 免责声明
 
 非官方软件。超频可能导致游戏崩溃、画面出错、硬件减寿，风险自负。真出了事，调校日志会一五一十告诉你发生了什么，但不会跟你道歉。

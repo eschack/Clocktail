@@ -78,6 +78,25 @@ npx -y clocktail uninstall
 
 The card goes back to stock, and the service, the files and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card will not remember any of this.
 
+## The zip
+
+Clocktail is designed around your agent, and we do not recommend installing it by hand. The zip on the Releases page is for reading, inspecting and archiving: the MCP server and the service that setup installs, plus the command line, there to be scanned, taken apart or kept in a drawer.
+
+If you insist on being the robot yourself, here is the procedure.
+
+1. Right-click the zip → Properties → Unblock. Otherwise Windows may want a word about unsigned programs from the internet, and it has a point.
+2. Unzip it into `%LocalAppData%\Programs\Clocktail`, where setup would have put it, so `npx` can take over later without a fuss.
+3. Connect your agent to `clocktail-mcp.exe`: an stdio server, no arguments. For Claude Code:
+   ```
+   claude mcp add clocktail -s user -- "C:\Users\<you>\AppData\Local\Programs\Clocktail\clocktail-mcp.exe"
+   ```
+4. In that folder, run `.\Clocktail.Broker.exe install` and approve admin rights once. Or skip it: your agent calls `install_service` the first time it has something to write.
+5. Restart your agent.
+
+To update, close every agent first (Windows will not overwrite a program that is running; setup knows a way around that, but you are doing this by hand), unzip the new version over the old one, and run `.\Clocktail.Broker.exe install` again, or the service stays on the old version. To remove it, run `.\Clocktail.Broker.exe stock`, then `.\Clocktail.Broker.exe uninstall`, take clocktail out of your agent's configuration and delete the folder. Your profiles and tuning logs are in `%LocalAppData%\Clocktail`, should you want those gone as well.
+
+Or paste the line under "Set up Clocktail" into your agent and go make a cup of tea. Robot work is best left to robots.
+
 ## What is in the box
 
 | Folder | Contents |
