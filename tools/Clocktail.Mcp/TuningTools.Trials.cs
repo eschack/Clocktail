@@ -155,7 +155,8 @@ public sealed partial class TuningTools
         uint mw = (uint)Math.Round(watts * 1000);
         var r = card.Broker(BrokerRequest.OpProfile, "wall", mw.ToString(CultureInfo.InvariantCulture));
         if (!r.Ok) return Reply(r);
-        return Out(new { success = true, daily_power_limit_w = mw / 1000.0, power_limit_w = card.Read().Telemetry?.PowerEnforcedWatts });
+        var after = ReadAfter(out var unread);
+        return Out(new { success = true, daily_power_limit_w = mw / 1000.0, written = r.Written, power_limit_w = after?.Telemetry?.PowerEnforcedWatts, warning = unread });
     });
 
     [McpServerTool(Name = "watch", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -237,13 +238,14 @@ public sealed partial class TuningTools
         foreach (var (k, v) in items) args[k] = v;
         var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
         if (!r.Ok) return Reply(r);
-        bool intact = card.Read().Curve.Offsets().SequenceEqual(before);
+        bool? intact = ReadAfter(out var unread)?.Curve.Offsets().SequenceEqual(before);
         return Out(new
         {
             success = true,
             change,
+            written = r.Written,
             curve_intact = intact,
-            warning = intact ? null : "the V/F curve is not what it was before this write: call back_to_daily before going on",
+            warning = unread ?? (intact == false ? "the V/F curve is not what it was before this write: call back_to_daily before going on" : null),
         });
     }
 }

@@ -12,7 +12,8 @@ namespace Clocktail.Mcp;
 
 /// <summary>
 /// The GPU Clocktail talks to (<see cref="Pick"/>), read the way the tray reads it (no elevation needed: NVML, the rails' status, the V/F curve), and the
-/// broker for everything that writes or keeps state. Driver calls go one at a time: the SDK may call tools in parallel.
+/// broker for everything that writes or keeps state. Driver calls go one at a time (the SDK may call tools in parallel),
+/// and a read that cannot get to the driver within <see cref="DriverWait"/> says so instead of hanging (<see cref="DriverLane"/>).
 /// </summary>
 public sealed class Card : IDisposable
 {
@@ -20,7 +21,10 @@ public sealed class Card : IDisposable
     private readonly GpuDevice _gpu;
     private readonly NvClient _hw;
     private readonly GpuSession _session;
-    private readonly object _lane = new();
+    /// <summary>How long a read waits for the driver before it says the driver is not answering (CLOCKTAIL_MCP_DRIVER_WAIT_S).</summary>
+    public static readonly TimeSpan DriverWait = TimeSpan.FromSeconds(
+        int.TryParse(Environment.GetEnvironmentVariable("CLOCKTAIL_MCP_DRIVER_WAIT_S"), out var s) && s > 0 ? s : 5);
+    private readonly DriverLane _lane = new(DriverWait);
     private uint? _railMask;
 
     public Card()
@@ -57,7 +61,7 @@ public sealed class Card : IDisposable
 
     public Look Read()
     {
-        lock (_lane)
+        using (_lane.Enter("a full read of the card"))
         {
             TelemetrySnapshot? t = null;
             if (_mgr.Nvml != null && _gpu.HasNvml)
@@ -114,7 +118,7 @@ public sealed class Card : IDisposable
 
     public Sample ReadSample()
     {
-        lock (_lane)
+        using (_lane.Enter("a sample"))
         {
             TelemetrySnapshot? t = null;
             if (_mgr.Nvml != null && _gpu.HasNvml)
@@ -153,7 +157,7 @@ public sealed class Card : IDisposable
         double? peak = null;
         do
         {
-            lock (_lane)
+            using (_lane.Enter("an instantaneous power read"))
                 if (_mgr.Nvml != null && _gpu.HasNvml && _mgr.Nvml.FieldValues(_gpu.NvmlHandle, NvmlField.PowerInstantMw)?[0].Value is { } mw)
                     peak = Math.Max(peak ?? 0, mw / 1000.0);
             Thread.Sleep(20);
@@ -164,7 +168,7 @@ public sealed class Card : IDisposable
     /// <summary>The lightest look, for the residency sampler: NVVDD's present voltage, core clock, utilization, board W.</summary>
     public (uint? Uv, uint? Mhz, uint? Util, double? W) ReadPoint()
     {
-        lock (_lane)
+        using (_lane.Enter("the once-a-second read"))
         {
             TelemetrySnapshot? t = null;
             if (_mgr.Nvml != null && _gpu.HasNvml)
@@ -179,7 +183,7 @@ public sealed class Card : IDisposable
     /// broker and no elevation, as the CLI's reads do). What <paramref name="f"/> throws reaches the caller.</summary>
     public T WithDriver<T>(Func<NvClient, GpuSession, T> f)
     {
-        lock (_lane) return f(_hw, _session);
+        using (_lane.Enter("a driver read")) return f(_hw, _session);
     }
 
     /// <summary>A broker op for this GPU, with the refusal code and whether the card can have changed

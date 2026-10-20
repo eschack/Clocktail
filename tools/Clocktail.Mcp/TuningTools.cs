@@ -188,12 +188,14 @@ public sealed partial class TuningTools(Card card, Residency residency)
         var r = card.Broker(BrokerRequest.OpExperiment, "try",
             JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = at, at_mhz = t?.GraphicsClockMhz, context }));
         if (!r.Ok) return Reply(r);
-        var after = card.Read();
+        var after = ReadAfter(out var unread);
         return Out(new
         {
             success = true,
             change,
-            landed = after.Curve.Points.Where(p => p.Index >= window[0].Index && p.Index <= top).Select(p => Row(p, daily)),
+            written = r.Written,
+            landed = after?.Curve.Points.Where(p => p.Index >= window[0].Index && p.Index <= top).Select(p => Row(p, daily)),
+            warning = unread,
         });
     });
 
@@ -224,15 +226,16 @@ public sealed partial class TuningTools(Card card, Residency residency)
         }));
         if (!r.Ok) return Reply(r);
         // The curve should not move with the wall (only a P-state write clears it); say so if it did.
-        var after = card.Read();
-        bool intact = after.Curve.Offsets().SequenceEqual(before);
+        var after = ReadAfter(out var unread);
+        bool? intact = after?.Curve.Offsets().SequenceEqual(before);
         return Out(new
         {
             success = true,
             change,
-            power_limit_w = after.Telemetry?.PowerEnforcedWatts,
+            written = r.Written,
+            power_limit_w = after?.Telemetry?.PowerEnforcedWatts,
             curve_intact = intact,
-            warning = intact ? null : "the curve changed when the wall was written: call back_to_daily before going on",
+            warning = unread ?? (intact == false ? "the curve changed when the wall was written: call back_to_daily before going on" : null),
         });
     });
 
@@ -267,15 +270,16 @@ public sealed partial class TuningTools(Card card, Residency residency)
             [r == Clocktail.Domain.Rails.Rail.Nvvdd ? "nvvdd_ma" : "msvdd_ma"] = ma, ["keep_curve"] = true, ["context"] = context,
         }));
         if (!res.Ok) return Reply(res);
-        var after = card.Read();
-        bool intact = after.Curve.Offsets().SequenceEqual(before);
+        var after = ReadAfter(out var unread);
+        bool? intact = after?.Curve.Offsets().SequenceEqual(before);
         return Out(new
         {
             success = true,
             change,
-            rails = Rails(after),
+            written = res.Written,
+            rails = after == null ? null : Rails(after),
             curve_intact = intact,
-            warning = intact ? null : "the curve changed when the limit was written: call back_to_daily before going on",
+            warning = unread ?? (intact == false ? "the curve changed when the limit was written: call back_to_daily before going on" : null),
         });
     });
 
@@ -330,8 +334,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
         if (vmin != rail.Offsets.VminUv) args["msvdd_vmin_uv"] = vmin;
         var res = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
         if (!res.Ok) return Reply(res);
-        var after = card.Read();
-        return Out(new { success = true, change, rails = Rails(after) });
+        var after = ReadAfter(out var unread);
+        return Out(new { success = true, change, written = res.Written, rails = after == null ? null : Rails(after), warning = unread });
     });
 
     [McpServerTool(Name = "stress_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -355,7 +359,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
         var before = card.Read();
         var samples = new List<Card.Sample>();
         var started = DateTime.UtcNow;
-        int? code = Nvgwls.Run(exe, load, seconds, () => samples.Add(card.ReadSample()));
+        // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
+        int? code = Nvgwls.Run(exe, load, seconds, () => { try { samples.Add(card.ReadSample()); } catch (DriverBusyException) { } });
         int? resets = Nvgwls.DriverResets(started, code);
         string verdict = Nvgwls.Verdict(code, resets);
         bool failed = Nvgwls.Failed(code, resets);
@@ -777,6 +782,19 @@ public sealed partial class TuningTools(Card card, Residency residency)
             if (w.GetProperty("Kind").GetString() == RailWrites.Kind && w.GetProperty("Key").GetString() == RailWrites.Key(Clocktail.Domain.Rails.Rail.Msvdd))
                 return RailWrites.Decode(w.GetProperty("Value").GetString()!);
         return null;
+    }
+
+    /// <summary>The card after a write that landed: a read that cannot get to the driver must not turn the write's success
+    /// into a failure. Null, with the reason in <paramref name="unread"/>, when it cannot be read.</summary>
+    private Card.Look? ReadAfter(out string? unread)
+    {
+        unread = null;
+        try { return card.Read(); }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or Clocktail.Hw.NvApiException or Clocktail.Hw.NvmlException)
+        {
+            unread = $"written, but the card could not be read back: {e.Message}";
+            return null;
+        }
     }
 
     /// <summary>One line of everything a trial was written under, for the tuning log.</summary>

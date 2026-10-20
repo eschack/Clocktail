@@ -136,4 +136,17 @@ public class BrokerTransportTests : IDisposable
         var r = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpPing), "clocktail-absent-" + Guid.NewGuid().ToString("n"), connectMs: 400);
         Assert.Null(r);
     }
+
+    [Fact]
+    public void A_broker_that_takes_the_request_and_never_answers_times_out_instead_of_hanging()
+    {
+        string name = "clocktail-mute-" + Guid.NewGuid().ToString("n");
+        using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var accepted = server.WaitForConnectionAsync();
+        var started = DateTime.UtcNow;
+        var e = Assert.Throws<TimeoutException>(() => BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpPing), name, connectMs: 2000, answerWait: TimeSpan.FromMilliseconds(400)));
+        Assert.InRange(DateTime.UtcNow - started, TimeSpan.FromMilliseconds(350), TimeSpan.FromSeconds(5));
+        Assert.Contains("took longer than", e.Message);
+        Assert.True(accepted.IsCompleted);
+    }
 }
