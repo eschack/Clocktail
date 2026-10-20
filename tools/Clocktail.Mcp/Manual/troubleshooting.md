@@ -12,7 +12,7 @@ When a tool fails, when the card or the service misbehaves, and where things liv
 | Readings all zero or tools time out right after a driver reset or a device restart | the driver is reloading | wait 10-20 s; if the MCP server itself died, the person reconnects it in their agent (Claude Code: `/mcp`) |
 | Card at stock after a reboot although a daily profile is kept | the service writes it at logon once the GPU is idle | wait a minute; `card_settings`; if still stock, `npx -y clocktail verify` |
 | Power limit back to 575 W after a crash | normal: a driver reset restores the stock wall | the service puts the daily wall back first |
-| card_report's last row says a newer Clocktail is out | updates never install themselves | tell the person: close every agent, run `npx -y clocktail@latest setup`; the card, the daily profile and saved profiles stay. The check reads only the latest version number from registry.npmjs.org; `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off |
+| card_report's last row says a newer Clocktail is out | updates never install themselves | tell the person; with their yes, run `npx -y clocktail@latest setup --plan` and follow it (nothing needs closing), then they restart their agents; the card, the daily profile and saved profiles stay. The check reads only the latest version number from registry.npmjs.org; `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off |
 | Fan curve looks stock after a reset or reboot | not yet verified whether the firmware keeps it | the daily profile writes it again |
 
 ## Where things live

@@ -91,3 +91,13 @@ test('an installed file with the same bytes counts as the same; a changed or mis
 });
 
 test.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+test('a running server is named by the agent that started it', () => {
+  const { agentName, agentList } = require('../bin/clocktail.js');
+  assert.equal(agentName('claude.exe', String.raw`C:\Users\x\.local\bin\claude.exe`), 'Claude Code');
+  assert.equal(agentName('claude.exe', String.raw`C:\Users\x\AppData\Local\AnthropicClaude\app-1.2.3\claude.exe`), 'Claude Desktop');
+  assert.equal(agentName('OpenCode.exe', ''), 'OpenCode');
+  assert.equal(agentName('mystery.exe', ''), 'mystery.exe');
+  assert.equal(agentList([{ agent: 'OpenCode' }, { agent: 'Claude Code' }, { agent: 'OpenCode' }]), 'OpenCode and Claude Code');
+  assert.equal(agentList([]), '');
+});

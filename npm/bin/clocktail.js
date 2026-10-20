@@ -190,7 +190,10 @@ async function setup(opts) {
     if (c.note) say(`      ${c.note}`);
   }
   if (!opts.noService) say('    - install the Clocktail service (Windows asks for admin rights once)');
-  say('    - leave your card at stock');
+  const card = cardState();
+  say(`    - leave your card as it is: ${card.now}`);
+  const open = runningServers();
+  if (open.length) say(`\n  Clocktail is open in ${agentList(open)}. Nothing needs closing: they keep the version they started with until you restart them.`);
   if (opts.plan || (!opts.yes && !process.stdin.isTTY)) {
     const found = CLIENTS.filter(c => safe(() => c.present()));
     const ids = chosen.length ? chosen.map(c => c.id).join(',') : 'none';
@@ -209,19 +212,23 @@ async function setup(opts) {
   }
   say('');
 
-  // 1. The files. One already there with the same bytes stays: an agent may have it open, and connecting a second
-  // agent must not need the first one closed.
+  // 1. The files. One already there with the same bytes stays. One an agent is running cannot be overwritten, but
+  // Windows lets it be renamed: it moves aside (the agent runs on from it), the new one takes its place, and the old
+  // one is deleted once nothing runs it (the next setup or uninstall).
   fs.mkdirSync(INSTALL_DIR, { recursive: true });
-  let copied = 0;
+  removeMovedAside();
+  let copied = 0, movedAside = false;
   for (const f of FILES) {
     const src = path.join(DIST, f), dst = path.join(INSTALL_DIR, f);
     if (!fs.existsSync(src)) return fail(`this package is missing ${f}; it was built wrong. Nothing was changed.`);
     if (sameFile(src, dst)) continue;
-    try { fs.copyFileSync(src, dst); copied++; }
+    try { fs.copyFileSync(src, dst); }
     catch (e) {
-      if (e.code === 'EBUSY' || e.code === 'EPERM') return fail(`${f} is in use, probably by an agent that has Clocktail open, and this version differs from the one installed. Close your agents and run setup again.`);
-      throw e;
+      if (e.code !== 'EBUSY' && e.code !== 'EPERM') throw e;
+      try { fs.renameSync(dst, `${dst}.old-${Date.now()}`); fs.copyFileSync(src, dst); movedAside = true; }
+      catch (e2) { return fail(`${f} is in use by ${agentList(runningServers()) || 'another program'} and could not be moved aside (${e2.code}). Close those agents and run setup again.`); }
     }
+    copied++;
   }
   say(copied > 0 ? `  installed to ${INSTALL_DIR}` : `  already installed in ${INSTALL_DIR} (same version)`);
 
@@ -241,9 +248,10 @@ async function setup(opts) {
   }
 
   await verify();
+  const stale = movedAside ? runningServers() : [];
   say(`
-Done. Your card is still at stock: nothing has been overclocked yet, which is the safest overclock.
-
+Done. ${card.done}
+${stale.length ? `\n${agentList(stale)} still run${stale.length === 1 ? 's' : ''} the old version: restart ${stale.length === 1 ? 'it' : 'them'} to load ${VERSION} (in Claude Code, /mcp and reconnecting clocktail also does it).\n` : ''}
 Restart your agent, then tell it something like:
   "How's my card doing?"
   "Let's tune my GPU. Start from the founders preset."   (RTX 5090 only)
@@ -255,9 +263,11 @@ Uninstall any time:  npx -y clocktail uninstall
 
 async function uninstall(opts) {
   say('\nClocktail uninstall\n');
+  let atStock = !cardState().profile;
   if (fs.existsSync(BROKER)) {
     say('  putting the card back to stock');
-    run(BROKER, ['stock'], { quiet: true });
+    atStock = run(BROKER, ['stock'], { quiet: true }).status === 0;
+    if (!atStock) say('  the service did not answer, so the card could not be put back to stock now: it returns to stock at the next restart');
     say('  removing the service (Windows will ask for admin rights once)');
     run(BROKER, ['uninstall']);
   }
@@ -265,15 +275,16 @@ async function uninstall(opts) {
     try { if (c.present() && c.remove()) say(`  disconnected ${c.label}`); }
     catch (e) { say(`  could not disconnect ${c.label}: ${e.message}`); }
   }
+  removeMovedAside();
   try { fs.rmSync(INSTALL_DIR, { recursive: true, force: true }); say(`  removed ${INSTALL_DIR}`); }
-  catch (e) { say(`  could not remove ${INSTALL_DIR} (${e.code}): close your agents and run uninstall again`); }
+  catch (e) { say(`  could not remove ${INSTALL_DIR} (${e.code}): it is open in ${agentList(runningServers()) || 'another program'}; close it and run uninstall again`); }
   if (opts.purge) {
     fs.rmSync(STATE_DIR, { recursive: true, force: true });
     say(`  removed ${STATE_DIR} (profiles and tuning logs)`);
   } else if (fs.existsSync(STATE_DIR)) {
     say(`  kept your profiles and tuning logs in ${STATE_DIR} (--purge removes them)`);
   }
-  say('\nUninstalled. The card is at stock. It never knew.\n');
+  say(atStock ? '\nUninstalled. The card is at stock. It never knew.\n' : '\nUninstalled. The card returns to stock at the next restart.\n');
 }
 
 /** Every part checked for real: the files, the service answering with a GPU, the server starting and listing its
@@ -407,6 +418,50 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 }
 
+/** What the card runs, from the daily profiles the service keeps (setup itself never writes to the card). */
+function cardState() {
+  let best = null;
+  for (const d of safe(() => fs.readdirSync(STATE_DIR)) || []) {
+    const p = safe(() => JSON.parse(fs.readFileSync(path.join(STATE_DIR, d, 'profile.json'), 'utf8')));
+    if (p && Array.isArray(p.Writes) && p.Writes.length && (!best || String(p.KeptAt) > String(best.KeptAt))) best = p;
+  }
+  const kept = best && typeof best.KeptAt === 'string' ? ` (kept ${best.KeptAt.slice(0, 10)})` : '';
+  if (best && !best.Suspended) return { profile: best, now: `on your daily profile${kept}`, done: `Your card keeps its daily profile${kept}: setup never touches the card.` };
+  if (best) return { profile: best, now: `at stock (your daily profile${kept} is suspended)`, done: `Your card stays at stock; your daily profile${kept} is kept, and load_daily puts it back.` };
+  return { profile: null, now: 'at stock', done: 'Your card is still at stock: nothing has been overclocked yet, which is the safest overclock.' };
+}
+
+/** The installed server's running copies, each with the program that started it (the agent). */
+function runningServers() {
+  const ps = "Get-CimInstance Win32_Process -Filter \"Name='clocktail-mcp.exe'\" | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.ParentProcessId)\"; '{0}|{1}|{2}|{3}' -f $_.ProcessId, $_.ExecutablePath, $p.Name, $p.ExecutablePath }";
+  const r = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { quiet: true });
+  if (r.status !== 0) return [];
+  const dir = INSTALL_DIR.toLowerCase();
+  return r.stdout.split(/\r?\n/).filter(Boolean).map(l => l.trim().split('|')).filter(([, exe]) => (exe || '').toLowerCase().startsWith(dir))
+    .map(([pid, , parent, parentPath]) => ({ pid: Number(pid), agent: agentName(parent, parentPath) }));
+}
+
+const AGENT_NAMES = {
+  'opencode.exe': 'OpenCode', 'code.exe': 'VS Code', 'cursor.exe': 'Cursor', 'codex.exe': 'Codex', 'windsurf.exe': 'Windsurf',
+  'kiro.exe': 'Kiro', 'zed.exe': 'Zed', 'goose.exe': 'Goose', 'node.exe': 'a Node.js agent (Gemini CLI, Copilot CLI or similar)',
+};
+/** The agent's name from the program that started a server. */
+function agentName(exe, exePath) {
+  const e = String(exe || '').toLowerCase();
+  if (e === 'claude.exe') return /AnthropicClaude|\\Claude\\app-/i.test(exePath || '') ? 'Claude Desktop' : 'Claude Code';
+  return AGENT_NAMES[e] || exe || 'an unknown program';
+}
+function agentList(servers) {
+  const names = [...new Set(servers.map(s => s.agent))];
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/** Old copies an earlier setup moved aside, deleted once no agent runs them. */
+function removeMovedAside() {
+  for (const f of safe(() => fs.readdirSync(INSTALL_DIR)) || [])
+    if (/\.old-\d+$/.test(f)) safe(() => fs.unlinkSync(path.join(INSTALL_DIR, f)));
+}
+
 function backup(file) { if (fs.existsSync(file)) fs.copyFileSync(file, file + '.clocktail.bak'); }
 
 /** True when `dst` exists with the same bytes as `src`. Reading is fine while an agent runs the file; writing is not. */
@@ -451,7 +506,7 @@ function fail(msg) { say(`\n  ${msg}\n`); process.exit(1); }
 // ---- entry --------------------------------------------------------------------------------------------------------
 
 // Loaded by the tests as a module: hand them the agents and run nothing.
-if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile }; return; }
+if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList }; return; }
 
 const argv = process.argv.slice(2);
 const opts = {

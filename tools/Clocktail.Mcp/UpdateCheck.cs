@@ -60,6 +60,6 @@ public static class UpdateCheck
         latest == null
             ? (Current, false, Off ? "update check off (CLOCKTAIL_NO_UPDATE_CHECK)" : "could not check npm for a newer version")
             : ReleaseVersion.IsNewer(latest, Current)
-                ? ($"{Current} → {latest} available", true, $"close your agents, then run {UpdateCommand}; the card and its profiles stay as they are")
+                ? ($"{Current} → {latest} available", true, $"run {UpdateCommand}, then restart your agents; the card and its profiles stay as they are")
                 : ($"{Current} (latest)", false, "up to date");
 }
