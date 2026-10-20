@@ -21,9 +21,9 @@ internal static class VfCommands
           --vf                     JSON: every editable point (voltage, firmware voltage, base, effective, offset), the
                                    firmware envelope, the Core voltage ceiling and the knee (read-only)
           --vf-preview MV          JSON: the offsets --vf-undervolt MV would write (read-only)
-          --vf-undervolt MV        same frequency at MV millivolts less: from the knee up each point takes the stock
-                                   frequency of the voltage MV above it, capped at the stock frequency of the firmware's
-                                   Core voltage ceiling; 0 is the stock curve. Through the broker; journal + sentinel
+          --vf-undervolt MV        same frequency at MV millivolts less (0..100): from the knee up each point takes the
+                                   stock frequency of the voltage MV above it, capped at the stock frequency of the
+                                   firmware's Core voltage ceiling; 0 is the stock curve. Through the broker; journal + sentinel
           --vf-offsets LIST        per-point offsets in kHz, runs as offset*count ("0*126,-7500"), the encoding --vf
                                    prints; same path. After a landed write the curve is read back ("after": points not
                                    where the driver's model puts them, bases that moved since the read the request used)
@@ -165,12 +165,17 @@ internal static class VfCommands
 
     private static void Print(object o) => Console.WriteLine(JsonSerializer.Serialize(o, Json));
 
-    /// <summary>Millivolts with up to 3 decimals, 0..500, to µV. The firmware range bounds the offsets this produces; the
-    /// upper bound only catches a typo before it costs a stability run.</summary>
+    /// <summary>The deepest undervolt --vf-undervolt takes. 25/50/75 mV held on the reference card; a 250 mV whole-curve
+    /// shift crashed the whole system (bug check 0x133, 2026-10-18), and the firmware range allowed it.</summary>
+    public const int MaxUndervoltMv = 100;
+
+    /// <summary>Millivolts with up to 3 decimals, 0..<see cref="MaxUndervoltMv"/>, to µV.</summary>
     private static int Undervolt(string s)
     {
-        if (!decimal.TryParse(s, NumberStyles.Number, CultureInfo.InvariantCulture, out var mv) || mv < 0 || mv > 500 || decimal.Round(mv, 3) != mv)
-            throw new ArgumentException($"'{s}' is not an undervolt between 0 and 500 mV with at most 3 decimals.");
+        if (!decimal.TryParse(s, NumberStyles.Number, CultureInfo.InvariantCulture, out var mv) || mv < 0 || decimal.Round(mv, 3) != mv)
+            throw new ArgumentException($"'{s}' is not an undervolt in mV with at most 3 decimals.");
+        if (mv > MaxUndervoltMv)
+            throw new ArgumentException($"{mv} mV is deeper than {MaxUndervoltMv} mV: 75 mV held on the reference card and 250 mV crashed the whole system (bug check 0x133). Go down in 25 mV steps with a stress run between them.");
         return (int)(mv * 1000);
     }
 
