@@ -32,14 +32,13 @@ public readonly record struct NvmlFieldValue(uint Id, int Status, int Type, ulon
     };
 }
 
-/// <summary>The NVML field ids Clocktail reads (public nvml.h), each read on the reference card (driver 617.42,
-/// 2026-10-20). The policy counters are nanoseconds the clock was held by that reason since the driver loaded; the
-/// instantaneous power is the board's draw now, where nvmlDeviceGetPowerUsage on this card is close to a 1 s average.</summary>
+/// <summary>The NVML field ids Clocktail reads (public nvml.h), read on the reference card (driver 617.42, 2026-10-20):
+/// the board's instantaneous power, where nvmlDeviceGetPowerUsage on this card is close to a 1 s average. The
+/// time-in-limit counters (field 74 and the like, nvidia-smi's "Clocks Event Reasons Counters") are not used: 30 s at the
+/// 600 W wall with sw_power_cap set added nothing to the power one, nvidia-smi's included.</summary>
 public static class NvmlField
 {
-    public const uint PowerPolicyNs = 74, ThermalPolicyNs = 75, BoardLimitNs = 77, ReliabilityNs = 79;
     public const uint PowerAverageMw = 185, PowerInstantMw = 186;
-    public const uint SwThermalSlowdownNs = 269, HwThermalSlowdownNs = 270;
 }
 
 /// <summary>nvmlTemperatureThresholds_t, the ones the 5090 answers (absolute °C: 96, 93, 90 on the reference card).</summary>

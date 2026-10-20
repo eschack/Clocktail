@@ -74,6 +74,11 @@ public sealed partial class SettingsTools(Card card)
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
+            temperature = Section(() =>
+            {
+                var (max, slow, shut) = card.TemperatureLimits();
+                return new { now_c = t?.TemperatureC, margin_c = t?.TempMarginC, max_operating_c = max, slowdown_c = slow, shutdown_c = shut };
+            }),
             power = Section(() => Power(c, t)),
             clock_offsets = Section(() => P0Offsets(c)),
             vf_curve = Section(() => Curve(c, rails)),
@@ -158,6 +163,7 @@ public sealed partial class SettingsTools(Card card)
                 clock_below_curve_top_mhz = R(topMhz - clock),
                 util_pct = Median(behind.Select(x => (double?)x.R.UtilPct)),
                 temp_c = Median(behind.Select(x => x.S.Telemetry?.TemperatureC)),
+                temp_margin_c = Median(behind.Select(x => (double?)x.S.Telemetry?.TempMarginC)),
                 reasons = behind.SelectMany(x => x.R.Reasons).Distinct(),
             },
             samples = samples.Select(x => new

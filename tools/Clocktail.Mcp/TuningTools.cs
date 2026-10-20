@@ -82,6 +82,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
             power_w = t?.PowerWatts,
             power_limit_w = t?.PowerEnforcedWatts,
             temp_c = t?.TemperatureC,
+            temp_margin_c = t?.TempMarginC,
             util_pct = t?.GpuUtilPercent,
             vram_used_gib = Gib(t?.VramUsedBytes),
             vram_total_gib = Gib(t?.VramTotalBytes),

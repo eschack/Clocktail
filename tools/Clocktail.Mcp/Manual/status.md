@@ -6,6 +6,7 @@ What each status field means, what is normal, how to name the limiter, and the t
 - `clock_mhz`: core clock now. `memory_mhz`: the memory clock as NVML reports it (13801 MHz stock on the 5090, 14159 at +358).
 - `power_w` against `power_limit_w`: board power against the wall in force.
 - `temp_c`, `util_pct`, `limit_reasons`: NVML's own (see the quirks below before trusting `limit_reasons`).
+- `temp_margin_c`: NVIDIA's own headroom (nvidia-smi's "T.Limit"): how many °C until the GPU slows itself down, at 90 °C on a 5090 (hardware slowdown 93, shutdown 96; `card_settings` has all three). It is the number to watch, not a fixed temperature.
 - `vram_used_gib` of `vram_total_gib` (31.8 on a 5090; the driver's reservation left out, as nvidia-smi does) and `memory_controller_pct` (how busy the memory bus is). A game near the total starts swapping over PCIe, which shows as stutter no clock fixes. `stress_test` and `watch` give its P10/P50/P90, the CSVs every sample.
 - `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
 - `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
@@ -34,6 +35,7 @@ The firmware climbs the curve and stops at the first limit; each leaves a trace:
 - **Game overlays show a lower clock than the curve** under a tight wall (very fast power throttling), but the voltage still follows the curve point, so stability is a property of the point, not of the overlay's number.
 - **Third-party tools** (HWiNFO and similar) misread rail voltages and rail power on this card; trust Clocktail's readings.
 - NVML temperature runs 1.5-2.5 C above the temperature the fan curve uses while heating.
+- **NVML's time-in-limit counters do not count the wall** on this card (driver 617.42): 30 s at the 600 W wall with `sw_power_cap` set added nothing to the power one, and nvidia-smi's "Clocks Event Reasons Counters" read the same. Clocktail does not use them; the limiter's samples and the live CSV are the record.
 
 ## Normal ranges on the reference card
 - Idle: ~800-835 mV, ~45 W, fans stopped below ~43 C.

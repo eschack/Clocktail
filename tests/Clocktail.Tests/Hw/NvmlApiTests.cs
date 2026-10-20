@@ -123,7 +123,7 @@ public sealed class NvmlApiTests : IDisposable
     public void Field_values_come_back_by_their_type_and_a_field_that_says_lost_latches()
     {
         var nvml = FakeNvml.Open();
-        var v = nvml.FieldValues(H, NvmlField.PowerInstantMw, NvmlField.PowerPolicyNs)!;
+        var v = nvml.FieldValues(H, NvmlField.PowerInstantMw, 74)!;   // 74: a counter, unsigned long long
         Assert.Equal(48_102.0, v[0].Value);
         Assert.Equal(927_153_308_736.0, v[1].Value);
         Assert.Equal(39, nvml.MarginTemperatureC(H));

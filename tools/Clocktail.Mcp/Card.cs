@@ -47,6 +47,20 @@ public sealed class Card : IDisposable
 
     public string StableId => _gpu.Identity.StableId;
 
+    /// <summary>NVIDIA's temperature thresholds for this GPU, absolute °C: where it slows down to stay safe (max operating; the
+    /// driver's T.Limit margin counts down to it), the hardware slowdown and the shutdown (90 / 93 / 96 on the reference
+    /// card). Null each where NVML does not answer.</summary>
+    public (uint? MaxOperatingC, uint? SlowdownC, uint? ShutdownC) TemperatureLimits()
+    {
+        using (_lane.Enter("the temperature thresholds"))
+        {
+            if (_mgr.Nvml is not { } n || !_gpu.HasNvml) return (null, null, null);
+            var h = _gpu.NvmlHandle;
+            return (n.TemperatureThresholdC(h, NvmlTemperatureThreshold.GpuMax), n.TemperatureThresholdC(h, NvmlTemperatureThreshold.Slowdown),
+                n.TemperatureThresholdC(h, NvmlTemperatureThreshold.Shutdown));
+        }
+    }
+
     /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
     public string? DriverGone() => DriverLoss.Why(_mgr.Nvml, [_session]);
     public string Name => _gpu.Identity.Name;

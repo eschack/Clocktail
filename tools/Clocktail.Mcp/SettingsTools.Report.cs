@@ -81,6 +81,11 @@ public sealed partial class SettingsTools
         });
     });
 
+    /// <summary>The temperature's mark: ⛔ at NVIDIA's own slowdown point (no margin left) or 90 °C, ⚠️ within 5 °C of it
+    /// or from 85 °C, ✅ else. The margin is the driver's T.Limit, where it gives one.</summary>
+    public static string TemperatureMark(double tempC, double? marginC) =>
+        tempC >= HotC || marginC <= 0 ? Act : tempC >= WarmC || marginC <= 5 ? Look : Safe;
+
     private static object Plain(ReportRow r) => new { setting = r.Name, original = r.Original, now = r.Now, change = r.Change, safe = r.Mark, note = r.Note };
 
     private static List<ReportRow> SettingRows(JsonElement s)
@@ -219,9 +224,16 @@ public sealed partial class SettingsTools
         var rd = Obj(l, "readings");
         double? temp = Num(rd, "temp_c"), board = Num(rd, "board_w"), limit = Num(rd, "power_limit_w"), clock = Num(rd, "clock_mhz"),
             mv = Num(rd, "nvvdd_mv"), max = Num(rd, "nvvdd_max_mv"), util = Num(rd, "util_pct");
+        // NVIDIA's own margin to the temperature where the GPU slows down, where the driver gives it; the fixed marks else.
+        double? margin = Num(rd, "temp_margin_c") ?? Num(s, "temperature", "margin_c"), maxOp = Num(s, "temperature", "max_operating_c");
         if (temp is { } t)
-            rows.Add(new("🌡️", "Temperature", "", $"{F(t)} °C", "", t >= HotC ? Act : t >= WarmC ? Look : Safe,
-                t >= HotC ? "too hot: check the case airflow and the fan curve now" : t >= WarmC ? "warm: the stock fan curve holds 83 °C at the wall" : t < 50 ? "cool" : "healthy"));
+        {
+            string mark = TemperatureMark(t, margin);
+            bool hot = mark == Act, warm = mark != Safe;
+            string headroom = margin is { } m ? $"{F(m)} °C under the {(maxOp is { } mo ? $"{F(mo)} °C " : "")}temperature where it slows down" : "";
+            rows.Add(new("🌡️", "Temperature", "", $"{F(t)} °C", "", hot ? Act : warm ? Look : Safe,
+                Join(hot ? "too hot: check the case airflow and the fan curve now" : warm ? "warm: the stock fan curve holds 83 °C at the wall" : t < 50 ? "cool" : "healthy", headroom)));
+        }
         if (board is { } b)
             rows.Add(new("⚡", "Power draw", "", limit is { } lim ? $"{F(b)} W of {F(lim)} W" : $"{F(b)} W", "", Safe,
                 Join(util is { } u ? $"{F(u)} % busy" : null, limit is { } li && b >= li - 10 ? "on the power limit" : null)));
