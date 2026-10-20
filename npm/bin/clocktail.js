@@ -442,7 +442,7 @@ function runningServers() {
 }
 
 /** Rows of pid|exe|parent name|parent path, as the query above prints them: the installed servers an agent started. Since
- * 0.1.8 each agent's server is a relay with a worker under it; the worker (its parent is the server itself) is not an agent. */
+ * 0.2.0 each agent's server is a relay with a worker under it; the worker (its parent is the server itself) is not an agent. */
 function serversByAgent(rows, dir) {
   return rows.filter(([, exe, parent]) => (exe || '').toLowerCase().startsWith(dir) && String(parent || '').toLowerCase() !== 'clocktail-mcp.exe')
     .map(([pid, , parent, parentPath]) => ({ pid: Number(pid), agent: agentName(parent, parentPath) }));
