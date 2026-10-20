@@ -303,17 +303,14 @@ public sealed class BrokerDispatcher
             }
             case "save":
             {
-                // Value: the name. The daily profile as it is kept now, saved beside it under that name; one already saved
-                // under the name is replaced.
+                // Value: the name, any name. The daily profile as it is kept now, saved under it; one already saved under
+                // the name (whatever its case) is replaced.
                 var (name, bad) = SavedProfiles.Normalize(req.Value);
                 if (name == null) return Fail(bad!, BrokerCode.BadRequest);
                 if (profile == null) return Fail("no daily profile is kept yet: keep_as_daily (or load a preset) first, then save it", BrokerCode.CannotWrite);
-                var dir = SavedProfiles.DirBeside(target.Journal.Path);
-                Directory.CreateDirectory(dir);
-                var file = SavedProfiles.PathOf(dir, name);
-                bool replaced = File.Exists(file);
+                var file = SavedProfiles.PathBeside(target.Journal.Path);
                 var saved = new DailyProfile(profile.Writes, _host.Now).Noted(_host.Now, $"saved as '{name}' from the daily profile kept {profile.KeptAt:yyyy-MM-dd HH:mm}");
-                saved.Save(file);
+                bool replaced = SavedProfiles.Save(file, name, saved);
                 Log(target, $"Profile saved · {name}", [replaced ? "Replaced the profile saved under this name" : null, .. profile.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}")]);
                 return Ok(new { success = true, name, path = file, replaced, profile = saved });
             }
@@ -321,20 +318,15 @@ public sealed class BrokerDispatcher
                 return Ok(new
                 {
                     success = true,
-                    profiles = SavedProfiles.All(SavedProfiles.DirBeside(target.Journal.Path)).Select(p => new { name = p.Name, saved_at = p.Profile.KeptAt, writes = p.Profile.Writes }),
+                    profiles = SavedProfiles.All(SavedProfiles.PathBeside(target.Journal.Path)).Select(p => new { name = p.Name, saved_at = p.Profile.KeptAt, writes = p.Profile.Writes }),
                 });
             case "forget":
             {
                 // Value: a saved profile's name. The daily profile and the presets are never deleted here.
-                var (name, bad) = SavedProfiles.Normalize(req.Value);
-                if (name == null) return Fail(bad!, BrokerCode.BadRequest);
-                var file = SavedProfiles.PathOf(SavedProfiles.DirBeside(target.Journal.Path), name);
-                var gone = DailyProfile.Load(file);
-                if (gone == null) return Fail($"no profile is saved as '{name}'", BrokerCode.CannotWrite);
-                File.Delete(file);
-                if (File.Exists(Platform.AtomicFile.BackupPath(file))) File.Delete(Platform.AtomicFile.BackupPath(file));
-                Log(target, $"Saved profile deleted · {name}", [.. gone.Writes.Select(w => $"Was: {w.Kind}/{w.Key} = {w.Value}")]);
-                return Ok(new { success = true, name, deleted = gone });
+                var gone = SavedProfiles.Delete(SavedProfiles.PathBeside(target.Journal.Path), req.Value);
+                if (gone == null) return Fail($"no profile is saved as '{req.Value}'", BrokerCode.CannotWrite);
+                Log(target, $"Saved profile deleted · {gone.Value.Name}", [.. gone.Value.Profile.Writes.Select(w => $"Was: {w.Kind}/{w.Key} = {w.Value}")]);
+                return Ok(new { success = true, name = gone.Value.Name, deleted = gone.Value.Profile });
             }
             case "wall":
             {
@@ -606,11 +598,12 @@ public sealed class BrokerDispatcher
     /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on, as a preset does.</summary>
     private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path)
     {
-        var dir = SavedProfiles.DirBeside(target.Journal.Path);
-        string known = string.Join(", ", [.. Presets.All.Select(p => p.Name), .. SavedProfiles.All(dir).Select(p => p.Name)]);
-        var (name, _) = SavedProfiles.Normalize(value);
-        var saved = name == null ? null : DailyProfile.Load(SavedProfiles.PathOf(dir, name));
-        if (saved == null) return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
+        var file = SavedProfiles.PathBeside(target.Journal.Path);
+        if (SavedProfiles.Find(file, value) is not var (name, saved))
+        {
+            string known = string.Join(", ", [.. Presets.All.Select(p => p.Name), .. SavedProfiles.All(file).Select(p => $"'{p.Name}'")]);
+            return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
+        }
         CloseTrial(target, Experiment.Survived, $"saved profile '{name}' went on");
         var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History)
             .Noted(_host.Now, $"saved profile '{name}' loaded");

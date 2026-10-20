@@ -28,5 +28,5 @@ The service keeps one daily profile: the one it puts back after every boot and d
 - `list_presets`: the presets and the saved profiles, each with its settings.
 - `load_preset name`: a saved profile becomes the daily profile and goes on now, exactly as a preset does. It replaces the daily profile: if the current one is not saved yet and they may want it back, `save_profile` it first. Ask first.
 - `delete_profile name`: deletes a saved one; the daily profile and the presets are untouched. Ask first.
-- Names: letters (any language), digits, '-' and '_'; not a preset's name. Saved profiles belong to this card: they live in its state folder.
+- Names: whatever the person calls it, in any language, spaces and symbols included (not a preset's name, no line breaks, at most 64 characters). Case does not matter when loading. Saved profiles belong to this card: they live in its state folder (saved-profiles.json).
 - A quiet profile is usually the daily one with a lower wall (`set_daily_power_limit`) and a gentler fan curve: the curve can stay, since a lower wall only moves the card down it.

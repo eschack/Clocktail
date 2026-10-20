@@ -629,26 +629,31 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(Wall(450_000)).Ok);
         var saved = d.Dispatch(P("save", " Quiet "));
         Assert.True(saved.Ok, saved.Error);
-        Assert.Equal("quiet", saved.Result!.Value.GetProperty("name").GetString());
+        Assert.Equal("Quiet", saved.Result!.Value.GetProperty("name").GetString());
         Assert.False(saved.Result!.Value.GetProperty("replaced").GetBoolean());
         Assert.False(d.Dispatch(P("save", "founders")).Ok);                       // a preset's name
-        Assert.False(d.Dispatch(P("save", "my quiet")).Ok);                       // no spaces
-        Assert.True(d.Dispatch(P("save", "安静")).Ok);                 // any script's letters ("quiet" in Chinese)
+        Assert.False(d.Dispatch(P("save", "  ")).Ok);                             // no name
+        Assert.False(d.Dispatch(P("save", "two\nlines")).Ok);
+        const string Odd = "CS2 / late night: <quiet> 安静 \U0001F319";   // any name at all, never a file name
+        Assert.True(d.Dispatch(P("save", Odd)).Ok);
 
         Assert.True(d.Dispatch(Wall(600_000)).Ok);                                // the daily profile moves on
         Assert.Equal("600000", Kept());
         var list = d.Dispatch(P("saved"));
-        Assert.Equal(["quiet", "安静"], list.Result!.Value.GetProperty("profiles").EnumerateArray().Select(p => p.GetProperty("name").GetString()).Order(StringComparer.Ordinal));
+        Assert.Equal(["Quiet", Odd], list.Result!.Value.GetProperty("profiles").EnumerateArray().Select(p => p.GetProperty("name").GetString()));
 
         var loaded = d.Dispatch(P("preset", "QUIET"));
         Assert.True(loaded.Ok, loaded.Error);
         Assert.Equal("450000", Kept());
         Assert.Equal(450_000u, _requests[0xfe]);                                   // on the card now
-        Assert.Contains("Saved profile loaded · quiet", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+        Assert.Contains("Saved profile loaded · Quiet", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
 
         var missing = d.Dispatch(P("preset", "loud"));
         Assert.False(missing.Ok);
         Assert.Contains("quiet", missing.Error);                                   // the names it knows
+        Assert.True(d.Dispatch(P("preset", Odd)).Ok);                             // the odd one loads by its name too
+        Assert.Equal("450000", Kept());
+        Assert.True(d.Dispatch(P("forget", Odd)).Ok);
         Assert.True(d.Dispatch(P("forget", "quiet")).Ok);
         Assert.False(d.Dispatch(P("forget", "quiet")).Ok);
         Assert.False(d.Dispatch(P("preset", "quiet")).Ok);

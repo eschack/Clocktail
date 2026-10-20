@@ -501,7 +501,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         "Save the daily profile under a name (\"quiet\", \"games\", \"benchmark\"), so the person can keep several and switch " +
         "with load_preset and that name. It saves what is kept, not a trial on the card: keep_as_daily first when the person " +
         "wants the card's current settings saved. A name already used is replaced (say so). The daily profile itself does not " +
-        "change. Names: letters, digits, '-' and '_'; not a preset's name.")]
+        "change. Any name the person likes, in any language (not a preset's name; case does not matter).")]
     public string SaveProfile([Description("The name to save it under.")] string name) =>
         Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "save", name)));
 
