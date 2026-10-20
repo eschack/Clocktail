@@ -70,7 +70,7 @@ Do: 2-4 of their most demanding games, the heaviest scenes, 5-10 minutes each. B
 Why: a stress pass is necessary, not sufficient. Their own games are the final judge.
 
 ## Phase 6: memory
-Do: `set_memory_offset` in steps of 100-250 MHz. Each step: `stress_test` 60 s (a data error is exit code 6) and the same repeatable benchmark (a game's built-in one, or the same scene with `watch`). Stop when the score stops rising, then go back one step.
+Do: `set_memory_offset` in steps of 100-250 MHz. Each step: `stress_test` 60 s (a data error is exit code 6) and the same repeatable benchmark (a game's built-in one, or the same scene with `watch`). Compare A B B A at one temperature (see 'Comparing two settings'). Stop when the score stops rising, then go back one step.
 Reference: +358 cut latency 2.4 % and left bandwidth flat. Nothing higher was tested on it.
 Why a benchmark and not just a pass: past its edge, memory can retry errors and get slower before it crashes. A higher offset that scores lower is past the edge.
 Why after the curve: a memory write zeroes the curve (the tool writes it back in the same trial), and a failure should not be confused with the curve's.
@@ -80,10 +80,21 @@ Do, in order:
 1. `adjust_msvdd` REL +25, then +25 again (stock -50 → 0, NVIDIA's own limit).
 2. `adjust_xbar` demand +10, then +10 again (+20 mV).
 3. `adjust_xbar` offset +50 per call, up to +250..+300.
-Judge each step with a render or compute benchmark (Blender), a memory-heavy game, and `stress_test` at load 100 and 50.
+Judge each step with a render or compute benchmark (Blender), a memory-heavy game, and `stress_test` at load 100 and 50, A B B A at one temperature (see 'Comparing two settings').
 Reference: REL 0 made Blender ~2 % faster. XBAR +300 with +20 mV made it 6-7 % faster.
 Why it works: the crossbar between the GPCs, L2 and memory runs off MSVDD, and NVIDIA ships MSVDD 50 mV inside its own limit. Under load XBAR is held to ~0.9 x the core clock, and +250 reaches that.
 The trap: above +250 with no voltage demand, memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. The tool refuses it. If something is unstable here, step XBAR down 50 MHz before touching the curve.
+
+## Comparing two settings: A B B A at one temperature
+Use it whenever the question is "is B faster than A" (an undervolt, MSVDD, XBAR, memory, two curves), not "does B hold".
+1. Warm the card up first: `stress_test load=100 seconds=120`, or the game, until the temperature stops climbing. The curve drops as the card heats (steps near 57/62/72/82 C, ~2 MHz per C at 600 W), so a comparison run across a warm-up measures the warm-up.
+2. Alternate, back to back, each step the same length: A, B, B, A (twice for a small effect). Each setting then sees the same average temperature. Never A A A then B B B.
+3. Measure one repeatable thing per step: `stress_test` at a fixed load (its p50 clock and power), a game's built-in benchmark, or a render from the command line (Blender Cycles, the median of several renders). In their own game: the same scene, with `watch`.
+4. Report each difference with the temperature beside it, and the spread between the two A runs: a difference smaller than that spread is noise.
+On the reference card:
+- MSVDD REL -50 → -175 under the 600 W wall, run as a ladder while the card heated from 68 to 83 C: "no gain" (2835-2850 MHz throughout). The same change A B B A at 83-84 C: +40-60 MHz, one to two curve points. The ladder had measured the warm-up.
+- Blender (2560x1440, 384 samples, OptiX, median of 7), REL -50 / -25 / 0 in A B C C B A: 6.774 / 6.697 / 6.646 s, with repeats within 0.4 %, so the 2 % is real. A ray-tracing score that moved between 0.95 and 1.05 from one round to the next decided nothing.
+Use `log_note` for each step's number and temperature as you go, so the comparison survives the session.
 
 ## Phase 8: keep it, live with it
 - `keep_as_daily` (ask). The service puts it back after every boot and driver reset.
