@@ -11,7 +11,7 @@ using Clocktail.Hw;
 namespace Clocktail.Mcp;
 
 /// <summary>
-/// The first GPU, read the way the tray reads it (no elevation needed: NVML, the rails' status, the V/F curve), and the
+/// The GPU Clocktail talks to (<see cref="Pick"/>), read the way the tray reads it (no elevation needed: NVML, the rails' status, the V/F curve), and the
 /// broker for everything that writes or keeps state. Driver calls go one at a time: the SDK may call tools in parallel.
 /// </summary>
 public sealed class Card : IDisposable
@@ -26,10 +26,20 @@ public sealed class Card : IDisposable
     public Card()
     {
         _mgr = GpuManager.Open();
-        _gpu = _mgr.Gpus[0];
+        _gpu = Pick(_mgr.Gpus) ?? throw new InvalidOperationException("no NVIDIA GPU was found: Clocktail needs an NVIDIA RTX 50 series card with its driver loaded");
+        OtherGpus = [.. _mgr.Gpus.Where(g => g != _gpu).Select(g => g.Identity.Name)];
         _hw = new NvClient(_mgr.NvApi);
         _session = new GpuSession(_gpu.NvapiHandle, _gpu.Identity.Name);
     }
+
+    /// <summary>The card to talk to: the first RTX 50 series card (what every layout was measured on), else the first
+    /// NVIDIA GPU; null with none. The broker is asked by this card's stable id, so the order is never relied on.</summary>
+    public static GpuDevice? Pick(IReadOnlyList<GpuDevice> gpus) => gpus.FirstOrDefault(g => IsRtx50(g.Identity.Name)) ?? gpus.FirstOrDefault();
+
+    public static bool IsRtx50(string name) => System.Text.RegularExpressions.Regex.IsMatch(name, @"RTX\s*50\d\d");
+
+    /// <summary>The other NVIDIA GPUs in this PC, by name: Clocktail neither reads nor tunes them.</summary>
+    public IReadOnlyList<string> OtherGpus { get; }
 
     public string StableId => _gpu.Identity.StableId;
     public string Name => _gpu.Identity.Name;

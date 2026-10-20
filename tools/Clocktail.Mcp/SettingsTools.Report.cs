@@ -54,6 +54,10 @@ public sealed partial class SettingsTools
         var l = limiterDoc.RootElement;
         var rows = SettingRows(s);
         var live = LiveRows(s, l);
+        var others = Arr(s, "other_gpus").Select(g => g.GetString()).ToList();
+        if (others.Count > 0)
+            live.Add(new("🖥️", "Other GPUs", "", string.Join(", ", others), "", Look,
+                $"Clocktail reads and tunes the {Str(s, "gpu")} only; stress_test's load (nvgwls) picks its own GPU, so check the clock moves when it runs"));
         if (Str(s, "driver") is { } driver && Str(s, "tested_on") is { } tested)
             live.Add(new("🧪", "Tested on", "", $"driver {driver}, VBIOS {Str(s, "vbios")}", "", Info, tested));
         var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());

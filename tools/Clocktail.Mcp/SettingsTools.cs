@@ -72,6 +72,7 @@ public sealed partial class SettingsTools(Card card)
             driver = VerifiedOn.Driver(card.DriverVersion),
             vbios = card.Vbios,
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
+            other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
             power = Section(() => Power(c, t)),
             clock_offsets = Section(() => P0Offsets(c)),
