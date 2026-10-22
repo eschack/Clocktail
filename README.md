@@ -2,39 +2,39 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**Agent-assisted overclocking for NVIDIA RTX 50 (Blackwell), served over MCP.** You play games. An AI agent tunes your graphics card. NVIDIA's own stress tester decides who was right. This is the correct division of labor.
+**Overclock your RTX 50 card by talking to an AI agent, over MCP.** You play. The agent tunes. NVIDIA's own stress tester settles the arguments.
 
-## Congratulations
+## So you want to overclock a card that's already this fast
 
-You have chosen to overclock a graphics card that was already very fast. We respect this decision and will not ask you to explain it.
+We get it. We won't ask.
 
 ### Set up Clocktail
 
-Copy this into your coding agent:
+Paste this into your coding agent:
 
 ```
 Install Clocktail and connect it to this coding agent using npx clocktail@latest setup. Show me the setup plan for approval, then verify the installation.
 ```
 
-Or run it in a terminal yourself (Node.js required):
+Or run it yourself (you'll need Node.js):
 
 ```
 npx -y clocktail setup
 ```
 
-Either way you choose your agents, review the proposed changes, and approve them. Setup installs Clocktail, connects your agents (with backups of their configuration), and installs the service; Windows asks for admin rights once. Restart your agent afterward. Your card stays at stock until you say otherwise.
+Either way, setup shows you what it's going to change before it changes anything. You pick the agents, it backs up their config, installs the service, and Windows asks for admin rights once. Restart your agent when it's done. Your card stays at stock until you say otherwise.
 
-Updates do not install themselves. When a new version is out, "How's my card doing?" says so in its last row: run the same `npx -y clocktail@latest setup` again (your agent can run it for you), then restart your agents. Your card, your daily profile and your saved profiles stay as they are. To check, Clocktail reads one thing from the npm registry, the latest version number, and sends nothing about your computer or card. `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off.
+It doesn't update itself. When a new version is out, "How's my card doing?" mentions it at the bottom. Run the same setup command again (or ask your agent to), restart, done. Your settings and profiles stay where they are. The update check reads exactly one thing from npm, the latest version number, and sends nothing about you or your card. `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off.
 
-Setup supports Claude Code, Claude Desktop, Codex, Cursor, OpenCode, VS Code, Gemini CLI, Windsurf, GitHub Copilot CLI and a dozen more (the list is borrowed from [REA](https://github.com/morluto/rea), with thanks). Any other MCP client works too: point it at `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe`.
+It works with Claude Code, Claude Desktop, Codex, Cursor, OpenCode, VS Code, Gemini CLI, Windsurf, GitHub Copilot CLI and about a dozen more (the list is borrowed from [REA](https://github.com/morluto/rea), thanks). Anything else that speaks MCP can point at `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe`.
 
-It does not have to be Claude, either. Any model that is good with tools will do, including a local one running on the very card it is asked about:
+And it doesn't have to be Claude. Any model that's decent with tools will do, even a local one running on the card it's talking about:
 
 ![A local model in OpenCode answering "what's my graphics cards OC status" with card_report: a verdict, what changed from stock with ✅ marks, and the live core clock](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/local-model-card-report.jpg)
 
-*Qwen3.8 27B in llama.cpp, through OpenCode, on the RTX 5090 it is reporting on. The card took it well.*
+*Qwen3.8 27B in llama.cpp, through OpenCode, on the same RTX 5090 it's reporting on. The card took it well.*
 
-### Ask your agent
+### Then just talk to it
 
 ```
 Let's tune my GPU. Start from the founders preset, stress test it, then find me more.
@@ -52,33 +52,35 @@ How's my card doing?
 I'm playing Cyberpunk tonight on the new curve. Watch the card the whole time. If it crashes, write it down and tune from it.
 ```
 
-Ask how your card is doing and you get every setting, original → now, with a ✅ where it sits inside NVIDIA's own limits and a ⚠️ where it does not, and your V/F curve drawn right there in the terminal in Braille dots, btop-style: stock, now, and a ● where the card is running.
+Ask how your card's doing and you get a table: every setting, what it was and what it is now, with a ✅ if it's inside NVIDIA's own limits and a ⚠️ if it isn't. Under that, your V/F curve, drawn right in the terminal in Braille dots, btop-style, with a ● where the card is running.
 
 ![card_report on a card at stock: each setting's original and current value, its mark and a note, then the V/F curve in Braille dots](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/card-report-at-stock.jpg)
 
-*At stock: every setting original → now, a mark and a note, then the curve. Now and stock are the same line. For the moment.*
+*At stock. Now and stock are the same line. For now.*
 
 ![Claude Sonnet drawing the tuned V/F curve in Braille dots, now over stock with a dot where the card runs, and explaining its shape](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/vf-curve-braille.jpg)
 
-*Later, on a tuned card: Claude Sonnet draws the curve, now over stock with a ● where the card runs, and explains the shape.*
+*Later, on a tuned card: Claude Sonnet draws the curve and explains why it looks the way it does.*
 
-Ask further and it reads what other tools leave out: the memory temperature, the watts on the 16-pin connector and the board's input current, the PCIe link and whether it has been resending data, the driver's own clock ceilings and which limit set each one, and how long Windows waits before it resets a hung GPU. Your agent comes with a manual on Blackwell (rails, clock domains, the V/F curve, what limits what), on the method and on every control it has, written from five days of measurements, so it can explain every step and does not have to guess. While you play it watches the card four times a second and tells you what it sees as it happens. If the game crashes, that is not a setback but a measurement: the agent records the clock, voltage, power and temperature it fell over at, your daily profile goes back on, and the next step lowers that part of the curve. There is no other window to open. Most people find this arrangement agreeable.
+It also reads the stuff most tools don't show you: the memory temperature, how many watts go through the 16-pin connector, whether the PCIe link has been resending data, which driver limit is really holding your clock back, how long Windows waits before it resets a hung GPU. It comes with a manual on Blackwell and on every control it has, written from a lot of measuring, so it can tell you why it's doing what it's doing instead of guessing.
 
-## Bottom line
+While you play, it watches the card four times a second and tells you what it sees. If the game crashes, that's not a setback, that's data. It notes the clock, voltage, power and temperature it went down at, puts your daily settings back, and lowers that part of the curve next time. There's no other app to open.
 
-- **The agent does the tuning.** Power limit, fan curve, V/F curve, memory, MSVDD and XBAR, in that order, each for a reason it can explain. One small step at a time, because large steps are how graphics cards end up on the secondhand market.
-- **Every control, no expert mode.** Whatever the command line can set, your agent can set too: the V/F curve a band at a time or all at once, the core offset, the NVVDD and MSVDD rails, XBAR and its ratio to the core clock, SYS and Video, clock locks, voltage boost, memory, current limits, power limits and the fans' zero-RPM band. The manual says what each one writes, how far one call goes and what it does to the others. Every tool moves a small step per call, stops at the card's hard limits (1150 mV, the board's maximum power, the firmware's own ranges) and says why when it refuses.
-- **NVIDIA's stress tester is the judge.** `nvgwls.exe` ships with your driver; NVIDIA App's auto-tune runs the same program. It checks every graphics, compute and ray-tracing result bit for bit. It has no feelings to hurt and cannot be bribed.
-- **Game-stable = stress-stable minus 30–60 MHz.** The stress tester maps the shape of the edge, voltage by voltage. Only games can say how far under it they need to stay: in our runs, 30–60 MHz under the highest clock `nvgwls` passed. So you play, the agent watches, and every crash goes into the data. We did not make this rule. We merely crashed into it.
-- **A lab for what games cannot time.** The memory and the uncore get a load engine of their own, `clocktail-lab` (StabilityLab's, moved in): it checks every result on the CPU bit for bit and times the DRAM and the crossbar. Leave your agent to sweep the memory offset, or to search XBAR, its ratio to the core and MSVDD by itself, each step a trial measured A B B A against the best so far. It reports what won and keeps nothing until you say so. A benchmark is not a game, and it knows.
-- **It counts your frames itself.** While you play, the agent sees the game's frame rate, the 1 % and 0.1 % lows and the frame times, through Intel's PresentMon run by the service; nothing is injected into the game. "Did that help?" gets answered in frames, not in vibes.
-- **Keep as many profiles as you like.** Save the daily one as "quiet" or "games" and switch with a sentence. The card only ever runs one at a time, which is how it prefers it.
-- **Nothing is permanent unless you say so.** Every write is read back and can be undone. A background service keeps your daily profile and puts it back after every boot, every wake-up and every driver reset, including the ones you caused. It also checks that the firmware really holds the power limit you asked for, because once every reading said 600 W while the card held 575 W for hours. Flash another VBIOS and the profile waits for your word instead of putting old offsets on a new stock curve. If the driver goes away mid-sentence, your agent's connection does not: Clocktail starts its reader again and carries on.
-- **It knows when to stop.** No trial is written while the GPU looks hung. A stress run stops at 85 °C. A mapping run you leave going overnight stops writing new trials after two crashes, rather than hanging the card again and again with nobody there to see it. Clock locks that would hold the card high even at idle (a floor, a pinned V/F point, Boost Lock) are for tests only and are never kept; a cap is.
+## The short version
+
+- **The agent does the tuning.** Power limit, fans, the V/F curve, memory, then MSVDD and XBAR, in that order, and it can tell you why. One small step at a time, because big steps are how graphics cards end up on the secondhand market.
+- **Every control, no "expert mode".** If the command line can set it, so can your agent: the curve (a band at a time or the whole thing), the core offset, both voltage rails, XBAR and its ratio to the core, SYS and Video, clock locks, memory, power and current limits, the fans. Each tool moves a little per call, stops at the card's hard limits, and tells you why when it says no.
+- **NVIDIA's stress tester is the judge.** `nvgwls.exe` ships with your driver; NVIDIA App's auto-tune uses the same program. It checks every result bit for bit. You can't argue with it, and you can't bribe it.
+- **Game-stable is stress-stable minus 30–60 MHz.** The stress tester finds the edge. Games decide how far back from it you have to sit, and in our runs that was 30–60 MHz. So you play, the agent watches, and every crash becomes a data point. We didn't make this rule up. We crashed into it.
+- **A lab for what games can't measure.** Memory and the uncore get their own load engine, `clocktail-lab` (StabilityLab's, moved in). It checks every result on the CPU and times the DRAM and the crossbar. Your agent can leave it sweeping the memory offset, or hunting for the best mix of XBAR, ratio and MSVDD, each step compared A B B A against the best so far. It tells you what won and keeps nothing until you say so. If something else is using the GPU, a screen saver included, it waits until it's gone instead of trusting the numbers.
+- **It counts your frames.** While you play, the agent sees your fps, the 1 % and 0.1 % lows and the frame times, through Intel's PresentMon. Nothing gets injected into the game. "Did that help?" gets answered in frames, not vibes.
+- **Keep as many profiles as you like.** "Quiet", "games", whatever you want. Switch with a sentence.
+- **Nothing sticks unless you say so.** Every write is read back and can be undone. A background service keeps your daily settings and puts them back after every reboot, every wake-up and every driver reset, including the ones you caused. It also checks that the firmware is really holding the power limit you asked for, because once every reading said 600 W while the card quietly ran at 575 W for hours. Flash a new VBIOS and it waits for your OK instead of stacking old offsets on a new curve. If the driver drops out mid-sentence, your agent stays connected.
+- **It knows when to stop.** Nothing gets written while the GPU looks hung. Stress runs stop at 85 °C. Leave it mapping overnight and it stops after two crashes, rather than hanging the card over and over with nobody watching. Clock locks that would keep the card high at idle are for testing only and never end up in your daily settings.
 
 ![The agent laying out the tuning plan: power limit, fans and temperature, the V/F edge mapped by voltage region, the daily curve, then games](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/tuning-plan.jpg)
 
-*Before the first write, the plan: the power limit (yours to choose), fans and temperature, the V/F edge mapped one voltage region at a time, the daily curve, then your heaviest games.*
+*Before the first write, the plan: the power limit (your call), fans and temperature, the V/F edge mapped one voltage region at a time, the daily curve, then your heaviest games.*
 
 ## What it found on the one card we tested
 
@@ -86,16 +88,14 @@ RTX 5090 Founders Edition, driver 617.42, Windows 11. Your card is different. Yo
 
 | Setting | Result |
 |---|---|
-| MSVDD REL offset −50 → 0 mV (NVIDIA's own reliability limit) | Blender Cycles +2 %. Free, which is the best price. |
-| XBAR clock +300 MHz, XBAR voltage demand +20 mV | Blender Cycles +6–7 % over stock. Memory bandwidth unchanged. |
-| XBAR past ~+300 MHz without the extra voltage | MSVDD drops to its floor and memory-bound work loses up to 16 %. Do not do this. We did it so you don't have to. |
-| XBAR +400 MHz | Needs +50 mV of voltage demand to stay off that floor, not +20, and was no faster than +300 in Blender. The tools refuse it with less. |
+| MSVDD REL −50 → 0 mV (NVIDIA's own limit) | Blender +2 %. Free, which is the best price. |
+| XBAR +300 MHz with +20 mV of voltage demand | Blender +6–7 % over stock. |
+| XBAR past ~+300 MHz without the extra voltage | MSVDD drops to its floor and memory-heavy work loses up to 16 %. Don't. We did, so you don't have to. |
+| XBAR +400 MHz / +50 mV, ratio 0.95, MSVDD REL +50 / ALT +30 mV | The lab's crossbar test 5–6 % faster than the card's previous daily settings, and it passed the stress tester at full and light load. It's that card's daily now. Games not measured yet. |
 
-Under load, XBAR is capped at about 0.9 × the core clock. Offsets past ~+300 MHz therefore buy nothing. Higher numbers are not always better numbers. This may be the most important sentence in this document.
+For a while we thought XBAR offsets past +300 bought nothing. Turns out they do, just not on their own. XBAR sits squeezed between 0.9 × the core clock below and whatever MSVDD's voltage allows above, and the two are only about 30 MHz apart. Raise one and nothing happens. Raise the ratio and MSVDD together and the window opens up, and then the XBAR offset starts paying. The tuner figured that out, not us. Higher numbers still aren't always better numbers. Sometimes they just need friends.
 
-All of it is in the founders preset.
-
-That 0.9 is a setting too, and your agent can raise it. At 0.92 XBAR ran 60 MHz higher, for 25 mV more on MSVDD and 15 MHz off the core. Whether that buys frames, nobody has measured. Yet.
+The founders preset has the first two rows. The last one is new.
 
 ![3DMark Steel Nomad result page: score 15 757, valid result, RTX 5090 with an Intel Core i9-14900K, average clock frequency 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
 
@@ -107,47 +107,47 @@ That 0.9 is a setting too, and your agent can raise it. At 0.92 XBAR ran 60 MHz 
 npx -y clocktail uninstall
 ```
 
-The card goes back to stock, and the service, the files and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card will not remember any of this.
+Your card goes back to stock, and the service, the files and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card won't remember any of this.
 
 ## The zip
 
-Clocktail is designed around your agent, and we do not recommend installing it by hand. The zip on the Releases page is for reading, inspecting and archiving: the MCP server and the service that setup installs, plus the command line, there to be scanned, taken apart or kept in a drawer.
+Clocktail is built around your agent, and we don't recommend installing it by hand. The zip on the Releases page is for reading, poking at and keeping: the MCP server and service that setup installs, plus the command line, there to be scanned, taken apart or kept in a drawer.
 
-If you insist on being the robot yourself, here is the procedure.
+If you really want to be the robot yourself, here's how.
 
-1. Right-click the zip → Properties → Unblock. Otherwise Windows may want a word about unsigned programs from the internet, and it has a point.
+1. Right-click the zip → Properties → Unblock. Otherwise Windows will want a word about unsigned programs from the internet, and honestly it has a point.
 2. Unzip it into `%LocalAppData%\Programs\Clocktail`, where setup would have put it, so `npx` can take over later without a fuss.
-3. Connect your agent to `clocktail-mcp.exe`: an stdio server, no arguments. For Claude Code:
+3. Connect your agent to `clocktail-mcp.exe`. It's a stdio server with no arguments. For Claude Code:
    ```
    claude mcp add clocktail -s user -- "C:\Users\<you>\AppData\Local\Programs\Clocktail\clocktail-mcp.exe"
    ```
-4. In that folder, run `.\Clocktail.Broker.exe install` and approve admin rights once. Or skip it: your agent calls `install_service` the first time it has something to write.
+4. In that folder, run `.\Clocktail.Broker.exe install` and approve admin rights once. Or skip it: your agent calls `install_service` the first time it needs to write something.
 5. Restart your agent.
 
-To update, close every agent first (Windows will not overwrite a program that is running; setup knows a way around that, but you are doing this by hand), unzip the new version over the old one, and run `.\Clocktail.Broker.exe install` again, or the service stays on the old version. To remove it, run `.\Clocktail.Broker.exe stock`, then `.\Clocktail.Broker.exe uninstall`, take clocktail out of your agent's configuration and delete the folder. Your profiles and tuning logs are in `%LocalAppData%\Clocktail`, should you want those gone as well.
+To update, close every agent first (Windows won't overwrite a program that's running; setup has a way around that, but you're doing this by hand), unzip the new version over the old one, and run `.\Clocktail.Broker.exe install` again, or the service stays on the old version. To remove it, run `.\Clocktail.Broker.exe stock`, then `.\Clocktail.Broker.exe uninstall`, take clocktail out of your agent's config and delete the folder. Your profiles and tuning logs are in `%LocalAppData%\Clocktail` if you want those gone too.
 
 Or paste the line under "Set up Clocktail" into your agent and go make a cup of tea. Robot work is best left to robots.
 
-## What is in the box
+## What's in the box
 
-| Folder | Contents |
+| Folder | What it is |
 |---|---|
 | `src/Clocktail.Hw` | The only code that talks to the driver (NVAPI, NVML). Every setter has a write policy, because trust is earned. |
-| `src/Clocktail.Domain` | Transactions, the ownership journal (the original value of every setting it has touched), write rules, the daily profile, presets. |
-| `src/Clocktail.Broker` | The service: an elevated logon task that does every write over a named pipe and restores your settings after crashes and driver resets, without comment. |
-| `src/Clocktail.Cli` | Command line, for people who prefer to break things by hand. |
+| `src/Clocktail.Domain` | Transactions, the ownership journal (the original value of every setting it's touched), write rules, the daily profile, presets. |
+| `src/Clocktail.Broker` | The service: an elevated logon task that does every write over a named pipe and quietly puts your settings back after crashes and driver resets. |
+| `src/Clocktail.Cli` | The command line, for people who'd rather break things by hand. |
 | `tools/Clocktail.Mcp` | The MCP server your agent talks to: 54 tools and the manual. See its README. |
-| `tools/Clocktail.Lab` | The lab: a CUDA load engine for the memory and the crossbar, every result checked on the CPU. It writes nothing; its trials go through the service. |
+| `tools/Clocktail.Lab` | The lab: a CUDA load engine for the memory and the crossbar, every result checked on the CPU. It writes nothing itself; its trials go through the service. |
 | `npm/` | The setup genie behind `npx clocktail`. |
 
-Build from source (Windows, .NET 10 SDK): `dotnet test Clocktail.slnx` runs the tests on a fake driver; it never touches the GPU.
+To build from source (Windows, .NET 10 SDK): `dotnet test Clocktail.slnx` runs the tests against a fake driver. It never touches the GPU.
 
 ## Sources
 
-Frame rates come from Intel's [PresentMon](https://github.com/GameTechDev/PresentMon) (MIT), shipped unchanged; see THIRD_PARTY_NOTICES.md. The NVAPI interface details come from public sources on the internet. Every value the code relies on was verified by measurement on the card above. Some of those measurements involved driver resets. The card is fine.
+Frame rates come from Intel's [PresentMon](https://github.com/GameTechDev/PresentMon) (MIT), shipped unchanged; see THIRD_PARTY_NOTICES.md. The NVAPI details come from public sources on the internet. Every value the code relies on was checked by measuring it on the card above. Some of that measuring involved driver resets. The card is fine.
 
-If your card answers differently, ask your agent for a diagnostic report and attach it to an [issue](https://github.com/swaggypatrol/Clocktail/issues). It is one plain JSON file: the versions, the card, what each control can do on it and how the driver answered every read. Making it writes nothing to the card, it holds no user names, paths or files, and it goes nowhere until you post it.
+If your card answers differently, ask your agent for a diagnostic report and attach it to an [issue](https://github.com/swaggypatrol/Clocktail/issues). It's one plain JSON file: versions, the card, what each control can do on it, and how the driver answered every read. Making it writes nothing to the card, it has no user names, paths or files in it, and it goes nowhere until you post it.
 
 ## Warning
 
-This is unofficial software. Overclocking can crash your games, corrupt your output and shorten the life of your hardware. You use it at your own risk. If something goes wrong, the tuning log will tell you exactly what happened. It will not tell you it's sorry.
+This is unofficial software. Overclocking can crash your games, mess up your output and shorten the life of your hardware. Use it at your own risk. If something goes wrong, the tuning log will tell you exactly what happened. It won't say sorry.
