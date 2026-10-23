@@ -27,18 +27,61 @@ public class UncoreTests
         Assert.Contains(why, j.Why);
     }
 
+    /// <summary>The case made against 0.3.3: A 8500, B 10030 and 10030, A 10000 was "better, +8.79 %" (pairs +18 and +0.3 %),
+    /// when B was 0.3 % faster and A's first run read 15 % low. Runs of one setting that far apart were disturbed: the
+    /// comparison is unjudged (the job measures it again), never a gain, and never a loss either.</summary>
+    [Fact]
+    public void Runs_of_one_setting_far_apart_leave_the_comparison_unjudged()
+    {
+        var j = UncoreSearch.Judge(R(8500), R(10030), R(10030), R(10000));
+        Assert.Equal(Comparison.Unjudged, j.Outcome);
+        Assert.True(j.Disturbed);
+        Assert.Contains("17.6 % apart", j.Why);
+        // The other way round: a candidate's run read low (the 621.01 search turned +150 and +200 down on runs like this).
+        var low = UncoreSearch.Judge(R(4780), R(4100), R(4900), R(4782));
+        Assert.Equal(Comparison.Unjudged, low.Outcome);
+        Assert.True(low.Disturbed);
+    }
+
+    /// <summary>A run reading off by less than that, with no real gain behind it, shows in one pair only: the other pair says
+    /// none, so it is not better.</summary>
+    [Fact]
+    public void One_run_reading_off_is_no_gain_when_the_other_pair_says_none()
+    {
+        var j = UncoreSearch.Judge(R(4708), R(4780), R(4781), R(4780));
+        Assert.Equal(Comparison.NotBetter, j.Outcome);
+        Assert.False(j.Disturbed);
+        Assert.False(j.Gain);
+        Assert.Contains("no clear gain", j.Why);
+    }
+
+    /// <summary>A steady drift through the four runs (the card warming, 0.5 % a run here) is what A B B A cancels: a real 1 %
+    /// gain is kept at its size.</summary>
+    [Fact]
+    public void A_steady_drift_is_cancelled_and_a_real_gain_kept()
+    {
+        double a = 4780, g = 1.01, d = 1.005;
+        var j = UncoreSearch.Judge(R(a), R(a * g * d), R(a * g * d * d), R(a * d * d * d));
+        Assert.Equal(Comparison.Better, j.Outcome);
+        Assert.True(j.Gain);
+        Assert.InRange(j.L2!.Value, 0.99, 1.01);
+    }
+
     [Fact]
     public void The_cliff_and_a_dram_loss_are_not_better_whatever_L2_says()
     {
         var cliff = UncoreSearch.Judge(R(4780), R(4900, core: 1610), R(4900, core: 1620), R(4780));
         Assert.Equal(Comparison.NotBetter, cliff.Outcome);
+        Assert.Equal(Comparison.Cliff, cliff.Veto);
         Assert.Contains("the cliff", cliff.Why);
         var dram = UncoreSearch.Judge(R(4780), R(4900, dram: 1540), R(4900, dram: 1545), R(4780));
         Assert.Contains("DRAM bandwidth fell", dram.Why);
+        Assert.Equal((Comparison.DramCost, true), (dram.Veto, dram.Gain));   // the L2 gain held; its cost turned it down
         // Ratio 0.925 with XBAR held under MSVDD's limit, as measured: the core 1.9 % down is no cliff, and still not better.
         var core = UncoreSearch.Judge(R(4780), R(4900, core: 2915), R(4900, core: 2912), R(4780));
         Assert.Equal(Comparison.NotBetter, core.Outcome);
         Assert.Contains("a slower core costs", core.Why);
+        Assert.Equal((Comparison.CoreCost, true), (core.Veto, core.Gain));
         // One V/F bin (15 MHz, 0.5 %) is not a loss.
         Assert.Equal(Comparison.Better, UncoreSearch.Judge(R(4780), R(4830, core: 2955), R(4825, core: 2955), R(4782)).Outcome);
     }
@@ -141,7 +184,8 @@ public class UncoreTests
     }
 
     /// <summary>+400 at the rule's +50 mV hits the cliff on this fake card; the step is not given up, the demand is raised (not
-    /// past +50, the policy's top). With a 70 mV top it would go on to +60 and keep +400 there.</summary>
+    /// past +50, the policy's top). With a 70 mV top it would go on to +60 and keep +400 there. The search reads the cliff
+    /// from the comparison's value, not its words.</summary>
     [Fact]
     public void A_step_that_hits_the_cliff_is_tried_again_with_more_demand()
     {
@@ -150,7 +194,7 @@ public class UncoreTests
         var search = new UncoreSearch(spec, (stage, a, b) =>
         {
             tried.Add(b);
-            if (b.XbarMhz == 400 && b.DemandMv < 60) return new(stage, a, b, Comparison.NotBetter, "the memory phase's core clock fell -33.0 %: the cliff", null, null, null, []);
+            if (b.XbarMhz == 400 && b.DemandMv < 60) return new(stage, a, b, Comparison.NotBetter, "the core fell", null, null, null, [], Veto: Comparison.Cliff);
             bool better = b.XbarMhz > a.XbarMhz && b.XbarMhz <= 400;
             return new(stage, a, b, better ? Comparison.Better : Comparison.NotBetter, "", null, null, null, []);
         }, () => false);
@@ -212,5 +256,66 @@ public class UncoreTests
         Assert.Equal(Comparison.Unjudged, j.Outcome);
         Assert.Contains("could not be judged", j.Why);
         Assert.Equal(Comparison.Failed, UncoreSearch.Judge(R(4780), R(4900), R(4900, verdict: LabResult.Fail), R(4780)).Outcome);
+    }
+
+    /// <summary>The best is named only when it beats the start again in a comparison of its own: climbed to a step at a time,
+    /// each step against the best before it, it was never measured against the start (and a list picks the fastest, where
+    /// one fast reading wins). One that does not hold up leaves the start as the best.</summary>
+    [Fact]
+    public void The_best_is_kept_only_when_it_beats_the_start_again()
+    {
+        var (search, _) = Run(s => 4780 + s.XbarMhz);
+        var found = search.Best;
+        Assert.NotEqual(Spec.Start, found);
+        var c = search.Confirm();
+        Assert.Equal(("confirm", Spec.Start, found, Comparison.Better), (c!.Stage, c.A, c.B, c.Outcome));
+        Assert.Equal(found, search.Best);
+        Assert.Same(c, search.Log[^1]);
+
+        // Kept on the way (the step to +300 read faster), not faster than the start when measured against it.
+        Comparison Fooled(string stage, UncoreSetting a, UncoreSetting b) =>
+            new(stage, a, b, stage != "confirm" && b.XbarMhz == 300 ? Comparison.Better : Comparison.NotBetter, "", null, null, null, []);
+        var fooled = new UncoreSearch(Spec, Fooled, () => false);
+        fooled.Run();
+        Assert.Equal(300, fooled.Best.XbarMhz);
+        Assert.Equal(Comparison.NotBetter, fooled.Confirm()!.Outcome);
+        Assert.Equal(Spec.Start, fooled.Best);
+        Assert.Null(fooled.Ended);
+
+        // A confirmation that could not be judged ends the search, and names nothing.
+        var busy = new UncoreSearch(Spec, (stage, a, b) => stage == "confirm" ? new(stage, a, b, Comparison.Unjudged, "disturbed twice", null, null, null, []) : Fooled(stage, a, b), () => false);
+        busy.Run();
+        busy.Confirm();
+        Assert.Equal(Spec.Start, busy.Best);
+        Assert.Contains("could not be measured again against the start: disturbed twice", busy.Ended);
+
+        // Nothing beat the start: nothing to confirm.
+        var (flat, _) = Run(_ => 4780);
+        Assert.Null(flat.Confirm());
+    }
+
+    /// <summary>Each step may cost the core up to 1 %; the steps' sum against the start can cost more (the reference card's
+    /// 617.42 run kept steps at -0.9 and -0.5 %, inside the core's spread there). That cost is told with the best, not a
+    /// reason to name nothing, as long as the L2 gain itself holds; the cliff, or a gain that did not hold, still is.</summary>
+    [Fact]
+    public void A_cost_the_steps_add_up_to_is_told_with_the_best_not_a_reason_to_drop_it()
+    {
+        UncoreSearch With(Func<string, UncoreSetting, UncoreSetting, Comparison> confirming)
+        {
+            var s = new UncoreSearch(Spec, (stage, a, b) => stage == "confirm" ? confirming(stage, a, b)
+                : new(stage, a, b, b.XbarMhz == 300 ? Comparison.Better : Comparison.NotBetter, "", null, null, null, []), () => false);
+            s.Run();
+            s.Confirm();
+            return s;
+        }
+        var cost = With((stage, a, b) => new(stage, a, b, Comparison.NotBetter, "the memory phase's core clock fell -1.40 %", 2.5, 0.1, -1.4, [], Gain: true, Veto: Comparison.CoreCost));
+        Assert.Equal(300, cost.Best.XbarMhz);
+        Assert.True(UncoreSearch.Holds(cost.Log[^1]));
+        var dram = With((stage, a, b) => new(stage, a, b, Comparison.NotBetter, "DRAM bandwidth fell -0.80 %", 2.5, -0.8, 0, [], Gain: true, Veto: Comparison.DramCost));
+        Assert.Equal(300, dram.Best.XbarMhz);
+        var cliff = With((stage, a, b) => new(stage, a, b, Comparison.NotBetter, "the cliff", 2.5, 0, -40, [], Gain: true, Veto: Comparison.Cliff));
+        Assert.Equal(Spec.Start, cliff.Best);
+        var gone = With((stage, a, b) => new(stage, a, b, Comparison.NotBetter, "no clear gain", 0.2, 0, -1.4, [], Gain: false, Veto: Comparison.CoreCost));
+        Assert.Equal(Spec.Start, gone.Best);
     }
 }

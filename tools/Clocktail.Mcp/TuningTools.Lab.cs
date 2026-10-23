@@ -382,12 +382,16 @@ public sealed partial class TuningTools
         "a trial through the service compared A B B A against the best so far by the lab: L2 bandwidth (a 32 MiB region walked " +
         "over and over: the crossbar XBAR clocks), DRAM bandwidth, and the memory phase's core clock. A candidate is kept only " +
         "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not fall 1 % " +
-        "(5 % is the cliff: MSVDD at its floor pins it near 1610 MHz). Axes in order: XBAR's offset, each step with the demand " +
+        "(5 % is the cliff: MSVDD at its floor pins it near 1610 MHz); runs of one setting more than 2 % apart were disturbed " +
+        "(other work, or the card still settling), so that comparison is measured again, and twice ends the search. Axes in " +
+        "order: XBAR's offset, each step with the demand " +
         "adjust_xbar's rule asks for (above +250 MHz +20 mV, above +300 +50 mV; more where a step still hits the cliff), the " +
         "XBAR/core clock ratio (its 0.9 x core floor), MSVDD's REL (up to +20 mV; its reliability limit is XBAR's ceiling), then " +
         "the ratio and MSVDD a step each together (XBAR's window up as a whole: on the reference card neither alone moved it), " +
         "in rounds: an axis runs again when another has moved the best since. An axis stops at a " +
-        "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The daily profile goes back " +
+        "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The best is measured once more " +
+        "against the daily settings at the end (stage confirm) and named only if its L2 gain holds there (a core or DRAM cost " +
+        "the steps add up to is told with it); a search that ends early names nothing. The daily profile goes back " +
         "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
         "no trial in force, and the GPU to itself (a run another program shared, a screen saver drawing too, is measured again " +
         "every 30 s for up to 10 minutes). On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; a " +

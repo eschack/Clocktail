@@ -47,5 +47,8 @@ public class ManualFactsTests
     [InlineData("stability", "55-64 965-985 mV at 430-550 W")]
     [InlineData("method", "To measure this card's own")]                                        // S-9
     [InlineData("xbar-msvdd", "SYS 2182 / 2017 / 1912 / 1830 MHz")]                              // S-10
+    [InlineData("xbar-msvdd", "Runs of one setting more than 2 % apart were disturbed")]           // UncoreSearch.Disturbed (0.3.4)
+    [InlineData("xbar-msvdd", "A search that ends early (lab_stop, disturbed twice) names nothing")]
+    [InlineData("memory", "marks nothing stable")]                                                 // MemorySweep.End (0.3.4)
     public void The_manual_carries_it(string topic, string fact) => Assert.Contains(fact, ManualTools.Manual(topic));
 }

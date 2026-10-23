@@ -46,8 +46,10 @@ public sealed record UncoreSpec(string StableId, string Pci, string Curve, Uncor
 }
 
 /// <summary>One run of the comparison, as the rules read it: the L2 (crossbar) bandwidth, DRAM bandwidth, the core clock in
-/// the memory phase (the cliff pins it near 1610 MHz), and whether the run can be judged at all.</summary>
-public sealed record UncoreRun(string Verdict, double? L2Gbps, double? DramGbps, double? MemSmMhz, double? TempMax, bool Shared, string? Detail)
+/// the memory phase (the cliff pins it near 1610 MHz), whether the run can be judged at all, and the driver resets during it
+/// (the service records those itself).</summary>
+public sealed record UncoreRun(string Verdict, double? L2Gbps, double? DramGbps, double? MemSmMhz, double? TempMax, bool Shared, string? Detail,
+    int? DriverResets = null)
 {
     public static UncoreRun Of(LabResult r, int? resets)
     {
@@ -55,16 +57,27 @@ public sealed record UncoreRun(string Verdict, double? L2Gbps, double? DramGbps,
         var mem = r.Phases.FirstOrDefault(p => p.Kind == LabPhase.Memory);
         bool failed = r.Verdict == LabResult.Fail || resets > 0;
         string? detail = resets > 0 ? $"a driver reset during the run ({resets})" : r.Reasons.Count > 0 ? string.Join("; ", r.Reasons) : null;
-        return new(failed ? LabResult.Fail : r.Verdict, l2?.Gbps, mem?.Gbps, mem?.SmMhzP50, r.Phases.Count > 0 ? r.Phases.Max(p => p.TempMax) : null, r.Shared, detail);
+        return new(failed ? LabResult.Fail : r.Verdict, l2?.Gbps, mem?.Gbps, mem?.SmMhzP50, r.Phases.Count > 0 ? r.Phases.Max(p => p.TempMax) : null, r.Shared, detail, resets);
     }
 }
 
-/// <summary>A candidate B against the incumbent A, run A B B A: what came out and the changes the rules read (%).</summary>
+/// <summary>A candidate B against the incumbent A, run A B B A: what came out and the changes the rules read (%). Gain: the
+/// L2 gain held (both pairs, and enough), whatever the rules that weigh its cost said; Veto: the rule that turned it down,
+/// as a value the search acts on (the cliff gets more demand) and the confirmation reads (a cost is told, not a reason to
+/// name nothing).</summary>
 public sealed record Comparison(string Stage, UncoreSetting A, UncoreSetting B, string Outcome, string Why,
-    double? L2GainPct, double? DramChangePct, double? CoreChangePct, IReadOnlyList<UncoreRun> Runs)
+    double? L2GainPct, double? DramChangePct, double? CoreChangePct, IReadOnlyList<UncoreRun> Runs, bool Gain = false, string? Veto = null)
 {
     public const string Better = "better", NotBetter = "not better", Failed = "failed", Unjudged = "unjudged";
+    /// <summary>The rules that turn a gain down: the cliff, the core's cost, DRAM's.</summary>
+    public const string Cliff = "cliff", CoreCost = "core", DramCost = "dram";
 }
+
+/// <summary>What <see cref="UncoreSearch.Judge"/> makes of four runs: the outcome and why, the changes (%), and what the
+/// search and the job act on as values, never as words: whether the gain held, the rule that turned it down, and runs
+/// disturbed during the comparison (measured again).</summary>
+public sealed record Judgement(string Outcome, string Why, double? L2 = null, double? Dram = null, double? Core = null,
+    bool Gain = false, string? Veto = null, bool Disturbed = false);
 
 /// <summary>
 /// The uncore search, without the card: safe-ratchet coordinate ascent from the settings on the card, one axis at a time,
@@ -113,6 +126,32 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         return c.Outcome;
     }
 
+    /// <summary>
+    /// The best, once more against the start in a comparison of its own (stage "confirm"): it was reached a step at a time,
+    /// each step against the best before it, or picked as the fastest of a list, where one fast reading wins. It stays the
+    /// best when its L2 gain over the start holds there (<see cref="Holds"/>); otherwise the best goes back to the start, and
+    /// an unjudged comparison ends the search. Null when there is nothing to confirm (the best is the start, or the search
+    /// ended).
+    /// </summary>
+    public Comparison? Confirm()
+    {
+        if (Ended != null || Best == spec.Start) return null;
+        Stage = "confirm";
+        var found = Best;
+        var c = compare(Stage, spec.Start, found);
+        Log.Add(c);
+        if (!Holds(c)) Best = spec.Start;
+        if (c.Outcome == Comparison.Unjudged) Ended = $"{found} could not be measured again against the start: {c.Why}";
+        return c;
+    }
+
+    /// <summary>Whether a confirmation keeps the best: better, or a gain that held and only costs the core or DRAM more than
+    /// one step may. Each step stayed within that budget; what they add up to is told and left to a game or benchmark
+    /// A B B A (the reference card's 617.42 run kept steps at -0.9 and -0.5 % core, inside the core's spread there). A sum
+    /// past <see cref="CoreFall"/> reads as the cliff and names nothing: five steps or more near the budget, the safe side.</summary>
+    public static bool Holds(Comparison c) => c.Outcome == Comparison.Better
+        || c.Outcome == Comparison.NotBetter && c.Gain && c.Veto is Comparison.CoreCost or Comparison.DramCost;
+
     /// <summary>Climbs one axis from the best so far: each next candidate from <paramref name="next"/>, until it gives none, a
     /// candidate fails, or two in a row are not faster. A miss is stepped past (the next candidate one step beyond it), still
     /// against the best. True when one was kept.</summary>
@@ -143,8 +182,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
             int demand = Math.Max(Best.DemandMv, spec.Needed(x));
             if (demand > spec.DemandMaxMv) break;
             string o = Try(Best with { XbarMhz = x, DemandMv = demand });
-            while (Ended == null && o == Comparison.NotBetter && Log[^1].Why.Contains("the cliff", StringComparison.Ordinal)
-                   && demand + spec.DemandStepMv <= spec.DemandMaxMv)
+            while (Ended == null && o == Comparison.NotBetter && Log[^1].Veto == Comparison.Cliff && demand + spec.DemandStepMv <= spec.DemandMaxMv)
             {
                 demand += spec.DemandStepMv;
                 o = Try(Best with { XbarMhz = x, DemandMv = demand });
@@ -162,7 +200,8 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     }
 
     /// <summary>The list instead of the search: each candidate against the start, A B B A, in order; one outside the limits is
-    /// skipped. The best is the fastest that was better; an unjudged comparison or lab_stop ends the list.</summary>
+    /// skipped. The best is the fastest that was better (then confirmed on its own: <see cref="Confirm"/>); an unjudged
+    /// comparison or lab_stop ends the list.</summary>
     public void RunList(IEnumerable<UncoreSetting> candidates)
     {
         Stage = "list";
@@ -200,40 +239,67 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
 
     /// <summary>
     /// The A B B A verdict. A candidate run that failed fails the candidate; an incumbent run that failed, a shared GPU or a
-    /// missing reading leaves it unjudged. Otherwise it is better when the L2 bandwidth rose in both pairs by more than half of
+    /// missing reading leaves it unjudged, and so do runs of one setting more than <see cref="Disturbed"/> apart (measured
+    /// again by the job). Otherwise it is better when the L2 bandwidth rose in both pairs by more than half of
     /// <see cref="Eps"/> and by <see cref="Eps"/> or more on the geometric mean, with DRAM bandwidth not falling by more than
-    /// <see cref="DramFall"/> and the memory phase's core clock not by more than <see cref="CoreFall"/> (the cliff).
+    /// <see cref="DramFall"/> and the memory phase's core clock not by more than <see cref="CoreLoss"/> (<see cref="CoreFall"/>
+    /// is the cliff).
+    /// <para>
+    /// A B B A cancels a drift that runs steadily through the four runs, not one run that reads off on its own. Before 0.3.4
+    /// nothing looked at the runs of one setting: A 8500, B 10030 and 10030, A 10000 was "better, +8.79 %" (pairs +18 and
+    /// +0.3 %) when B was 0.3 % faster and A's first run had read 15 % low, as runs did in the first search on 621.01, with
+    /// builds running. A smaller reading-off can still carry one comparison (a run 1.5 % low with no real gain does about one
+    /// time in four, as in 0.3.3), so the best is measured once more against the start before it is named
+    /// (<see cref="Confirm"/>). Taking off every gain the most one bad run could have added was tried and dropped: it counts
+    /// the candidate's own spread three times, and at 0.25 % of noise a run it kept 59 real 1 % gains in 100, where these
+    /// rules keep 95.
+    /// </para>
     /// </summary>
-    public static (string Outcome, string Why, double? L2, double? Dram, double? Core) Judge(UncoreRun a1, UncoreRun b1, UncoreRun b2, UncoreRun a2)
+    public static Judgement Judge(UncoreRun a1, UncoreRun b1, UncoreRun b2, UncoreRun a2)
     {
         // A bad bit or a driver reset fails the candidate; a run that could not be made (too hot, the runner) says nothing.
         foreach (var b in new[] { b1, b2 })
-            if (b.Verdict == LabResult.Fail) return (Comparison.Failed, b.Detail ?? "the candidate's run failed", null, null, null);
+            if (b.Verdict == LabResult.Fail) return new(Comparison.Failed, b.Detail ?? "the candidate's run failed");
         foreach (var b in new[] { b1, b2 })
-            if (b.Verdict != LabResult.Pass) return (Comparison.Unjudged, "the candidate's run could not be judged: " + (b.Detail ?? b.Verdict), null, null, null);
+            if (b.Verdict != LabResult.Pass) return new(Comparison.Unjudged, "the candidate's run could not be judged: " + (b.Detail ?? b.Verdict));
         foreach (var a in new[] { a1, a2 })
-            if (a.Verdict != LabResult.Pass) return (Comparison.Unjudged, "the incumbent's own run did not pass: " + (a.Detail ?? a.Verdict), null, null, null);
-        if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return (Comparison.Unjudged, $"other work kept sharing the GPU for {LabJob.SharedWaitMinutes} minutes: speeds are not the card's alone; close it (a screen saver too) and run again", null, null, null);
+            if (a.Verdict != LabResult.Pass) return new(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a.Detail ?? a.Verdict));
+        if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return new(Comparison.Unjudged, $"other work kept sharing the GPU for {LabJob.SharedWaitMinutes} minutes: speeds are not the card's alone; close it (a screen saver too) and run again");
         if (new[] { a1, b1, b2, a2 }.Any(r => r.L2Gbps is not > 0 || r.DramGbps is not > 0 || r.MemSmMhz is not > 0))
-            return (Comparison.Unjudged, "a reading is missing", null, null, null);
+            return new(Comparison.Unjudged, "a reading is missing");
         double r1 = b1.L2Gbps!.Value / a1.L2Gbps!.Value, r2 = b2.L2Gbps!.Value / a2.L2Gbps!.Value;
+        double ra = a2.L2Gbps!.Value / a1.L2Gbps!.Value, rb = b2.L2Gbps!.Value / b1.L2Gbps!.Value;
         double l2 = (Math.Sqrt(r1 * r2) - 1) * 100;
         double dram = (Math.Sqrt(b1.DramGbps!.Value / a1.DramGbps!.Value * (b2.DramGbps!.Value / a2.DramGbps!.Value)) - 1) * 100;
         double core = (Math.Sqrt(b1.MemSmMhz!.Value / a1.MemSmMhz!.Value * (b2.MemSmMhz!.Value / a2.MemSmMhz!.Value)) - 1) * 100;
-        (double, double, double) d = (Math.Round(l2, 2), Math.Round(dram, 2), Math.Round(core, 2));
+        // The gain itself, before the rules that weigh what it costs: both pairs up, and enough on the geometric mean.
+        bool gain = r1 > 1 + Eps / 2 && r2 > 1 + Eps / 2 && l2 >= Eps * 100;
+        Judgement Is(string outcome, string why, string? veto = null, bool disturbed = false) =>
+            new(outcome, why, Math.Round(l2, 2), Math.Round(dram, 2), Math.Round(core, 2), gain && !disturbed, veto, disturbed);
+        // The cliff first: the core pinned near 1610 MHz is no reading off, and the XBAR climb answers it with more demand.
         if (core < -CoreFall * 100)
-            return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.0} %: the cliff (MSVDD at its floor pins the core near 1610 MHz)"), d.Item1, d.Item2, d.Item3);
+            return Is(Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.0} %: the cliff (MSVDD at its floor pins the core near 1610 MHz)"), Comparison.Cliff);
+        // Runs of one setting this far apart were disturbed (with nothing else on the GPU they agree within 0.5 %): nothing
+        // in the four runs can be judged, a loss no more than a gain. A's two runs are three runs apart, so a card still
+        // settling by 0.7 % a run reads as disturbed too, and is measured again as well.
+        if (Math.Abs(ra - 1) > Disturbed || Math.Abs(rb - 1) > Disturbed)
+            return Is(Comparison.Unjudged, Inv($"runs of one setting read {Math.Max(Math.Abs(ra - 1), Math.Abs(rb - 1)) * 100:0.0} % apart (A {a1.L2Gbps:0} then {a2.L2Gbps:0} GB/s, B {b1.L2Gbps:0} then {b2.L2Gbps:0}): over {Disturbed * 100:0} %, something moved during the comparison (other work, or the card still settling)"),
+                disturbed: true);
         if (core < -CoreLoss * 100)
-            return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: a slower core costs compute-bound work more than the uncore gains"), d.Item1, d.Item2, d.Item3);
+            return Is(Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: a slower core costs compute-bound work more than the uncore gains"), Comparison.CoreCost);
         if (dram < -DramFall * 100)
-            return (Comparison.NotBetter, Inv($"DRAM bandwidth fell {dram:0.00} %"), d.Item1, d.Item2, d.Item3);
-        if (r1 > 1 + Eps / 2 && r2 > 1 + Eps / 2 && l2 >= Eps * 100)
-            return (Comparison.Better, Inv($"L2 bandwidth {l2:+0.00} % in both pairs"), d.Item1, d.Item2, d.Item3);
-        return (Comparison.NotBetter, Inv($"no clear gain: L2 {(r1 - 1) * 100:+0.00;-0.00} / {(r2 - 1) * 100:+0.00;-0.00} % in the two pairs"), d.Item1, d.Item2, d.Item3);
+            return Is(Comparison.NotBetter, Inv($"DRAM bandwidth fell {dram:0.00} %"), Comparison.DramCost);
+        if (gain)
+            return Is(Comparison.Better, Inv($"L2 bandwidth {l2:+0.00} % in both pairs"));
+        return Is(Comparison.NotBetter, Inv($"no clear gain: L2 {(r1 - 1) * 100:+0.00;-0.00} / {(r2 - 1) * 100:+0.00;-0.00} % in the two pairs"));
     }
 
     /// <summary>The least gain kept (0.5 %): a pass of the L2 test spreads ~1-5 %, the A B B A median well under that.</summary>
     public const double Eps = 0.005;
+
+    /// <summary>Runs of one setting further apart than this (2 %) were disturbed: with the GPU to itself a setting's runs
+    /// agree within 0.5 % on the reference card, and a run disturbed in the middle read 15-18 % low there.</summary>
+    public const double Disturbed = 0.02;
 
     /// <summary>The most DRAM bandwidth may fall (0.5 %); the most the core may (1 %: one V/F bin is ~0.5 %; on the reference
     /// card ratio 0.925 with XBAR held under MSVDD's limit cost it 1.9 %); a fall past <see cref="CoreFall"/> is the cliff.</summary>
@@ -249,7 +315,8 @@ public sealed record UncoreStatus(string Job, string State, DateTime StartedUtc,
 /// The uncore tuner as a job: the search above with each comparison run on the card. Each setting goes on as a trial through
 /// the service (XBAR offset and demand, MSVDD REL and the clock ratio together, absolute), the lab measures L2 and DRAM
 /// bandwidth A B B A, a candidate that fails is recorded as its trial's crash. The daily profile goes back on at the end and
-/// nothing is kept: the status names the best setting for the person to try.
+/// nothing is kept: the status names the best setting for the person to try, once it has beaten the daily settings again in
+/// a comparison of its own.
 /// </summary>
 public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Action<string>? log = null)
     : LabJob(spec.StableId, spec.Pci, spec.GraceSeconds, jobDir, labExe)
@@ -282,9 +349,19 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
 
             var search = new UncoreSearch(spec, Compare, () => StopAsked);
             if (spec.Candidates is { Count: > 0 } list) search.RunList(list); else search.Run();
-            _best = search.Best;
-            if (search.Ended != null) return Finish(search.Ended.StartsWith("stopped", StringComparison.Ordinal) ? SweepStatus.Stopped : SweepStatus.Failed, search.Ended);
-            return Finish(SweepStatus.Done, _best == spec.Start ? "nothing beat the daily settings" : $"best {_best}");
+            var found = search.Best;
+            var confirm = search.Confirm();
+            // A search that ended before its best was measured again names nothing: the status's best is what is named.
+            _best = search.Ended == null ? search.Best : spec.Start;
+            if (search.Ended != null)
+                return Finish(StopAsked ? SweepStatus.Stopped : SweepStatus.Failed,
+                    search.Ended + (confirm == null && found != spec.Start ? $"; the best so far, {found}, was not measured again against the daily settings: nothing to name" : ""));
+            if (confirm == null) return Finish(SweepStatus.Done, "nothing beat the daily settings");
+            if (!UncoreSearch.Holds(confirm))
+                return Finish(SweepStatus.Done, $"the search's best, {found}, did not hold up when measured again against the daily settings ({confirm.Outcome}: {confirm.Why}): nothing to name");
+            // Both costs, not only the rule that spoke first: a core cost would hide a DRAM fall in the same comparison.
+            return Finish(SweepStatus.Done, Inv($"best {found}: L2 {confirm.L2GainPct:+0.00} % over the daily settings, measured again against them")
+                + (confirm.Outcome == Comparison.Better ? "" : Inv($"; but against them the memory phase's core moved {confirm.CoreChangePct:+0.00;-0.00} % and DRAM bandwidth {confirm.DramChangePct:+0.00;-0.00} %, more than one step may cost: a game or benchmark A B B A decides")));
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
@@ -311,9 +388,9 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             runs.Add(run);
             return run;
         }
-        Comparison Done(string outcome, string why, double? l2 = null, double? dram = null, double? core = null)
+        Comparison Done(string outcome, string why, double? l2 = null, double? dram = null, double? core = null, bool gain = false, string? veto = null)
         {
-            var c = new Comparison(stage, a, b, outcome, why, l2, dram, core, runs);
+            var c = new Comparison(stage, a, b, outcome, why, l2, dram, core, runs, gain, veto);
             _log.Add(c);
             string line = Inv($"{stage}: {b} vs {a}: {outcome} ({why})");
             log?.Invoke(line);
@@ -325,32 +402,50 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         using var lease = Hold(log);
         if (lease == null) return Done(Comparison.Unjudged, StopAsked ? "stopped (lab_stop)" : $"another run held the card for {LeaseWaitMinutes} minutes");
 
-        if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
-        stamp = TrialAt();
-        var a1 = Run(a);
-        // lab_stop kills the measuring child: its run is inconclusive, and that is not the candidate's failure.
-        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (Moved() is { } m1) return m1;
-        if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
-        if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
-        stamp = TrialAt();
-        var b1 = Run(b);
-        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (b1.Verdict == LabResult.Fail) return Crash(b1);
-        if (Moved() is { } m2) return m2;
-        if (b1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b1.Detail ?? b1.Verdict));
-        var b2 = Run(b);
-        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (b2.Verdict == LabResult.Fail) return Crash(b2);
-        if (Moved() is { } m3) return m3;
-        if (b2.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b2.Detail ?? b2.Verdict));
-        if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
-        stamp = TrialAt();
-        var a2 = Run(a);
-        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (Moved() is { } m4) return m4;
-        var (outcome, why, l2, dram, core) = UncoreSearch.Judge(a1, b1, b2, a2);
-        return Done(outcome, why, l2, dram, core);
+        // Runs of one setting that disagree were disturbed by other work during a run (the lab looks for it before and just
+        // after a run, not during one): the comparison is measured once more, whole, and left unjudged if that is disturbed too.
+        string? disturbed = null;
+        while (true)
+        {
+            runs.Clear();
+            if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
+            stamp = TrialAt();
+            var a1 = Run(a);
+            // lab_stop kills the measuring child: its run is inconclusive, and that is not the candidate's failure.
+            if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+            if (Moved() is { } m1) return m1;
+            if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
+            if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
+            stamp = TrialAt();
+            var b1 = Run(b);
+            if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+            if (b1.Verdict == LabResult.Fail) return Crash(b1);
+            if (Moved() is { } m2) return m2;
+            if (b1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b1.Detail ?? b1.Verdict));
+            var b2 = Run(b);
+            if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+            if (b2.Verdict == LabResult.Fail) return Crash(b2);
+            if (Moved() is { } m3) return m3;
+            if (b2.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b2.Detail ?? b2.Verdict));
+            if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
+            stamp = TrialAt();
+            var a2 = Run(a);
+            if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+            if (Moved() is { } m4) return m4;
+            var j = UncoreSearch.Judge(a1, b1, b2, a2);
+            if (j.Disturbed && disturbed == null)
+            {
+                disturbed = j.Why;
+                string again = Inv($"{stage}: {b} vs {a}: {j.Why}: measuring the comparison again");
+                log?.Invoke(again);
+                Broker("note", $"tune_uncore: {again}");
+                continue;
+            }
+            string why = disturbed == null ? j.Why
+                : j.Disturbed ? $"{j.Why}, measured twice (the first time {disturbed}): leave the machine alone while the tuner runs"
+                : $"{j.Why}, measured twice (the first time {disturbed})";
+            return Done(j.Outcome, why, j.L2, j.Dram, j.Core, j.Gain, j.Veto);
+        }
 
         // The trial on the card must still be the one written before the run: a write that got past the lease (or a reset
         // that put the daily profile back) means the run measured something else.
@@ -359,7 +454,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         Comparison Crash(UncoreRun r)
         {
             // A driver reset is the service's to record; a bad bit with the GPU alive is recorded here.
-            if (r.Detail?.Contains("driver reset", StringComparison.Ordinal) != true) Broker("crash", $"tune_uncore {b}: {r.Detail}");
+            if (r.DriverResets is not > 0) Broker("crash", $"tune_uncore {b}: {r.Detail}");
             Thread.Sleep(5000);
             return Done(Comparison.Failed, r.Detail ?? "the candidate's run failed");
         }
