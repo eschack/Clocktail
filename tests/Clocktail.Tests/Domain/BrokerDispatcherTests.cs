@@ -819,6 +819,69 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>A release the card could not take (here a stability run holding it) changes nothing: the limit stays on the
+    /// card, the trial keeps it in its record, and no data point is written. Before 0.3.4 the trial was recorded as handed
+    /// back whether or not it was. The tuning log has the refusal once, not every ask after it; asked again once the card is
+    /// free (the trial lease does), it goes back and is recorded.</summary>
+    [Fact]
+    public void A_hand_back_the_card_could_not_take_records_nothing_until_it_lands()
+    {
+        string? busy = null;
+        var d = Power(judge: () => busy);
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        string trialPath = Experiment.PathBeside(_journal.Path), dataPath = Experiment.DataPathBeside(_journal.Path);
+        var before = Experiment.Load(trialPath)!.Trial!;
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(Exp("release", "no agent has been heard from for 5 min"));
+        Assert.False(r.Ok);
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));             // still on the card
+        Assert.Contains(_journal.Inspect().Items, i => i.Kind == CurrentLimitWrites.Kind);
+        Assert.Equal(before, Experiment.Load(trialPath)!.Trial);              // and in the trial's record, as it was
+        Assert.Empty(Experiment.ReadLast(dataPath, 10));
+        Assert.False(d.Dispatch(Exp("release", "no agent has been heard from for 5 min")).Ok);   // asked again, still held
+        string tuning = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tuning, "Trial-only settings not handed back"));
+        Assert.DoesNotContain("Trial-only settings handed back", tuning);
+
+        busy = null;
+        var again = d.Dispatch(Exp("release", "no agent has been heard from for 6 min"));
+        Assert.True(again.Ok, again.Error);
+        Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));
+        var trial = Experiment.Load(trialPath)!.Trial!;
+        Assert.Equal((450_000u, (uint?)null), (trial.PowerMw!.Value, trial.NvvddMa));
+        Assert.Contains("current limits handed back: no agent has been heard from for 6 min", trial.Change);
+        Assert.Equal(350_000u, Assert.Single(Experiment.ReadLast(dataPath, 10)).NvvddMa!.Value);
+        Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>Handing back takes what went back out of the trial's record, the trial-only writes too (here the F8 request;
+    /// a clock floor, point lock and Boost Lock are the same kind of write): the trial is recorded from then on as it runs.
+    /// Before 0.3.4 only the fan duty and the current limits were taken out, so every later data point still named an F8
+    /// request or a Boost Lock the card no longer held.</summary>
+    [Fact]
+    public void Handing_back_takes_the_trial_only_writes_out_of_the_trials_record()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "F8 absent → 500 W", keep_curve = true,
+            writes = new[] { new { kind = "power", key = "f8", value = "500000", create = true } } })));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(500_000u, _requests[0xf8]);
+
+        var r = d.Dispatch(Exp("release", "the agent disconnected"));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(600_000u, _requests[0xf8]);                            // back to the board maximum
+        var trial = Experiment.Load(Experiment.PathBeside(_journal.Path))!.Trial!;
+        Assert.Null(trial.Writes);
+        Assert.Contains("the F8 request handed back: the agent disconnected", trial.Change);
+        var before = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.Equal("f8", Assert.Single(before.Writes!).Key);              // the part that ran with it
+    }
+
     /// <summary>S-4: no trial is written while the GPU looks hung; the trial before stays in force.</summary>
     [Fact]
     public void No_trial_is_written_while_the_GPU_looks_hung()

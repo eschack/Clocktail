@@ -879,34 +879,88 @@ public sealed class BrokerDispatcher
     /// <summary>When an agent's MCP server last said it was there ("alive"); the broker's start until one does.</summary>
     public DateTimeOffset LastAlive { get; private set; } = DateTimeOffset.Now;
 
+    /// <summary>The GPUs whose last hand-back put nothing back: the tuning log has the first refusal of a run of them, not
+    /// every ask after it (the trial lease asks for minutes, the fan guard every 30 s). Asked under the operation lock.</summary>
+    private readonly HashSet<string> _refused = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
-    /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits) back to their
-    /// originals. The rest of the trial stays on the card and in force, recorded from here as a trial of its own without
-    /// them, the part before as survived. No curve is written: the GPU may be under load.
+    /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits, a clock floor,
+    /// point lock or Boost Lock and the F8 request) back to their originals. The rest of the trial stays on the card and in
+    /// force, recorded from here as a trial of its own without what went back, the part before as survived. What went back
+    /// is the journal's word after the put-backs, not their answers: a cell still held stays in the trial's record (the
+    /// caller asks again), and when nothing went back nothing is recorded but the refusal, once until something does go back.
+    /// No curve is written: the GPU may be under load.
     /// </summary>
     private BrokerResponse HandBack(IGpuTarget target, string path, string data, string why, bool fansOnly)
     {
-        var held = HeldTrialCells(target).Where(i => !fansOnly || i.Kind == FanControl.Kind).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
-        if (held.Count == 0) return Ok(new { success = true, released = Array.Empty<object>() });
-        string what = fansOnly ? "fans handed back to the curve" : "fans, current limits and clock locks handed back";
-        var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
-        DataPoint? closed = null;
-        lock (_experiment)
+        bool Mine(OwnedItem i) => !fansOnly || i.Kind == FanControl.Kind;
+        var held = HeldTrialCells(target).Where(Mine).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
+        if (held.Count == 0)
         {
-            if (Experiment.Load(path) is { Trial: { } t } exp)
-            {
-                closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}");
-                if (closed != null) Experiment.Append(data, closed);
-                var next = fansOnly ? t with { FanPct = null } : t with { FanPct = null, NvvddMa = null, MsvddMa = null };
-                (exp with { Trial = next with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
-            }
+            _refused.Remove(target.StableId);
+            return Ok(new { success = true, released = Array.Empty<object>() });
         }
-        Log(target, fansOnly ? "Fans handed back to the curve" : "Trial-only settings handed back", [$"Reason: {why}",
-            closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
-            .. back.SelectMany(Writes)]);
-        bool ok = back.All(x => x.Ok);
-        return new BrokerResponse(ok, ok ? null : $"not every trial-only setting went back ({back.First(x => !x.Ok).Error}): read the card",
-            Element(new { success = ok, released = (JsonElement[])[.. back.SelectMany(AppliedOf)] }), ok ? null : back.First(x => !x.Ok).Code);
+        var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
+        var left = HeldTrialCells(target).Where(Mine).ToList();
+        var gone = held.Where(h => !left.Any(l => l.Id == h.Id)).ToList();
+        bool ok = left.Count == 0;
+        if (gone.Count == 0 && _refused.Add(target.StableId))
+            Log(target, fansOnly ? "Fans not handed back" : "Trial-only settings not handed back", [$"Reason: {why}",
+                $"Still held: {string.Join(", ", left.Select(l => l.Id))}: asked again until they go (logged when they do)",
+                .. back.SelectMany(Writes)]);
+        if (gone.Count > 0)
+        {
+            _refused.Remove(target.StableId);
+            string what = $"{Named(gone, left)} handed back{(fansOnly ? " to the curve" : "")}";
+            DataPoint? closed = null;
+            lock (_experiment)
+            {
+                if (Experiment.Load(path) is { Trial: { } t } exp)
+                {
+                    closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}");
+                    if (closed != null) Experiment.Append(data, closed);
+                    (exp with { Trial = Without(t, gone, left) with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
+                }
+            }
+            Log(target, !ok ? "Trial-only settings not all handed back" : fansOnly ? "Fans handed back to the curve" : "Trial-only settings handed back", [$"Reason: {why}",
+                closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
+                ok ? null : $"Still held: {string.Join(", ", left.Select(l => l.Id))}: the trial keeps them in its record",
+                .. back.SelectMany(Writes)]);
+        }
+        var failed = back.FirstOrDefault(x => !x.Ok);
+        return new BrokerResponse(ok, ok ? null : $"not every trial-only setting went back ({failed?.Error ?? $"{string.Join(", ", left.Select(l => l.Id))} still held"}): read the card",
+            Element(new { success = ok, released = (JsonElement[])[.. back.SelectMany(AppliedOf)] }), ok ? null : failed?.Code ?? BrokerCode.Failed);
+    }
+
+    /// <summary>Trial-only cells in words, for the trial's change and its data point: "current limits and the F8 request";
+    /// "some fans" when a kind is still held in part (<paramref name="left"/>).</summary>
+    private static string Named(IEnumerable<OwnedItem> cells, IReadOnlyList<OwnedItem> left)
+    {
+        var names = cells.Select(c => (left.Any(l => l.Kind == c.Kind) ? "some " : "") + c.Kind switch
+        {
+            FanControl.Kind => "fans",
+            CurrentLimitWrites.Kind => "current limits",
+            ClockLimitWrites.Kind => "clock locks",
+            PowerCap.Kind => "the F8 request",
+            _ => c.Id,
+        }).Distinct().ToList();
+        return names.Count < 2 ? names.FirstOrDefault() ?? "nothing" : $"{string.Join(", ", names[..^1])} and {names[^1]}";
+    }
+
+    /// <summary>The trial without the trial-only cells that went back: its fixed fan duty once no fan is held, a rail's
+    /// current limit that went back, and the writes (a clock floor, point lock, Boost Lock, the F8 request) of the cells
+    /// that did. What is still held stays as it was.</summary>
+    private static ExperimentTrial Without(ExperimentTrial t, IReadOnlyList<OwnedItem> gone, IReadOnlyList<OwnedItem> left)
+    {
+        bool Went(string kind, string key) => gone.Any(g => g.Kind == kind && g.Key == key);
+        var writes = t.Writes?.Where(w => !Went(w.Kind, w.Key)).ToList();
+        return t with
+        {
+            FanPct = gone.Any(g => g.Kind == FanControl.Kind) && !left.Any(l => l.Kind == FanControl.Kind) ? null : t.FanPct,
+            NvvddMa = Went(CurrentLimitWrites.Kind, CurrentLimitWrites.Key(Rail.Nvvdd)) ? null : t.NvvddMa,
+            MsvddMa = Went(CurrentLimitWrites.Kind, CurrentLimitWrites.Key(Rail.Msvdd)) ? null : t.MsvddMa,
+            Writes = writes is { Count: > 0 } ? writes : null,
+        };
     }
 
     /// <summary>The write transactions an answer carries (its "applied" list), none for a refusal.</summary>
