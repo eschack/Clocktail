@@ -1,5 +1,7 @@
+using System.Reflection;
 using System.Text.Json.Nodes;
 using Clocktail.Mcp;
+using ModelContextProtocol.Server;
 
 namespace Clocktail.Tests.Mcp;
 
@@ -130,12 +132,46 @@ public class RelayTests
         Assert.Equal(2, _scheduled.Count);   // a worker ended on purpose is not started again
     }
 
+    private static readonly List<McpServerToolAttribute> Tools = typeof(Card).Assembly.GetTypes().SelectMany(t => t.GetMethods())
+        .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()).OfType<McpServerToolAttribute>().ToList();
+
+    /// <summary>The relay answers "wrote nothing" only for the tools that say they only read and the few that keep records.
+    /// That list is exactly this, so a tool that joins it is looked at; every other tool counts as a writer, a tool added
+    /// later too. In 0.3.3 the relay listed the writers, and the eleven trial tools added after the list (the curve shift,
+    /// set_curve, every new trial), begin_session, the lab's jobs and install_service were answered as if they had written
+    /// nothing.</summary>
     [Fact]
-    public void Every_card_writer_the_relay_names_is_a_tool()
+    public void Only_readers_and_record_keepers_count_as_writing_nothing()
     {
-        var tools = typeof(Card).Assembly.GetTypes().SelectMany(t => t.GetMethods())
-            .Select(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).FirstOrDefault())
-            .OfType<ModelContextProtocol.Server.McpServerToolAttribute>().Select(a => a.Name!).ToHashSet();
-        Assert.Subset(tools, RelayCore.CardWriters.ToHashSet());
+        var names = Tools.Select(t => t.Name!).ToHashSet();
+        Assert.Subset(names, RelayCore.RecordOnly.ToHashSet());
+        Assert.DoesNotContain(Tools, t => t.ReadOnly && RelayCore.RecordOnly.Contains(t.Name!));
+        Assert.Equal(Tools.Where(t => t.ReadOnly).Select(t => t.Name!).Order(StringComparer.Ordinal), RelayCore.Readers.Order(StringComparer.Ordinal));
+        Assert.Equal([
+                "card_report", "card_settings", "curve_around", "data_points", "delete_profile", "diagnostic_report", "gpu_status", "lab_status",
+                "limiter", "list_presets", "live_read", "live_start", "live_stop", "log_note", "manual", "mark_stable", "preview_daily", "read_log",
+                "save_profile", "watch",
+            ], names.Where(n => !RelayCore.MayWriteCard(n)).Order(StringComparer.Ordinal));
+        foreach (var w in new[] { "shift_curve", "set_curve", "flatten_curve", "adjust_nvvdd", "adjust_clock_domain", "set_core_offset", "set_clock_lock",
+                     "set_clock_ratio", "set_voltage_boost", "set_fan_start", "set_power_cap", "begin_session", "lab_test", "tune_memory",
+                     "tune_uncore", "lab_stop", "install_service", "adjust_curve", "stress_test", "mark_crash", "end_session" })
+            Assert.True(RelayCore.MayWriteCard(w), w);
+        Assert.True(RelayCore.MayWriteCard("a_tool_added_later"));   // the safe side
+    }
+
+    /// <summary>shift_curve moves the curve on the card from where it is: cut off mid-call it may have landed, and the same
+    /// call again would move it twice. In 0.3.3 the relay answered it as it answers a read: try again in a few seconds.</summary>
+    [Fact]
+    public void A_curve_shift_cut_off_mid_call_says_to_read_the_card_first()
+    {
+        var r = Connected();
+        r.FromClient(Req(2, "tools/call", "shift_curve"));
+        _children[0].Exit(75);
+
+        var answer = ToolText(_out[^1]);
+        Assert.Equal(WriteOutcome.Unknown, (string)answer["written"]!);
+        Assert.Equal(WriteOutcome.ReadFirst, (string)answer["next"]!);
+        Assert.Contains("read the card before trying it again", (string)answer["error"]!);
+        Assert.DoesNotContain("Try again in a few seconds", (string)answer["error"]!);
     }
 }

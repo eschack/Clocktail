@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Platform;
+using ModelContextProtocol.Server;
 
 namespace Clocktail.Mcp;
 
@@ -36,14 +38,37 @@ public sealed class RelayCore(
     /// <summary>A call waits this long for a worker that is starting again before it is answered with the reason.</summary>
     public static readonly TimeSpan AnswerAfter = TimeSpan.FromSeconds(20);
 
-    /// <summary>The tools that can change what is on the card (stress_test too: a failure puts the daily profile back).
-    /// One of these cut off mid-call may or may not have written; any other wrote nothing to the card.</summary>
-    public static readonly IReadOnlySet<string> CardWriters = new HashSet<string>
+    /// <summary>The tools that are not read-only and still write nothing to the card: they keep Clocktail's own records (a
+    /// data point, a note, a saved profile) or watch the card. Every other tool that is not read-only can change the card,
+    /// so one cut off mid-call may or may not have written: each trial and the curve, stress_test and lab_test (a failure
+    /// puts the daily profile back), begin_session (it puts the trial in force back), the lab's jobs and lab_stop (a job
+    /// puts the daily profile back as it ends), install_service (the service starts again and puts the daily profile on).
+    /// A tool added later counts as one of those until it is listed here: the safe side. Until 0.3.4 the relay listed the
+    /// writers instead, and the ones added after the list (shift_curve among them, which moves the curve on the card from
+    /// where it is) were answered as if they had written nothing.</summary>
+    public static readonly IReadOnlySet<string> RecordOnly = new HashSet<string>
     {
-        "adjust_curve", "adjust_msvdd", "adjust_xbar", "set_power_limit", "set_current_limit", "set_memory_offset", "set_fan_curve",
-        "set_fan_speed", "set_daily_power_limit", "back_to_daily", "stock", "load_daily", "keep_as_daily", "load_preset",
-        "end_session", "mark_crash", "stress_test",
+        "mark_stable", "log_note", "save_profile", "delete_profile", "live_start", "live_stop", "watch",
     };
+
+    /// <summary>The tools that say they only read (their McpServerTool's ReadOnly), read from the tools themselves: one of
+    /// these cut off mid-call wrote nothing.</summary>
+    public static readonly IReadOnlySet<string> Readers = ReadOnlyTools();
+
+    /// <summary>Whether a call to <paramref name="tool"/> cut off mid-call may have changed the card: any tool not known to
+    /// only read or keep records.</summary>
+    public static bool MayWriteCard(string tool) => !Readers.Contains(tool) && !RecordOnly.Contains(tool);
+
+    private static HashSet<string> ReadOnlyTools()
+    {
+        Type?[] types;
+        try { types = typeof(RelayCore).Assembly.GetTypes(); }
+        catch (ReflectionTypeLoadException e) { types = e.Types; }   // a tool whose type did not load counts as a writer
+        return types.OfType<Type>().SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+            .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()).OfType<McpServerToolAttribute>()
+            .Where(a => a.ReadOnly && a.Name != null).Select(a => a.Name!).ToHashSet();
+    }
+
     private const string ReplayId = "\"clocktail-relay-initialize\"";
 
     private readonly object _gate = new();
@@ -202,13 +227,16 @@ public sealed class RelayCore(
         JsonObject reply = new() { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone() };
         if (method == "tools/call")
         {
-            bool writes = tool != null && CardWriters.Contains(tool);
+            bool writes = tool != null && MayWriteCard(tool);
+            // A writer cut off mid-call may have landed: the same call again can stack on it (shift_curve moves the curve
+            // from where it is), so the card is read first. One that never reached a worker wrote nothing.
+            bool unknown = writes && inFlight;
             var text = new JsonObject
             {
                 ["success"] = false,
-                ["error"] = why + ". Try again in a few seconds.",
+                ["error"] = why + (unknown ? ". It may have changed the card before it ended: read the card before trying it again." : ". Try again in a few seconds."),
                 ["written"] = !writes ? null : inFlight ? WriteOutcome.Unknown : WriteOutcome.None,
-                ["next"] = writes && inFlight ? WriteOutcome.ReadFirst : null,
+                ["next"] = unknown ? WriteOutcome.ReadFirst : null,
             };
             reply["result"] = new JsonObject
             {
