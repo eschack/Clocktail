@@ -64,15 +64,15 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public static Stop? Edge(IReadOnlyList<SweepStep> steps)
     {
         var last = steps[^1];
-        if (last.Verdict != LabResult.Pass) return new(last.Detail ?? $"the step {last.Verdict}", false);
+        if (last.Verdict != LabResult.Pass) return new(last.Detail ?? $"the step {last.Verdict}", false, Unjudged: last.Verdict != LabResult.Fail);
         if (last.Shared)
-            return new(Inv($"other work kept sharing the GPU at this step for {SharedWaitMinutes} minutes ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it (a screen saver too) and run again"), false);
+            return new(Inv($"other work kept sharing the GPU at this step for {SharedWaitMinutes} minutes ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it (a screen saver too) and run again"), false, Unjudged: true);
         if (steps.Count < 2) return null;
         var prev = steps[^2];
         // NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on the reference card). One that did not move
         // means the offset is not in force while the lab runs (a P-state without it): nothing after can be judged.
         if (last.OffsetMhz > prev.OffsetMhz && last.MemMhz is { } mm && prev.MemMhz is { } pm && mm - pm < (last.OffsetMhz - prev.OffsetMhz) / 2.0)
-            return new(Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - prev.OffsetMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs"), false);
+            return new(Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - prev.OffsetMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs"), false, Unjudged: true);
         int n = steps.Count - 1;
         if (Under(steps, n) is { } u && Under(steps, n - 1) is { } u0)
             return new(Inv($"bandwidth stayed under the best step's: {u0.Gbps:0.#} then {u.Gbps:0.#} GB/s ({u0.Pct:+0.0;-0.0} %, {u.Pct:+0.0;-0.0} %): the memory is retrying"), true);
@@ -81,10 +81,25 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         return null;
     }
 
-    public sealed record Stop(string Why, bool BeganAtStepBefore);
+    /// <summary>Why the sweep stops at a step; <paramref name="Unjudged"/>: the step says nothing about the memory (it could
+    /// not be measured, other work shared the GPU, the offset was not in force), as a value the sweep acts on, not words.</summary>
+    public sealed record Stop(string Why, bool BeganAtStepBefore, bool Unjudged = false);
 
     /// <summary>The last step's stop reason, or null to go on.</summary>
     public static string? Signal(IReadOnlyList<SweepStep> steps) => Edge(steps)?.Why;
+
+    public enum StepEnd { Crash, Unjudged, Stable, StableThenStop }
+
+    /// <summary>What a measured step leads to, decided before anything is recorded: a failure is its trial's crash and ends
+    /// the sweep; a step that says nothing about the memory ends it with no result and marks nothing; any other is its trial's
+    /// stable point, and then a slowdown ends the sweep unless it runs for the trend. A stable point is what a later agent
+    /// reads as the offset proved: in 0.3.3 a step whose offset was not in force was marked stable first and found unjudged
+    /// after.</summary>
+    public static StepEnd End(SweepStep step, Stop? edge, bool trend) =>
+        step.Verdict == LabResult.Fail ? StepEnd.Crash
+        : step.Verdict != LabResult.Pass || edge is { Unjudged: true } ? StepEnd.Unjudged
+        : edge != null && !trend ? StepEnd.StableThenStop
+        : StepEnd.Stable;
 
     /// <summary>A slower step that does not stop the sweep on its own: bandwidth under the best once, or a latency jump (a timing
     /// change the next step shows falling again, or the start of retrying the next step shows rising). Null when neither.</summary>
@@ -198,25 +213,28 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
-                string? signal = Signal(_steps);
+                var edge = Edge(_steps);
+                string? signal = edge?.Why;
                 _steps[^1] = step with { Signal = signal, Watch = signal == null ? Watch(_steps) : null };
                 File.AppendAllText(Path.Combine(JobDir, "steps.jsonl"), JsonSerializer.Serialize(_steps[^1], JsonLine) + "\n");
                 string line = Line(_steps[^1]);
                 log?.Invoke(line);
                 Broker("note", $"tune_memory: {line}");
-                if (step.Verdict == LabResult.Fail)
+                var end = End(step, edge, spec.Trend);
+                if (end == StepEnd.Crash)
                 {
                     // A driver reset is the service's to record; a bad bit with the GPU alive is recorded here.
                     if (trial && step.DriverResets is not > 0) Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}");
                     return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail}", offset);
                 }
-                // Too hot, telemetry lost, the runner failing: nothing was measured, and nothing is blamed on the memory.
-                if (step.Verdict != LabResult.Pass)
-                    return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz could not be judged ({step.Detail}): nothing said about the memory", offset);
+                // Too hot, telemetry lost, the runner failing, a shared GPU, an offset not in force: the step says nothing
+                // about the memory, so there is no result, nothing is blamed on the memory and nothing is marked stable.
+                if (end == StepEnd.Unjudged)
+                    return Finish(SweepStatus.Failed, step.Verdict != LabResult.Pass
+                        ? $"{offset:+0;-0;0} MHz could not be judged ({step.Detail}): nothing said about the memory"
+                        : $"{offset:+0;-0;0} MHz: {signal}", offset);
                 if (trial) Broker("stable", $"tune_memory: {line}");
-                // Shared GPU or an offset not in force: the step says nothing about the memory, so there is no result.
-                bool unjudged = step.Shared || signal?.Contains("not in force", StringComparison.Ordinal) == true;
-                if (signal != null && (unjudged || !spec.Trend)) return Finish(unjudged ? SweepStatus.Failed : SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
+                if (end == StepEnd.StableThenStop) return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
             }
             return Finish(SweepStatus.Done, _steps.Any(s => s.Signal != null)
                 ? Inv($"reached {spec.ToMhz:+0;-0;0} MHz (the trend: the sweep would have stopped at {_steps.First(s => s.Signal != null).OffsetMhz:+0;-0;0} MHz)")

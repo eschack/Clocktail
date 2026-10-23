@@ -183,6 +183,31 @@ public class LabTests
         Assert.Equal(50, MemorySweep.Best(steps));
     }
 
+    /// <summary>A stable point is what a later agent reads as the offset proved, so only a step the sweep could judge is
+    /// one: decided from the stop's values before anything is recorded. In 0.3.3 the trial was marked stable first, and only
+    /// then did the sweep find, from the stop's words, that the offset had not been in force or the GPU had been shared.</summary>
+    [Theory]
+    [InlineData(1510, 498, 13851, LabResult.Pass, null, MemorySweep.StepEnd.Unjudged)]            // the clock did not follow: not in force
+    [InlineData(1510, 498, 13901, LabResult.Pass, 30000.0, MemorySweep.StepEnd.Unjudged)]         // other work shared the GPU
+    [InlineData(1510, 498, 13901, LabResult.Inconclusive, null, MemorySweep.StepEnd.Unjudged)]    // too hot, the runner: not measured
+    [InlineData(1510, 498, 13901, LabResult.Fail, null, MemorySweep.StepEnd.Crash)]
+    [InlineData(1510, 498, 13901, LabResult.Pass, null, MemorySweep.StepEnd.Stable)]
+    public void Only_a_step_the_sweep_could_judge_is_marked_stable(double gbps, double lat, double mem, string verdict, double? othersMib, MemorySweep.StepEnd end)
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, gbps, lat, mem, verdict, othersMib) };
+        Assert.Equal(end, MemorySweep.End(steps[^1], MemorySweep.Edge(steps), trend: false));
+        Assert.Equal(end, MemorySweep.End(steps[^1], MemorySweep.Edge(steps), trend: true));   // the trend goes on past a slowdown, never past these
+    }
+
+    /// <summary>A slowdown that lasts is a judged step: stable (it passed), and the end of the sweep unless it runs for the trend.</summary>
+    [Fact]
+    public void A_lasting_slowdown_is_marked_stable_and_ends_the_sweep_unless_it_runs_for_the_trend()
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, 1490, 498, 13901), S(150, 1488, 497, 13951) };
+        Assert.Equal(MemorySweep.StepEnd.StableThenStop, MemorySweep.End(steps[^1], MemorySweep.Edge(steps), trend: false));
+        Assert.Equal(MemorySweep.StepEnd.Stable, MemorySweep.End(steps[^1], MemorySweep.Edge(steps), trend: true));
+    }
+
     /// <summary>One slower step is watched, not trusted: bandwidth under the best once, or latency jumping once.</summary>
     [Theory]
     [InlineData(1490, 498, "bandwidth -1.0 % under the best")]
