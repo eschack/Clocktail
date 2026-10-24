@@ -489,9 +489,12 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             ["writes"] = writes,
             ["context"] = new[] { "tune_uncore: the lab compares settings A B B A" },
         };
+        // May be written from the moment it is sent (an answer lost on the way, a half-landed trial whose put-back did not
+        // finish): the end puts the daily profile back over it, however the job ends. Until 0.3.7 only an answer of success
+        // counted.
+        _wrote = true;
         var r = Broker("try", JsonSerializer.Serialize(args));
-        if (r is not { Ok: true }) return r?.Error ?? "no answer";
-        _wrote = true;   // the end puts the daily profile back over it, however the job ends
+        if (r is not { Ok: true }) return r?.Error ?? "no answer from the service (it may have landed)";
         Thread.Sleep(3000);
         return null;
     }

@@ -206,7 +206,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                     if (trial)
                     {
                         var w = Try(offset);
-                        if (w is not { Ok: true }) return Finish(SweepStatus.Failed, $"the service did not write {offset:+0;-0;0} MHz: {w?.Error ?? "no answer"}", offset);
+                        if (w is not { Ok: true })
+                            return Finish(SweepStatus.Failed, w == null
+                                ? $"no answer from the service for {offset:+0;-0;0} MHz: it may have landed, so the daily profile goes back on"
+                                : $"the service did not write {offset:+0;-0;0} MHz: {w.Error}", offset);
                         Thread.Sleep(3000);
                     }
                     string? stamp = TrialAt();
@@ -301,10 +304,12 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             ["curve"] = spec.Curve, ["change"] = Inv($"memory offset → {offsetMhz:+0;-0;0} MHz (tune_memory)"), ["keep_curve"] = true,
             ["memory_khz"] = offsetMhz * 1000, ["context"] = new[] { "tune_memory: the lab measures each step" },
         };
-        var r = Broker("try", JsonSerializer.Serialize(args));
-        // Written, whether or not its step is ever recorded (a stop between the write and the run): the end puts it back.
-        if (r is { Ok: true }) _wrote = true;
-        return r;
+        // May be written from the moment it is sent, whether or not its step is ever recorded (a stop between the write and the
+        // run) or its answer arrives (lost on the way, a half-landed trial whose put-back did not finish): the end puts the
+        // daily profile back, which writes only what differs. Until 0.3.7 only an answer of success counted, so a write
+        // whose answer was lost was left on the card.
+        _wrote = true;
+        return Broker("try", JsonSerializer.Serialize(args));
     }
 
 }
