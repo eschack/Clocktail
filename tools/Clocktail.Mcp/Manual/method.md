@@ -6,7 +6,7 @@ Under heavy load a modern GPU is held by its power limit, not by its clock. At a
 
 ## Before you start, tell the person
 - Time: one to three evenings. Stress runs need nobody at the keyboard; game checks need them for 5-10 minutes each.
-- Expect a few driver resets: a 30-second freeze or black screen, then the desktop. Harmless; the service puts the daily profile back by itself.
+- Expect a few driver resets: a 30-second freeze or black screen, then the desktop. Harmless; the service records the crash against the trial that hung and puts the daily profile back by itself, unless a new trial is in force by then.
 - What the reference RTX 5090 got: about +200 MHz under the wall at the same power; Blender 6-7 % faster with MSVDD and XBAR's first settings; then, with the ratio and MSVDD raised along with XBAR, the crossbar 5-6 % faster again and the memory's bandwidth 7.8 % higher at the same offset; the memory error-free in the lab up to the driver's +3000, kept at +1758, where bandwidth stops rising (3DMark agreed). Their chip may do more or less; that is what the testing finds out.
 - Close other tools that write clocks (MSI Afterburner, NVIDIA App's auto-tune) for the whole process.
 - For the lab's jobs (phases 6 and 7) also close whatever else uses the GPU (a local AI model, a game, a launcher's download) and set the screen saver to none: a screen saver drawing cost the crossbar test 19 % on the reference card. The lab notices and measures again, for up to 10 minutes a run.
@@ -48,7 +48,7 @@ Per region:
 2. Bring the card to temperature.
 3. `adjust_curve +15` around the point the last run held: pass `fromMv`/`toMv` around its p50 `nvvdd_mv` (about -15/+10 mV). Between runs the card is idle, so there is no operating point of its own to centre on.
 4. `stress_test` 60 s.
-5. Pass: `mark_stable` and go to step 3. Fail: the trial is recorded as a crash and the daily profile goes back by itself.
+5. Pass: `mark_stable` and go to step 3. Fail: the trial is recorded as a crash and the daily profile goes back by itself (unless a new trial is in force by then).
 The last pass is the edge there. `data_points` -> `by_point` keeps the score per point.
 What the reference showed:
 - The knee (850-885 mV) has the most headroom, because the stock curve is conservative there: 16-20 MHz per mV up to 875 mV.

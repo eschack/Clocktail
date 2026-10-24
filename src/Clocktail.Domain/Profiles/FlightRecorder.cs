@@ -131,12 +131,13 @@ public sealed class FlightRecorder(TimeSpan keep)
         var looks = window.Where(s => s.At <= resetSeenAt).ToList();
         FlightSample? FrozenTo(int i) => FrozenFrom(looks.GetRange(0, i + 1)) is { } f && f.At != looks[0].At ? f : null;
         bool Stuck(int i) => looks[i].ReadMs >= BlockedMs || FrozenTo(i) != null;
-        bool nvml = looks.Any(s => s.ClockMhz != null || s.Watts != null);   // NVML reads this GPU at some look
-        bool Unread(int i) => nvml ? looks[i] is { ClockMhz: null, Watts: null } : looks[i] is { ClockMhz: null, CoreMv: null, Watts: null };
         bool Near(int i) => resetSeenAt - (looks[i].At + TimeSpan.FromMilliseconds(looks[i].ReadMs)) <= HangEndsWithin;
         int end = looks.Count - 1;
         while (end >= 0 && Near(end) && !Stuck(end)) end--;   // the recovered driver's looks, live or unread, come after the hang
         if (end < 0 || !Near(end)) return null;
+        // NVML reads this GPU when it read it at some look up to the hang: not only after it, the recovered driver's.
+        bool nvml = looks.Take(end + 1).Any(s => s.ClockMhz != null || s.Watts != null);
+        bool Unread(int i) => nvml ? looks[i] is { ClockMhz: null, Watts: null } : looks[i] is { ClockMhz: null, CoreMv: null, Watts: null };
         int start = end;
         while (true)
         {

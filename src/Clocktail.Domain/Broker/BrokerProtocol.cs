@@ -43,7 +43,8 @@ public sealed record BrokerRequest(
     /// lease and go through, the nested writes of a trial too.</summary>
     string? Lease = null,
     /// <summary>For <see cref="OpProfile"/> "crashed": when the GPU stopped answering in the hang, and the last look before
-    /// at which it still answered (the flight recorder's, <see cref="Clocktail.Domain.Profiles.FlightRecorder.Hang"/>):
+    /// at which it still answered (the flight recorder's, <see cref="Clocktail.Domain.Profiles.FlightRecorder.Hang"/>; both
+    /// 2 s before the reset was seen when it finds no hang):
     /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
@@ -78,7 +79,7 @@ public sealed record BrokerRequest(
     /// stay as kept, and a trial's lowered wall goes back to the kept one at once; "off" suspends it and writes nothing; "stock" suspends it and puts the card back to stock in the same operation (its answer's "recover"); "apply" writes it unless suspended (<see cref="Value"/>: why, for the log); "load" ends a
     /// suspension and writes it; "preset" makes a shipped preset or a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
     /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
-    /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (right after a driver reset, which puts the
+    /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (none under a trial in force with a wall of its own, and nothing else of a trial in force: right after a driver reset, which puts the
     /// limit back to 575 W, without waiting for an idle GPU); "crashed" records a crash at once (the held cells already
     /// given back): the trial on the card when the GPU stopped answering (<see cref="HungAt"/>; without it, the trial in
     /// force) made a data point, nothing written; the service's own (a client sending it is refused); "after-reset" then writes the profile back

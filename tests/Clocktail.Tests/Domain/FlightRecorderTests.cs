@@ -114,6 +114,15 @@ public class FlightRecorderTests
         for (int i = 0; i < 8; i++) w.Add(new FlightSample(T0.AddSeconds(46.25 + i * 0.25), 5, null, 1000, null, null, null, null));   // NVML failing, the rail read
         w.Add(S(48.25, 1200, 750, 90, util: 5, readMs: 1500));                    // the driver coming back, slowly
         Assert.Equal((T0.AddSeconds(19.5), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
+
+        // NVML that answers only once the driver is back says nothing about the looks before: there the rail was a reading,
+        // so a slow look 4.5 s before the hang is not bridged into it.
+        var x = Enumerable.Range(0, 84).Select(i => new FlightSample(T0.AddSeconds(i * 0.5), 5, null, 910, null, null, null, null)).ToList();
+        x[75] = x[75] with { ReadMs = 1500 };                                      // 37.5 s
+        x.Add(new FlightSample(T0.AddSeconds(42), 3000, null, 910, null, null, null, null));   // the hang: blocked from 42 s
+        x.Add(S(45.5, 1200, 750, 90, util: 5));                                    // NVML answering after the reset
+        x.Add(S(46, 1200, 750, 90, util: 5));
+        Assert.Equal(T0.AddSeconds(42), FlightRecorder.Hang(x, T0.AddSeconds(47))!.Value.Stopped);
     }
 
     /// <summary>The hang is the last episode before the reset: an earlier slow look, or the frozen tail of an earlier reset
