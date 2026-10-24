@@ -40,7 +40,7 @@ public class FlightRecorderTests
 
     /// <summary>When the GPU stopped answering, for whose crash it is: the first frozen sample of the 17:59Z hang (the live
     /// looks of the recovered driver after it change nothing), or the first blocked read, whichever came first, with the
-    /// last look before it; with neither, the 2 s before the reset was seen that the driver's TDR delay gives at least.</summary>
+    /// last look before it; with neither, no hang.</summary>
     [Fact]
     public void The_hang_starts_where_the_readings_froze_or_a_read_blocked()
     {
@@ -53,12 +53,47 @@ public class FlightRecorderTests
         w.Add(S(50.8, 1200, 750, 90, util: 8));
         Assert.Equal((T0.AddSeconds(20), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
         w.Insert(70, S(34.9, 3180, 1000, 126, readMs: 1500));                       // a read blocked later in the hang
-        Assert.Equal(T0.AddSeconds(20.5), FlightRecorder.Hang(w, T0.AddSeconds(51)).Stopped);
+        Assert.Equal(T0.AddSeconds(20.5), FlightRecorder.Hang(w, T0.AddSeconds(51))!.Value.Stopped);
 
         var steady = Enumerable.Range(0, 80).Select(i => S(i * 0.5, 3045, 985, 380)).ToList();
-        Assert.Equal((T0.AddSeconds(38), T0.AddSeconds(38)), FlightRecorder.Hang(steady, T0.AddSeconds(40)));
+        Assert.Null(FlightRecorder.Hang(steady, T0.AddSeconds(40)));
         var blocked = new List<FlightSample>(steady) { S(40.2, 3045, 985, 380, readMs: 1800) };
         Assert.Equal((T0.AddSeconds(39.5), T0.AddSeconds(40.2)), FlightRecorder.Hang(blocked, T0.AddSeconds(42)));
+    }
+
+    /// <summary>Looks that read nothing (the driver failing every read during the reset) between the frozen tail and a read
+    /// that blocks as the driver comes back are the same hang; by themselves they are none (a GPU NVML cannot read reads
+    /// nothing all the time).</summary>
+    [Fact]
+    public void Looks_that_read_nothing_join_the_hang_but_start_none()
+    {
+        static FlightSample Nothing(double sec) => new(T0.AddSeconds(sec), 5, null, null, null, null, null, null);
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));        // 0 .. 19.5 s
+        for (int i = 0; i < 52; i++) w.Add(S(20.5 + i * 0.5, 3180, 1000, 126));  // frozen 20.5 .. 46 s
+        for (int i = 0; i < 8; i++) w.Add(Nothing(46.25 + i * 0.25));            // nothing read, 46.25 .. 48 s
+        w.Add(S(48.25, 1200, 750, 90, util: 5, readMs: 1500));                    // the driver coming back, slowly
+        Assert.Equal((T0.AddSeconds(19.5), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
+
+        Assert.Null(FlightRecorder.Hang(Enumerable.Range(0, 80).Select(i => Nothing(i * 0.5)).ToList(), T0.AddSeconds(41)));
+    }
+
+    /// <summary>One reset logged as bursts seconds apart: a later burst whose window shows no hang of its own keeps the first's
+    /// times, so its crash is not recorded again against a trial written in between; one with a hang of its own, or one that
+    /// comes a minute later, is a reset of its own (2 s before it was seen, without a hang to go on).</summary>
+    [Fact]
+    public void A_later_burst_of_one_reset_keeps_its_hang()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));
+        for (int i = 0; i < 60; i++) w.Add(S(20.5 + i * 0.5, 3180, 1000, 126));  // frozen to 50 s
+        var hangs = new Clocktail.Domain.Broker.ResetHangs();
+        var first = hangs.For("gpu-A", w, T0.AddSeconds(51));
+        Assert.Equal((T0.AddSeconds(19.5), T0.AddSeconds(20.5)), first);
+        for (int i = 0; i < 30; i++) w.Add(S(51 + i * 0.5, 1200, 750, 90, util: 5));   // answering again
+        Assert.Equal(first, hangs.For("gpu-A", w, T0.AddSeconds(66)));          // 15 s later: the same reset
+        Assert.Equal((T0.AddSeconds(158), T0.AddSeconds(158)), hangs.For("gpu-A", w, T0.AddSeconds(160)));   // a reset of its own
+        Assert.Equal((T0.AddSeconds(8), T0.AddSeconds(8)), hangs.For("gpu-B", [], T0.AddSeconds(10)));
     }
 
     /// <summary>The hang is the last episode before the reset: an earlier slow look, or the frozen tail of an earlier reset
@@ -83,7 +118,7 @@ public class FlightRecorderTests
         for (int i = 0; i < 20; i++) y.Add(S(i * 0.5, 2895, 910, 598.6));                     // 0 .. 9.5 s
         for (int i = 0; i < 21; i++) y.Add(S(10 + i * 0.5, 3180, 1000, 126));                 // frozen 10 .. 20 s
         for (int i = 0; i < 40; i++) y.Add(S(20.5 + i * 0.5, 1500, 800, 120, util: 30));      // answering, 20.5 .. 40 s
-        Assert.Equal((T0.AddSeconds(43), T0.AddSeconds(43)), FlightRecorder.Hang(y, T0.AddSeconds(45)));
+        Assert.Null(FlightRecorder.Hang(y, T0.AddSeconds(45)));
     }
 
     /// <summary>S-4: the GPU looks hung while its readings sit frozen after power fell, or a read blocks; a steady pinned

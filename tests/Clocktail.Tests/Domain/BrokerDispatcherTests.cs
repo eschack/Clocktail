@@ -1347,7 +1347,7 @@ public class BrokerDispatcherTests : IDisposable
         var log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
         Assert.Contains("Crash · during trial · A", log);
         Assert.DoesNotContain("Crash · daily profile", log);
-        Assert.Contains($"The GPU stopped answering at {stopped:HH:mm:ss.f}", log);   // in the log's own offset
+        Assert.Contains($"The GPU stopped answering at {stopped.ToLocalTime():HH:mm:ss.f}", log);   // in local time, as the log's headings
     }
 
     /// <summary>A trial taken off the card before the GPU stopped answering is not blamed, nor one written after: the crash
@@ -1386,22 +1386,47 @@ public class BrokerDispatcherTests : IDisposable
     }
 
     /// <summary>A trial written after the reset's give-back, before the crash is recorded (the two are operations of their
-    /// own, and a client's waits between them), is on the card: it is not blamed and stays in force. The crash is the trial
-    /// it replaced.</summary>
+    /// own, and a client's waits between them), is on the card: it is not blamed and stays in force, the daily wall that
+    /// "apply-power" puts back after a reset does not go over it, and it runs under nothing of the trial before it, which
+    /// the give-back took off the card (not its NVVDD limit). The crash is the trial it replaced.</summary>
     [Fact]
     public void A_trial_written_after_the_give_back_stays_in_force()
     {
-        var d = TrialAt450(() => null);
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
         var stopped = _host.Now.AddMinutes(2);
         _host.Now = stopped.AddSeconds(30);
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
         _host.Now = stopped.AddSeconds(31);
         Assert.True(d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
         Assert.True(d.Dispatch(Crashed(stopped)).Ok);
-        Assert.Equal("wall 500 W", TrialNow()!.Change);
+        Assert.Equal(("wall 500 W", (uint?)null), (TrialNow()!.Change, TrialNow()!.NvvddMa));
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply-power")).Ok);
         Assert.Equal(500_000u, _requests[0xfe]);
-        Assert.Single(Outcomes(), o => o == Experiment.Crash);
+        Assert.Equal("450 W, NVVDD 350 A", Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20), p => p.Outcome == Experiment.Crash).Change);
         Assert.Contains("after the reset's give-back, and is on the card: it stays in force", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>A trial written after the GPU stopped answering and before the give-back is off the card once the give-back
+    /// has run, whatever a client wrote after that (a write of its own, outside any trial): it leaves the record.</summary>
+    [Fact]
+    public void A_trial_the_give_back_took_off_leaves_the_record_whatever_was_written_after()
+    {
+        var d = TrialAt450(() => null);
+        var stopped = _host.Now.AddMinutes(2);
+        _host.Now = stopped.AddSeconds(4);
+        Assert.True(d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
+        _host.Now = stopped.AddSeconds(30);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        _host.Now = stopped.AddSeconds(31);
+        Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 540_000)).Ok);
+        Assert.True(d.Dispatch(Crashed(stopped)).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal(540_000u, _requests[0xfe]);
+        Assert.Equal("wall 575 → 450 W", Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20), p => p.Outcome == Experiment.Crash).Change);
     }
 
     /// <summary>A hang that begins while a trial's writes are still landing is that trial's: it is on the card from its

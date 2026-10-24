@@ -203,6 +203,7 @@ static int Run()
     // more over 18 s, each of which saved a trace: eight identical lines in one second, and two saves of one file that
     // collided); the first of a burst saves the trace and signals the responder, which answers a burst once anyway.
     var bursts = new ResetBursts(ResetBursts.DefaultQuiet);
+    var hangs = new ResetHangs();   // when each GPU stopped answering, a later burst of the same reset keeping the first's
     void OnReset(string evidence)
     {
         var seen = DateTimeOffset.Now;
@@ -217,7 +218,7 @@ static int Run()
             {
                 foreach (var (id, window) in windows)
                 {
-                    hung[id] = FlightRecorder.Hang(window, seen);   // whose crash it is: the trial on the card then
+                    hung[id] = hangs.For(id, window, seen);   // whose crash it is: the trial on the card then
                     var point = FlightRecorder.Pick(window, seen);
                     try
                     {
