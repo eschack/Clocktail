@@ -21,4 +21,19 @@ public class LabQuietTests
 
         Assert.Equal(LabJob.Settled.No, LabJob.Quiet(() => new BrokerResponse(false, "no GPU is available", Code: BrokerCode.NoGpu)));
     }
+
+    /// <summary>After a run that saw a driver reset, a job puts the daily profile back only once the service has recorded
+    /// the crash (the trial it wrote is out of force), or after 30 s.</summary>
+    [Fact]
+    public void After_a_reset_a_job_waits_for_the_service_to_record_the_crash()
+    {
+        var answers = new Queue<string?>(["2026-10-24T10:00:00", "2026-10-24T10:00:00", null]);
+        var slept = TimeSpan.Zero;
+        Assert.True(LabJob.Recorded(() => answers.Dequeue(), "2026-10-24T10:00:00", TimeSpan.FromSeconds(30), t => slept += t));
+        Assert.Equal(TimeSpan.FromSeconds(2), slept);
+
+        int asked = 0;
+        Assert.False(LabJob.Recorded(() => { asked++; return "2026-10-24T10:00:00"; }, "2026-10-24T10:00:00", LabJob.CrashRecordWait, _ => { }));
+        Assert.Equal(31, asked);
+    }
 }

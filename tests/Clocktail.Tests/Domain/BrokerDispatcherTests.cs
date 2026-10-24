@@ -1062,6 +1062,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset)).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverResetAgain)).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "a client")).Code);
         Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
         Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);   // an ordinary one meets the judge
         Assert.Equal(575_000u, _requests[0xfe]);
@@ -1287,6 +1288,90 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
         Assert.Equal([Experiment.Survived], Outcomes());
         Assert.DoesNotContain("not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    private static BrokerRequest Crashed(DateTimeOffset stopped, uint uv = 0) => new(BrokerRequest.OpProfile, Kind: "crashed",
+        Value: "nvlddmkm 153", Uv: uv, HungAt: stopped, AnsweredAt: stopped.AddMilliseconds(-250));
+
+    /// <summary>
+    /// A driver reset's crash is recorded seconds after the hang (the reset logged, the driver settled, the cells given
+    /// back), and it goes to the trial that was on the card when the GPU stopped answering, whatever took that trial off the
+    /// record in between: back_to_daily (a lab job's end), end_session, stock, a client's recovery, the next trial, a
+    /// hand-back. Once: after a mark_crash in between nothing more is recorded. Until 0.3.8 the trial in force at the record
+    /// took it: none here, so the crash was the daily profile's (after a "try", the next trial's).
+    /// </summary>
+    [Theory]
+    [InlineData("back_to_daily")]
+    [InlineData("end_session")]
+    [InlineData("stock")]
+    [InlineData("recover")]
+    [InlineData("try")]
+    [InlineData("release")]
+    [InlineData("mark_crash")]
+    public void A_reset_s_crash_goes_to_the_trial_on_the_card_when_the_GPU_stopped_answering(string between)
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        var written = _host.Now;
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        var stopped = written.AddMinutes(3);
+        _host.Now = stopped.AddSeconds(4);                         // the reset is logged; the service has yet to record it
+        var r = between switch
+        {
+            "back_to_daily" => d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "tune_memory finished")),
+            "end_session" => d.FromClient(Exp("end")),
+            "stock" => d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "stock")),
+            "recover" => d.FromClient(new BrokerRequest(BrokerRequest.OpRecover)),
+            "try" => d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 500 W", power_mw = 500_000u, keep_curve = true }))),
+            "release" => d.FromClient(Exp("release", "the agent disconnected")),
+            _ => d.FromClient(Exp("crash", "the screen went black")),
+        };
+        Assert.True(r.Ok, r.Error);
+        _host.Now = stopped.AddSeconds(8);
+        Assert.True(d.Dispatch(Crashed(stopped, 990_000)).Ok);
+
+        var crash = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20), p => p.Outcome == Experiment.Crash);
+        Assert.Equal(("A", "450 W, NVVDD 350 A"), (crash.Game, crash.Change));
+        if (between != "mark_crash") Assert.Equal((3.0, 990_000u), (crash.Minutes, crash.CrashUv!.Value));   // it ran until the GPU stopped answering
+        Assert.Null(TrialNow());                                   // a trial written after the hang is not blamed, and goes too
+        Assert.Contains("Crash · during trial · A", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+        Assert.DoesNotContain("Crash · daily profile", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>A trial taken off the card before the GPU stopped answering is not blamed, nor one written after: the crash
+    /// is the daily profile's, and the later trial, which the reset's give-back took off the card, leaves the record with
+    /// no data point.</summary>
+    [Fact]
+    public void A_trial_off_the_card_before_the_hang_or_written_after_it_is_not_blamed()
+    {
+        var d = TrialAt450(() => null);
+        var written = _host.Now;
+        _host.Now = written.AddMinutes(1);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        var stopped = written.AddMinutes(3);
+        _host.Now = stopped.AddSeconds(4);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
+        _host.Now = stopped.AddSeconds(8);
+        Assert.True(d.Dispatch(Crashed(stopped)).Ok);
+        Assert.Equal([Experiment.Survived], Outcomes());
+        Assert.Null(TrialNow());
+        var log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
+        Assert.Contains("Crash · daily profile", log);
+        Assert.Contains("Not blamed: the trial in force (wall 500 W)", log);
+    }
+
+    /// <summary>The trial in force when the GPU stopped answering takes the crash, as having run until then.</summary>
+    [Fact]
+    public void The_trial_in_force_when_the_GPU_stopped_answering_takes_the_crash()
+    {
+        var d = TrialAt450(() => null);
+        var stopped = _host.Now.AddMinutes(2);
+        _host.Now = stopped.AddSeconds(30);
+        Assert.True(d.Dispatch(Crashed(stopped, 975_000)).Ok);
+        var crash = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20));
+        Assert.Equal((Experiment.Crash, 2.0, 975_000u), (crash.Outcome, crash.Minutes, crash.CrashUv!.Value));
+        Assert.Null(TrialNow());
     }
 
     /// <summary>S-4: no trial is written while the GPU looks hung; the trial before stays in force.</summary>

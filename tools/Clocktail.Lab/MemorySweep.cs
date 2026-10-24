@@ -196,6 +196,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 bool trial = offset != spec.DailyMhz || _steps.Count > 0;
                 LabResult r;
                 DateTime started;
+                string? stamp;
                 // The step's write and its measurement under this job's measurement lease: no other write lands between
                 // them, and the trial on the card must still be the one written when the run ends.
                 using (var lease = Hold(log))
@@ -212,7 +213,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                                 : $"the service did not write {offset:+0;-0;0} MHz: {w.Error}", offset);
                         Thread.Sleep(3000);
                     }
-                    string? stamp = TrialAt();
+                    stamp = TrialAt();
                     // A step that writes nothing measures the daily profile: no trial may be in force then (one another
                     // agent wrote during the warm-up would be measured as this offset).
                     if (!trial && stamp != null)
@@ -238,8 +239,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 var end = End(step, edge, spec.Trend);
                 if (end == StepEnd.Crash)
                 {
-                    // A driver reset is the service's to record; a bad bit with the GPU alive is recorded here.
+                    // A driver reset is the service's to record, and the daily offset goes back once it has; a bad bit with the
+                    // GPU alive is recorded here.
                     if (trial && step.DriverResets is not > 0) Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}");
+                    else if (trial) CrashRecorded(stamp);
                     return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail}", offset);
                 }
                 // Too hot, telemetry lost, the runner failing, a shared GPU, an offset not in force: the step says nothing

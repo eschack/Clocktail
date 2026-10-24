@@ -78,13 +78,17 @@ public class DriverResetResponderTests
             }
             return Recovered(true, "Written");
         }, ["gpu-A"], _log.Add, () => _now, t => _now += t, _ => busy.Count == 0 || busy.Dequeue());
-        Assert.True(r.Respond("nvlddmkm 153", new Dictionary<string, uint> { ["gpu-A"] = 950_000 }));
+        var hang = (_now.AddSeconds(-31), _now.AddSeconds(-30.75));
+        Assert.True(r.Respond("nvlddmkm 153", new Dictionary<string, uint> { ["gpu-A"] = 950_000 },
+            new Dictionary<string, (DateTimeOffset, DateTimeOffset)> { ["gpu-A"] = hang }));
         Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
         Assert.Equal(950_000u, _profile[0].Uv);   // the flight recorder's crash point goes with the record
+        Assert.Equal(hang, (_profile[0].AnsweredAt!.Value, _profile[0].HungAt!.Value));   // and when the GPU stopped answering
         _profile.Clear();
         atStart = true;
         r.ApplyAtStart(["gpu-A"]);   // idle now: the queue is spent, so a look would throw
         Assert.Equal(["crashed", "after-reset"], _profile.Select(p => p.Kind));
+        Assert.Null(_profile[0].HungAt);   // a crash found at start has no flight recording: the trial in force
     }
 
     [Fact]

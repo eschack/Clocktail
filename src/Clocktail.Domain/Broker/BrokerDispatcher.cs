@@ -148,15 +148,16 @@ public sealed class BrokerDispatcher
 
     /// <summary>
     /// A client's request: over the pipe, or the CLI's in-process. The service's own requests are not a client's: the fan
-    /// guard's "fans-back" and the lease it runs under (<see cref="SafetyLease"/>) pass a measurement's judge.lock, and the
-    /// recoveries after a driver reset leave the trial to the "crashed" step after them, so a client sending any of these is
-    /// refused. A recovery a client asks for takes the card off the trial in force, which then leaves the record
-    /// (<see cref="DispatchOne"/>).
+    /// guard's "fans-back" and the lease it runs under (<see cref="SafetyLease"/>) pass a measurement's judge.lock, the
+    /// recoveries after a driver reset leave the trial to the "crashed" step after them, and "crashed" is the service's
+    /// record of a reset it saw (a client's crash is the experiment's "crash"), so a client sending any of these is refused.
+    /// A recovery a client asks for takes the card off the trial in force, which then leaves the record (<see cref="DispatchOne"/>).
     /// </summary>
     public BrokerResponse FromClient(BrokerRequest req)
     {
         if (req.Lease == SafetyLease || req.Op == BrokerRequest.OpExperiment && req.Kind == "fans-back"
-            || req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain)
+            || req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain
+            || req.Op == BrokerRequest.OpProfile && req.Kind == "crashed")
             return Fail("that request is the service's own (its fan guard's, or its answer to a driver reset); a client cannot send it", BrokerCode.BadRequest);
         bool prior = ClientAsks.Value;
         ClientAsks.Value = true;
@@ -571,11 +572,16 @@ public sealed class BrokerDispatcher
             case "crashed":
             {
                 // A crash: a driver reset (the held cells already given back), or the machine going down while it held
-                // cells. Recorded at once, before anything waits for an idle GPU: a trial in force is the one that crashed
-                // (a data point), and one the agent writes after this is not blamed for it. Nothing is written here; the
-                // daily profile goes back on unchanged in "after-reset". No step-down: the person is at the machine and
-                // the agent adjusts from there (the user, 2026-10-19).
-                var crash = CloseTrial(target, Experiment.Crash, req.Value, req.Uv > 0 ? req.Uv : null);
+                // cells. Recorded at once, before anything waits for an idle GPU: the trial that was on the card when the GPU
+                // stopped answering is the one that crashed (a data point), even one taken off the record since (CrashedAt;
+                // without the flight recorder's time, the trial in force), and one the agent writes after this is not blamed
+                // for it. Nothing is written here; the daily profile goes back on unchanged in "after-reset". No step-down:
+                // the person is at the machine and the agent adjusts from there (the user, 2026-10-19).
+                uint? uv = req.Uv > 0 ? req.Uv : null;
+                List<string> how = [];
+                var crash = req.HungAt is { } stopped
+                    ? CrashedAt(target, req.Value, uv, req.AnsweredAt ?? stopped, stopped, out how)
+                    : CloseTrial(target, Experiment.Crash, req.Value, uv);
                 if (profile != null)
                 {
                     profile = profile.Noted(_host.Now, crash != null
@@ -585,6 +591,8 @@ public sealed class BrokerDispatcher
                 }
                 Log(target, crash != null ? $"Crash · during trial · {crash.Game}" : "Crash · daily profile", [
                     $"Evidence: {req.Value ?? "driver reset"}",
+                    req.HungAt is { } hung ? $"The GPU stopped answering at {hung:HH:mm:ss.f}" : null,
+                    .. how,
                     req.Uv > 0 ? $"Crash voltage from the flight recorder: {req.Uv / 1000.0:0.#} mV" : "The flight recorder found no crash point",
                     crash != null ? $"Trial: {crash.Change}, ran {crash.Minutes} min; written at {Mv(crash.AtUv)}, {crash.AtMhz} MHz; {Limits(crash)}" : null,
                     crash != null ? $"Trial curve: {crash.Curve}" : null,
@@ -790,6 +798,7 @@ public sealed class BrokerDispatcher
                     }
                     var replaced = exp.Trial is { } before && Records(before, Experiment.Survived) ? exp.Point(Experiment.Survived, _host.Now, "replaced by the next trial") : null;
                     if (replaced != null) Experiment.Append(data, replaced);
+                    if (exp.Trial is { } prior) Gone(target, exp, prior with { Ending = replaced != null ? Experiment.Survived : prior.Ending ?? Experiment.Survived });
                     // A curve trial runs under the wall the trial before it set, until the daily profile goes back on.
                     var trial = new ExperimentTrial(_host.Now, curve, change, UInt(a, "at_uv"), UInt(a, "at_mhz"), PowerMw: powerMw ?? exp.Trial?.PowerMw,
                         NvvddMa: nvvddMa ?? exp.Trial?.NvvddMa, MsvddMa: msvddMa ?? exp.Trial?.MsvddMa,
@@ -1110,6 +1119,7 @@ public sealed class BrokerDispatcher
                 {
                     closed = Records(t, Experiment.Survived) ? exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}") : null;
                     if (closed != null) Experiment.Append(data, closed);
+                    Gone(target, exp, t with { Ending = closed != null ? Experiment.Survived : t.Ending });   // the part before
                     // An ending on record stays: the rest is still that trial waiting to go back, not a new one to record again.
                     (exp with { Trial = Without(t, gone, left) with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
                 }
@@ -1236,8 +1246,84 @@ public sealed class BrokerDispatcher
             if (Experiment.Load(path) is not { Trial: { } trial } exp) return null;
             var point = Records(trial, outcome) ? exp.Point(outcome, _host.Now, note, crashUv) : null;
             if (point != null) Experiment.Append(Experiment.DataPathBeside(target.Journal.Path), point);
+            Gone(target, exp, trial with { Ending = point != null ? outcome : trial.Ending ?? outcome });
             (exp with { Trial = null }).Save(path);
             return point ?? exp.Point(outcome, _host.Now, note, crashUv);
+        }
+    }
+
+    /// <summary>A trial that left the record, with its session's game and when (<see cref="Gone"/>).</summary>
+    private sealed record GoneTrial(string Game, ExperimentTrial Trial, DateTimeOffset LeftAt);
+
+    /// <summary>
+    /// The trials that left the record lately, per GPU, newest last. A driver reset's crash is recorded seconds after the
+    /// hang (once Windows has logged the reset, the driver has settled and the held cells are given back), and anything can
+    /// take the trial off the record in between (back_to_daily, end_session, a lab job's end, the next trial, a hand-back),
+    /// so the crash looks here for the trial that was on the card when the GPU stopped answering (<see cref="CrashedAt"/>).
+    /// Kept <see cref="GoneKeep"/>, longer than the responder waits to give back, and in memory only: a reset that only the
+    /// next worker finds has no hang time to look with. Under <see cref="_experiment"/>.
+    /// </summary>
+    private readonly Dictionary<string, List<GoneTrial>> _gone = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan GoneKeep = TimeSpan.FromMinutes(20);
+
+    /// <summary>Remembers <paramref name="trial"/> (with how it ended) leaving the record now (<see cref="_gone"/>).</summary>
+    private void Gone(IGpuTarget target, Experiment exp, ExperimentTrial trial)
+    {
+        if (!_gone.TryGetValue(target.StableId, out var list)) _gone[target.StableId] = list = [];
+        list.RemoveAll(g => _host.Now - g.LeftAt > GoneKeep);
+        list.Add(new GoneTrial(exp.Game, trial, _host.Now));
+    }
+
+    /// <summary>
+    /// A driver reset's crash ("crashed") when the flight recorder says when the GPU stopped answering
+    /// (<paramref name="stopped"/>; <paramref name="answered"/>: the last look before, at which it still answered): the
+    /// trial that was on the card then. That is the trial in force if it was written by then (its write can be what hung
+    /// the GPU), else the one taken off the record after <paramref name="answered"/> (<see cref="_gone"/>). A trial written
+    /// after the GPU stopped answering is not blamed; it leaves the record with no data point, since the reset's give-back
+    /// took the card off it. The crash is recorded once (<see cref="Records"/>), as having run until the GPU stopped
+    /// answering. Until 0.3.8 the trial in force when the crash was recorded, seconds after the reset, took it: one written
+    /// in between was blamed, and one taken off the record in between was recorded as survived and the crash filed under
+    /// the daily profile. <paramref name="lines"/>: what the tuning log says beyond the plain case. Null when no trial was
+    /// on the card then.
+    /// </summary>
+    private DataPoint? CrashedAt(IGpuTarget target, string? note, uint? crashUv, DateTimeOffset answered, DateTimeOffset stopped, out List<string> lines)
+    {
+        lines = [];
+        lock (_experiment)
+        {
+            string path = Experiment.PathBeside(target.Journal.Path), data = Experiment.DataPathBeside(target.Journal.Path);
+            var exp = Experiment.Load(path);
+            ExperimentTrial? onCard = null;
+            string? game = null;
+            int gone = -1;
+            if (exp is { Trial: { } t })
+            {
+                if (t.At <= stopped) (onCard, game) = (t, exp.Game);
+                else lines.Add($"Not blamed: the trial in force ({t.Change}) was written at {t.At:HH:mm:ss.f}, after the GPU stopped answering; the reset's give-back took the card off it, so it leaves the record with no data point");
+            }
+            var list = _gone.GetValueOrDefault(target.StableId);
+            if (onCard == null && list?.FindLastIndex(g => g.Trial.At <= stopped && g.LeftAt > answered) is int i and >= 0)
+            {
+                (onCard, game, gone) = (list[i].Trial, list[i].Game, i);
+                lines.Add($"The trial on the card when the GPU stopped answering ({onCard.Change}) had left the record at {list[i].LeftAt:HH:mm:ss.f}" +
+                    (onCard.Ending is { } ended && ended != Experiment.Crash ? $", recorded as {ended}: this crash is how it ended" : ""));
+            }
+            DataPoint? point = null;
+            if (onCard != null)
+            {
+                point = new Experiment(game!, null, onCard.At, onCard).Point(Experiment.Crash, _host.Now, note, crashUv)! with
+                {
+                    Minutes = Math.Round((stopped - onCard.At).TotalMinutes, 1),
+                };
+                if (Records(onCard, Experiment.Crash)) Experiment.Append(data, point);
+                if (gone >= 0) list![gone] = list[gone] with { Trial = onCard with { Ending = Experiment.Crash } };
+            }
+            if (exp is { Trial: { } inForce })
+            {
+                Gone(target, exp, gone < 0 && onCard != null ? inForce with { Ending = Experiment.Crash } : inForce);
+                (exp with { Trial = null }).Save(path);
+            }
+            return point;
         }
     }
 
@@ -1286,8 +1372,11 @@ public sealed class BrokerDispatcher
         if (point != null && left)
         {
             lock (_experiment)
-                if (Experiment.Load(path) is { Trial: not null } exp)
+                if (Experiment.Load(path) is { Trial: { } gone } exp)
+                {
+                    Gone(target, exp, gone);
                     (exp with { Trial = null }).Save(path);
+                }
             if (!landed)
                 Log(target, "Trial off the record, not all off the card", [$"Trial: {point.Change}", $"Reason: {putBack.Error ?? "the put-back did not finish"}",
                     "Refused for a reason waiting does not cure: the record lets go of the trial as before 0.3.7, but the card may still hold part of it; read the card (card_settings)"]);

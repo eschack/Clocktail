@@ -38,6 +38,29 @@ public class FlightRecorderTests
         Assert.True(FlightRecorder.LettingGo(S(1, 2947, 970, 514), S(0.5, 2895, 910, 598.6)));
     }
 
+    /// <summary>When the GPU stopped answering, for whose crash it is: the first frozen sample of the 17:59Z hang (the live
+    /// looks of the recovered driver after it change nothing), or the first blocked read, whichever came first, with the
+    /// last look before it; with neither, the 2 s before the reset was seen that the driver's TDR delay gives at least.</summary>
+    [Fact]
+    public void The_hang_starts_where_the_readings_froze_or_a_read_blocked()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));        // 0 .. 19.5 s
+        w.Add(S(20.0, 2947, 970, 514));                                             // letting go
+        for (int i = 0; i < 60; i++) w.Add(S(20.5 + i * 0.5, 3180, 995 + (uint)(i % 2) * 5, 126));   // frozen to 50 s
+        Assert.Equal((T0.AddSeconds(20), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
+        w.Add(S(50.6, 1200, 750, 90, util: 10));                                    // the recovered driver, idle
+        w.Add(S(50.8, 1200, 750, 90, util: 8));
+        Assert.Equal((T0.AddSeconds(20), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
+        w.Insert(70, S(34.9, 3180, 1000, 126, readMs: 1500));                       // a read blocked later in the hang
+        Assert.Equal(T0.AddSeconds(20.5), FlightRecorder.Hang(w, T0.AddSeconds(51)).Stopped);
+
+        var steady = Enumerable.Range(0, 80).Select(i => S(i * 0.5, 3045, 985, 380)).ToList();
+        Assert.Equal((T0.AddSeconds(38), T0.AddSeconds(38)), FlightRecorder.Hang(steady, T0.AddSeconds(40)));
+        var blocked = new List<FlightSample>(steady) { S(40.2, 3045, 985, 380, readMs: 1800) };
+        Assert.Equal((T0.AddSeconds(39.5), T0.AddSeconds(40.2)), FlightRecorder.Hang(blocked, T0.AddSeconds(42)));
+    }
+
     /// <summary>S-4: the GPU looks hung while its readings sit frozen after power fell, or a read blocks; a steady pinned
     /// load or an old window is not a hang.</summary>
     [Fact]

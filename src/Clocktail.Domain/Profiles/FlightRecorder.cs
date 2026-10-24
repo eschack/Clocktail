@@ -109,6 +109,27 @@ public sealed class FlightRecorder(TimeSpan keep)
             : null;
     }
 
+    /// <summary>
+    /// When the GPU stopped answering in the hang a reset ends, and the last look before that at which it still answered,
+    /// for whose crash it is: a trial written by <c>Stopped</c> was on the card when it hung (its write can be what hung
+    /// it), and one taken off the record after <c>Answered</c> was still on it. Read as <see cref="Pick"/> reads a hang:
+    /// the first blocked read or the first sample of the last frozen stretch (the recovered driver's live looks can follow
+    /// it), whichever came first; a stretch frozen from the window's first look is a steady load, as for <see cref="HungNow"/>.
+    /// Without either, both are <see cref="HangDetectAtLeast"/> before the reset was seen: the driver logs a reset only after
+    /// a hang at least that long.
+    /// </summary>
+    public static (DateTimeOffset Answered, DateTimeOffset Stopped) Hang(IReadOnlyList<FlightSample> window, DateTimeOffset resetSeenAt)
+    {
+        var looks = window.Where(s => s.At <= resetSeenAt).ToList();
+        FlightSample? frozen = null;
+        for (int end = looks.Count; end > 0 && frozen == null; end--)
+            if (FrozenFrom(looks.GetRange(0, end)) is { } f && f.At != looks[0].At) frozen = f;
+        var blocked = looks.FirstOrDefault(s => s.ReadMs >= BlockedMs);
+        var first = frozen == null ? blocked : blocked == null || frozen.At <= blocked.At ? frozen : blocked;
+        if (first == null) return (resetSeenAt - HangDetectAtLeast, resetSeenAt - HangDetectAtLeast);
+        return (looks.LastOrDefault(s => s.At < first.At)?.At ?? first.At, first.At);
+    }
+
     /// <summary>A sample of the GPU under load: 60 % utilization, or (a light-load stress run, a 250 Hz square wave NVML
     /// reads as 30-57 %) 25 % with at least 150 W behind it; an idle card draws well under that.</summary>
     public static bool Loaded(FlightSample s) =>

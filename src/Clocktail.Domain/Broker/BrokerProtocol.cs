@@ -41,7 +41,13 @@ public sealed record BrokerRequest(
     /// <summary>The measurement lease this request holds: the RunId of the judge.lock its own process wrote. While a
     /// measurement holds the lock every other write waits; the holder's own writes (the lab's next candidate) carry the
     /// lease and go through, the nested writes of a trial too.</summary>
-    string? Lease = null)
+    string? Lease = null,
+    /// <summary>For <see cref="OpProfile"/> "crashed": when the GPU stopped answering in the hang, and the last look before
+    /// at which it still answered (the flight recorder's, <see cref="Clocktail.Domain.Profiles.FlightRecorder.Hang"/>):
+    /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
+    /// (0.3.8).</summary>
+    DateTimeOffset? HungAt = null,
+    DateTimeOffset? AnsweredAt = null)
 {
     public const string OpPing = "ping";
     public const string OpOwnership = "ownership";
@@ -74,7 +80,8 @@ public sealed record BrokerRequest(
     /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (right after a driver reset, which puts the
     /// limit back to 575 W, without waiting for an idle GPU); "crashed" records a crash at once (the held cells already
-    /// given back): a trial in force made a data point, nothing written; "after-reset" then writes the profile back
+    /// given back): the trial on the card when the GPU stopped answering (<see cref="HungAt"/>; without it, the trial in
+    /// force) made a data point, nothing written; the service's own (a client sending it is refused); "after-reset" then writes the profile back
     /// unchanged once the GPU is idle, unless a trial written since is in force. Every one of
     /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "after-reset"
     /// send each write through <see cref="OpWrite"/>, which takes the window and every guard.

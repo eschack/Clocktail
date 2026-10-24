@@ -147,6 +147,30 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
             ? at.ToString() + (t.TryGetProperty("Ending", out var end) && end.ValueKind == JsonValueKind.String ? $" ({end.GetString()})" : "") : null;
     }
 
+    /// <summary>How long a job waits, after a run that saw a driver reset, for the service to record the crash.</summary>
+    public static readonly TimeSpan CrashRecordWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// After a run that saw a driver reset, before anything else of the job's touches the card: waits until the service has
+    /// recorded the crash, which takes the trial written at <paramref name="stamp"/> out of force (<see cref="TrialAt"/>), at
+    /// most <see cref="CrashRecordWait"/>. The service records it seconds after the reset is logged (it lets the driver
+    /// settle, then gives back what is held); until 0.3.8 the job's back_to_daily in between took the trial off the record
+    /// as survived, and the crash went to the daily profile. True once recorded.
+    /// </summary>
+    protected bool CrashRecorded(string? stamp) => Recorded(TrialAt, stamp, CrashRecordWait, Thread.Sleep);
+
+    /// <summary><see cref="CrashRecorded"/>'s wait: <paramref name="trialAt"/> asked every second until it is no longer
+    /// <paramref name="stamp"/>, at most <paramref name="within"/>.</summary>
+    public static bool Recorded(Func<string?> trialAt, string? stamp, TimeSpan within, Action<TimeSpan> sleep)
+    {
+        for (var waited = TimeSpan.Zero; ; waited += TimeSpan.FromSeconds(1))
+        {
+            if (trialAt() != stamp) return true;
+            if (waited >= within) return false;
+            sleep(TimeSpan.FromSeconds(1));
+        }
+    }
+
     /// <summary>One measurement in a child lab process. The child is tied to this process (it never outlives the job) and is
     /// stopped and waited for on every way out, so nothing that follows (the next write, the daily profile going back) runs
     /// under its load. A child that hangs past its time and the grace, dies, or writes no result is a measurement that could

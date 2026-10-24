@@ -35,16 +35,20 @@ public sealed class DriverResetResponder(
     public static readonly TimeSpan GiveUpAfter = TimeSpan.FromMinutes(15);
 
     private readonly SemaphoreSlim _signal = new(0);
-    private sealed record Seen(string Evidence, IReadOnlyDictionary<string, uint> CrashUv);
-    private Seen _last = new("", new Dictionary<string, uint>());
+    private sealed record Seen(string Evidence, IReadOnlyDictionary<string, uint> CrashUv,
+        IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)> Hung);
+    private Seen _last = new("", new Dictionary<string, uint>(), new Dictionary<string, (DateTimeOffset, DateTimeOffset)>());
 
     /// <summary>
     /// Called once a reset is seen: a burst of events is answered once. <paramref name="crashUv"/> is each GPU's core
-    /// voltage at the hang from the flight recorder, where it found one, for the record.
+    /// voltage at the hang from the flight recorder, where it found one, for the record; <paramref name="hung"/> when each
+    /// GPU stopped answering and the last look before at which it still answered (<see cref="Profiles.FlightRecorder.Hang"/>),
+    /// so that the crash goes to the trial on the card then, whatever took it off the record before the crash is recorded.
     /// </summary>
-    public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null)
+    public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null,
+        IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>? hung = null)
     {
-        Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>()));
+        Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
         _signal.Release();
     }
 
@@ -56,25 +60,26 @@ public sealed class DriverResetResponder(
             catch (OperationCanceledException) { return; }
             sleep(SettleFor);
             while (_signal.Wait(0)) { }   // the events of one reset arrive together
-            var (evidence, crashUv) = Volatile.Read(ref _last);
-            Respond(evidence, crashUv);
+            var (evidence, crashUv, hung) = Volatile.Read(ref _last);
+            Respond(evidence, crashUv, hung);
         }
     }
 
     /// <summary>Gives back every GPU's held cells; true when each one ended clean. A GPU whose answer throws is logged and
     /// counted as not clean: the next GPU, and the next reset, are still answered.</summary>
-    public bool Respond(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null)
+    public bool Respond(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null,
+        IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>? hung = null)
     {
         bool clean = true;
         foreach (var id in gpuIds)
         {
-            try { clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0); }
+            try { clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0, hung != null && hung.TryGetValue(id, out var h) ? h : null); }
             catch (Exception e) { log($"gpu {id}: driver reset ({evidence}): the answer failed: {e}"); clean = false; }
         }
         return clean;
     }
 
-    private bool RespondFor(string gpuId, string evidence, uint crashUv)
+    private bool RespondFor(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung = null)
     {
         var deadline = now() + GiveUpAfter;
         bool recorded = false;
@@ -89,7 +94,7 @@ public sealed class DriverResetResponder(
                 log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
                 // The crash on record at once, so a trial the agent writes while the GPU is still busy is not blamed for it;
                 // the power limit at once (the reset put it back to 575 W; stock clocks under it are safe); the curve once idle.
-                Record(gpuId, evidence, "after the reset", crashUv);
+                Record(gpuId, evidence, "after the reset", crashUv, hung);
                 var power = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "apply-power"));
                 log($"gpu {gpuId}: daily profile's power limit after the reset: {ProfileSummary(power)}");
                 return Profile(gpuId, "after-reset", evidence, "after the reset");
@@ -172,10 +177,12 @@ public sealed class DriverResetResponder(
         log($"gpu {gpuId}: at start, {(sentinel ? "a write window was left open" : "the last worker's cells were still held")}: recovered: {Summary(r)}");
     }
 
-    /// <summary>The crash recorded ("crashed"): the trial in force made a data point, nothing written.</summary>
-    private void Record(string gpuId, string evidence, string when, uint crashUv = 0)
+    /// <summary>The crash recorded ("crashed"): the trial on the card when the GPU stopped answering (<paramref name="hung"/>;
+    /// without it, the trial in force) made a data point, nothing written.</summary>
+    private void Record(string gpuId, string evidence, string when, uint crashUv = 0, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung = null)
     {
-        var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed", Value: evidence, Uv: crashUv));
+        var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed", Value: evidence, Uv: crashUv,
+            HungAt: hung?.Stopped, AnsweredAt: hung?.Answered));
         log($"gpu {gpuId}: crash recorded {when}: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
     }
 

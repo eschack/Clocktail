@@ -211,11 +211,13 @@ static int Run()
         Once("the crash trace", () =>
         {
             var crashUv = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+            var hung = new Dictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>(StringComparer.OrdinalIgnoreCase);
             var details = new List<string>();
             try
             {
                 foreach (var (id, window) in windows)
                 {
+                    hung[id] = FlightRecorder.Hang(window, seen);   // whose crash it is: the trial on the card then
                     var point = FlightRecorder.Pick(window, seen);
                     try
                     {
@@ -228,7 +230,7 @@ static int Run()
             }
             finally   // the trace is for the record; the give-back must happen whatever became of it
             {
-                responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv);
+                responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv, hung);
             }
         });
     }

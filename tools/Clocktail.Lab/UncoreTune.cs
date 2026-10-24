@@ -466,8 +466,10 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
 
         Comparison Crash(UncoreRun r)
         {
-            // A driver reset is the service's to record; a bad bit with the GPU alive is recorded here.
+            // A driver reset is the service's to record, and nothing more of the job's goes on until it has; a bad bit with
+            // the GPU alive is recorded here.
             if (r.DriverResets is not > 0) Broker("crash", $"tune_uncore {b}: {r.Detail}");
+            else CrashRecorded(stamp);
             Thread.Sleep(5000);
             return Done(Comparison.Failed, r.Detail ?? "the candidate's run failed");
         }
