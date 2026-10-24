@@ -1429,6 +1429,46 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("wall 575 → 450 W", Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20), p => p.Outcome == Experiment.Crash).Change);
     }
 
+    /// <summary>A trial kept after the reset's give-back that sets no wall of its own runs under the daily wall, as its record
+    /// says: "apply-power" writes that alone and touches nothing else of the trial (its NVVDD limit stays). Skipping it left
+    /// the card at the driver's 575 W.</summary>
+    [Fact]
+    public void A_kept_trial_without_a_wall_of_its_own_gets_the_daily_one_and_keeps_the_rest()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        var stopped = _host.Now.AddMinutes(2);
+        _host.Now = stopped.AddSeconds(30);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        Assert.Equal(575_000u, _requests[0xfe]);                                  // the driver's wall, after the give-back
+        _host.Now = stopped.AddSeconds(31);
+        Assert.True(d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        Assert.True(d.Dispatch(Crashed(stopped)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply-power")).Ok);
+        Assert.Equal(560_000u, _requests[0xfe]);
+        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Equal(("NVVDD 350 A", (uint?)null), (TrialNow()!.Change, TrialNow()!.PowerMw));
+    }
+
+    /// <summary>Whether the give-back took a trial off the card is which trial was in force when it ran, not a comparison of
+    /// clock times: a clock set back after the give-back does not make a trial written after it look given back.</summary>
+    [Fact]
+    public void A_clock_set_back_does_not_make_a_later_trial_look_given_back()
+    {
+        var d = TrialAt450(() => null);
+        var stopped = _host.Now.AddMinutes(2);
+        _host.Now = stopped.AddSeconds(30);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        _host.Now = stopped.AddSeconds(20);                                         // time sync stepped the clock back 10 s
+        Assert.True(d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
+        Assert.True(d.Dispatch(Crashed(stopped)).Ok);
+        Assert.Equal("wall 500 W", TrialNow()!.Change);
+        Assert.Equal(500_000u, _requests[0xfe]);
+    }
+
     /// <summary>A hang that begins while a trial's writes are still landing is that trial's: it is on the card from its
     /// first write. Stamped once its writes had all landed, it was "written after the GPU stopped answering", and the trial
     /// before it took the crash.</summary>

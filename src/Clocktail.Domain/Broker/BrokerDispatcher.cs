@@ -348,7 +348,7 @@ public sealed class BrokerDispatcher
             CrashLog.Append(resetLogged, new CrashRecord(_host.Now, _host.BootId, $"driver reset ({req.Value ?? "no detail"}){window}", held.Items));
         }
         var r = new Recovery(RecoveryClient(), target.Journal, target.Sentinel, _host).Run(target.Session, _canWrite);
-        if (r.Clean) _gaveBack[target.StableId] = _host.Now;   // the card holds nothing written before this
+        if (r.Clean) _givenBack[target.StableId] = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.At;   // off the card now
         return new BrokerResponse(r.Clean, Result: Element(new
         {
             success = r.Clean,
@@ -565,10 +565,18 @@ public sealed class BrokerDispatcher
             {
                 // Right after a driver reset, before the GPU is idle: the limit went back to 575 W, and stock clocks under
                 // the kept limit are still a safe state. A trial in force now was written after the reset's give-back (the
-                // crash record kept it, CrashedAt): its wall and limits are its own, as for "after-reset".
+                // crash record kept it, CrashedAt), and nothing of it is touched: under a wall of its own nothing is written,
+                // and under none it runs under the daily wall, as its record says, so that alone is written (the whole
+                // profile's power run would put its fan duty and current limits back too).
                 if (profile is null or { Suspended: true }) return Ok(new { success = true, path, profile, applied = Array.Empty<object>() });
-                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial != null)
-                    return Ok(new { success = true, skipped = "a trial began after the crash: the agent running it decides", profile });
+                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial is { } inForce)
+                {
+                    if (inForce.PowerMw != null || profile.Writes.FirstOrDefault(w => w.Kind == PowerCap.Kind && w.Key == PowerCap.Key(PowerRequestKind.Ordinary)) is not { } daily)
+                        return Ok(new { success = true, skipped = "a trial began after the crash, under a wall of its own: the agent running it decides", profile });
+                    var put = Dispatch(WriteOf(target, daily.Kind, daily.Key, daily.Value));
+                    Log(target, "Driver reset: the daily power limit put back under the trial in force", Writes(put));
+                    return new BrokerResponse(put.Ok, put.Error, Element(new { success = put.Ok, path, profile, applied = AppliedOf(put) }), put.Code);
+                }
                 var r = ApplyProfile(target, profile, path, only: w => w.Kind == PowerCap.Kind);
                 Log(target, "Driver reset: power limit put back first", Writes(r));
                 return r;
@@ -808,7 +816,7 @@ public sealed class BrokerDispatcher
                     if (exp.Trial is { } prior) Gone(target, exp, prior with { Ending = replaced != null ? Experiment.Survived : prior.Ending ?? Experiment.Survived }, began);
                     // A curve trial runs under the wall the trial before it set, until the daily profile goes back on; not under
                     // one a recovery has given back since (a driver reset's, before its crash is recorded): the card is at stock.
-                    var under = exp.Trial is { } t0 && !GivenBackSince(target, t0.At) ? t0 : null;
+                    var under = exp.Trial is { } t0 && !GivenBack(target, t0) ? t0 : null;
                     var trial = new ExperimentTrial(began, curve, change, UInt(a, "at_uv"), UInt(a, "at_mhz"), PowerMw: powerMw ?? under?.PowerMw,
                         NvvddMa: nvvddMa ?? under?.NvvddMa, MsvddMa: msvddMa ?? under?.MsvddMa,
                         MsvddRelUv: msvddRel ?? under?.MsvddRelUv, MsvddVminUv: msvddVmin ?? under?.MsvddVminUv,
@@ -1287,12 +1295,14 @@ public sealed class BrokerDispatcher
     /// <summary>A time for the tuning log, in local time as its headings are (the host's clock is UTC, the flight recorder's local).</summary>
     private static string When(DateTimeOffset t) => t.ToLocalTime().ToString("HH:mm:ss.f", System.Globalization.CultureInfo.InvariantCulture);
 
-    /// <summary>When each GPU's last clean recovery finished (<see cref="Recover"/>; a driver reset's give-back, before its
-    /// crash is recorded): the card holds nothing written before it. Under the operation lock.</summary>
-    private readonly Dictionary<string, DateTimeOffset> _gaveBack = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The trial (its write time, the trial's identity) in force when each GPU's last clean recovery ran
+    /// (<see cref="Recover"/>; a driver reset's give-back, before its crash is recorded): the card holds nothing of it. Kept
+    /// by identity and not by time, so a clock set back cannot make a trial written after it look given back. Under the
+    /// operation lock, as every recovery and every trial write is.</summary>
+    private readonly Dictionary<string, DateTimeOffset?> _givenBack = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Whether a recovery has given back since <paramref name="at"/>: a trial written by then is off the card.</summary>
-    private bool GivenBackSince(IGpuTarget target, DateTimeOffset at) => _gaveBack.TryGetValue(target.StableId, out var g) && g >= at;
+    /// <summary>Whether a recovery took the card off <paramref name="trial"/> (it was in force when one ran).</summary>
+    private bool GivenBack(IGpuTarget target, ExperimentTrial trial) => _givenBack.GetValueOrDefault(target.StableId) == trial.At;
 
     /// <summary>
     /// A driver reset's crash ("crashed") when the flight recorder says when the GPU stopped answering
@@ -1301,8 +1311,8 @@ public sealed class BrokerDispatcher
     /// they can be what hung the GPU), else the one taken off the record after <paramref name="answered"/>
     /// (<see cref="_gone"/>). The crash is recorded once (<see cref="Records"/>), dated when the GPU stopped answering, so
     /// that its run (At less Minutes to At) is the run before the hang and not the frozen readings after it. A trial in force
-    /// written after the GPU stopped answering is not blamed: when the reset's give-back took the card off it (it came
-    /// after the trial was written, <see cref="GivenBackSince"/>) it leaves the record with no data point; one written after
+    /// written after the GPU stopped answering is not blamed: when the reset's give-back took the card off it (it was in
+    /// force when the give-back ran, <see cref="GivenBack"/>) it leaves the record with no data point; one written after
     /// the give-back is on the card and stays in force, for the agent running it. Until 0.3.8 the trial in force when the crash was recorded, seconds after the reset, took
     /// it: one written in between was blamed, and one taken off the record in between was recorded as survived and the
     /// crash filed under the daily profile. <paramref name="lines"/>: what the tuning log says beyond the plain case. Null
@@ -1322,7 +1332,7 @@ public sealed class BrokerDispatcher
             if (exp is { Trial: { } t })
             {
                 if (t.At <= stopped) (onCard, game) = (t, exp.Game);
-                else if (GivenBackSince(target, t.At))
+                else if (GivenBack(target, t))
                     lines.Add($"Not blamed: the trial in force ({t.Change}) was written at {When(t.At)}, after the GPU stopped answering; the reset's give-back took the card off it, so it leaves the record with no data point");
                 else
                 {

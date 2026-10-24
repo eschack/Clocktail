@@ -78,6 +78,31 @@ public class FlightRecorderTests
         Assert.Null(FlightRecorder.Hang(Enumerable.Range(0, 80).Select(i => Nothing(i * 0.5)).ToList(), T0.AddSeconds(41)));
     }
 
+    /// <summary>A look that blocked and read nothing is the hang's own (its first look here), not one to cross; a GPU that
+    /// reads nothing all along is not bridged back to a slow look long before the reset; a rail read is a reading.</summary>
+    [Fact]
+    public void A_blocked_look_that_read_nothing_starts_the_hang_and_nothing_bridges_far()
+    {
+        static FlightSample Nothing(double sec, int readMs = 5) => new(T0.AddSeconds(sec), readMs, null, null, null, null, null, null);
+        var w = new List<FlightSample>();
+        for (int i = 0; i <= 58; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));      // 0 .. 29 s
+        w.Add(Nothing(30, readMs: 2000));                                          // blocked 2 s, then failed
+        for (int i = 0; i < 18; i++) w.Add(Nothing(32.25 + i * 0.25));            // failing fast, 32.25 .. 36.5 s
+        w.Add(S(37, 2895, 910, 598.6, readMs: 9000));                              // blocked until the driver came back
+        Assert.Equal((T0.AddSeconds(29), T0.AddSeconds(30)), FlightRecorder.Hang(w, T0.AddSeconds(47)));
+
+        var none = new List<FlightSample> { Nothing(0, readMs: 1500) };           // a slow first look, 50 s before
+        for (int i = 1; i < 100; i++) none.Add(Nothing(1 + i * 0.5));             // nothing to read, ever
+        none.Add(Nothing(51, readMs: 1200));                                       // a slow look near the reset
+        Assert.Equal(T0.AddSeconds(51), FlightRecorder.Hang(none, T0.AddSeconds(53))!.Value.Stopped);
+
+        // No NVML, but the rail is read: those looks answered, so a slow look 5 s before another is not the same hang.
+        var railOnly = Enumerable.Range(0, 100).Select(i => new FlightSample(T0.AddSeconds(i * 0.5), 5, null, 910, null, null, null, null)).ToList();
+        railOnly[92] = railOnly[92] with { ReadMs = 1500 };                        // 46 s
+        railOnly.Add(new FlightSample(T0.AddSeconds(51), 1200, null, 910, null, null, null, null));
+        Assert.Equal(T0.AddSeconds(51), FlightRecorder.Hang(railOnly, T0.AddSeconds(53))!.Value.Stopped);
+    }
+
     /// <summary>One reset logged as bursts seconds apart: a later burst whose window shows no hang of its own keeps the first's
     /// times, so its crash is not recorded again against a trial written in between; one with a hang of its own, or one that
     /// comes a minute later, is a reset of its own (2 s before it was seen, without a hang to go on).</summary>
@@ -94,6 +119,14 @@ public class FlightRecorderTests
         Assert.Equal(first, hangs.For("gpu-A", w, T0.AddSeconds(66)));          // 15 s later: the same reset
         Assert.Equal((T0.AddSeconds(158), T0.AddSeconds(158)), hangs.For("gpu-A", w, T0.AddSeconds(160)));   // a reset of its own
         Assert.Equal((T0.AddSeconds(8), T0.AddSeconds(8)), hangs.For("gpu-B", [], T0.AddSeconds(10)));
+
+        // Within the minute but after work since (the next candidate measured, then hung under a 2 s TDR delay that leaves no
+        // frozen stretch): a crash of that work, not the first one again.
+        var loop = new Clocktail.Domain.Broker.ResetHangs();
+        var v = new List<FlightSample>(w.Take(100));
+        loop.For("gpu-A", v, T0.AddSeconds(51));
+        for (int i = 0; i < 40; i++) v.Add(S(55 + i * 0.5, 2895, 910, 598.6));   // loaded again, 55 .. 74.5 s
+        Assert.Equal((T0.AddSeconds(75), T0.AddSeconds(75)), loop.For("gpu-A", v, T0.AddSeconds(77)));
     }
 
     /// <summary>The hang is the last episode before the reset: an earlier slow look, or the frozen tail of an earlier reset
