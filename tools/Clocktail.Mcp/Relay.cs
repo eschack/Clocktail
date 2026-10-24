@@ -73,6 +73,9 @@ public sealed class RelayCore(
 
     private readonly object _gate = new();
     private readonly Dictionary<string, (string Method, string? Tool)> _inflight = [];
+    /// <summary>The workers' own requests to the client (an elicitation), by the id the client saw: the worker's
+    /// generation and the id it gave it.</summary>
+    private readonly Dictionary<string, (int Gen, JsonNode Id)> _toClient = [];
     private readonly List<string> _queue = [];
     private IRelayChild? _child;
     private int _generation, _quick;
@@ -107,6 +110,17 @@ public sealed class RelayCore(
             var id = node?["id"];
             if (method == "initialize") _initialize = line;
             if (method == "notifications/initialized") _clientInitialized = true;
+            // The answer to a question of a worker's own (an elicitation): to that worker only, with its own id.
+            if (method == null && id != null && _toClient.Remove(id.ToJsonString(), out var asked))
+            {
+                if (asked.Gen == _generation && _ready && _child != null)
+                {
+                    node!["id"] = asked.Id;
+                    _child.Send(node.ToJsonString());
+                }
+                else log("an answer to a question from a reader process that has ended was dropped");
+                return;
+            }
             if (!_ready || _child == null)
             {
                 if (id != null && method != null && _downSince is { } d && now() - d > AnswerAfter) Answer(id, method, Tool(node!), inFlight: false);
@@ -171,6 +185,16 @@ public sealed class RelayCore(
         {
             if (g != _generation) return;
             var node = Parse(line);
+            // A request of the worker's own (an elicitation, Consent): its id carries the worker's generation, because a
+            // worker started again numbers its requests from 1 again, and an answer to the old one must not answer the new.
+            if (node?["id"] is { } rid && node["method"]?.GetValueKind() == JsonValueKind.String)
+            {
+                var wire = JsonValue.Create($"w{g}:{rid.ToJsonString()}");
+                _toClient[wire.ToJsonString()] = (g, rid.DeepClone());
+                node["id"] = wire;
+                output(node.ToJsonString());
+                return;
+            }
             if (node?["id"] is { } id && node["method"] == null)
             {
                 string key = id.ToJsonString();
@@ -209,6 +233,16 @@ public sealed class RelayCore(
             _down = Reason(code, _lastError);
             foreach (var (key, r) in _inflight) Answer(JsonNode.Parse(key)!, r.Method, r.Tool, inFlight: true);
             _inflight.Clear();
+            // Its questions still open in the client are withdrawn (the calls that asked them were just answered), and stay
+            // known, so an answer that comes anyway is dropped instead of reaching the next worker.
+            foreach (var (wire, _) in _toClient.Where(q => q.Value.Gen == g).ToList())
+            {
+                output(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0", ["method"] = "notifications/cancelled",
+                    ["params"] = new JsonObject { ["requestId"] = JsonNode.Parse(wire), ["reason"] = "Clocktail's reader process ended; the call that asked was answered" },
+                }.ToJsonString());
+            }
             var ran = now() - _startedAt;
             _quick = ran >= Supervisor.Healthy ? 1 : _quick + 1;
             var wait = Supervisor.Delay(_quick);

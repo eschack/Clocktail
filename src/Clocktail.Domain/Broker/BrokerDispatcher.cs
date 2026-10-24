@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Clocktail.Domain.Boost;
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Fan;
 using Clocktail.Domain.Ownership;
@@ -206,7 +207,7 @@ public sealed class BrokerDispatcher
     /// <summary>Whether the request can change the card, the profile or the experiment: everything but the reads.</summary>
     private static bool Changes(BrokerRequest req) =>
         req.IsWrite
-        || req.Op == BrokerRequest.OpProfile && req.Kind is not ("show" or "preview" or "saved")
+        || req.Op == BrokerRequest.OpProfile && req.Kind is not ("show" or "preview" or "preview-adopt" or "saved")
         || req.Op == BrokerRequest.OpExperiment && req.Kind is not ("show" or "alive");
 
     private BrokerResponse DispatchOne(BrokerRequest req, bool top)
@@ -311,7 +312,15 @@ public sealed class BrokerDispatcher
 
     private string? Settle(IGpuTarget target, string? uncleanShutdown = null)
     {
-        lock (_settle) return CrashLog.SettleReboot(target.Journal, target.Sentinel, _host, uncleanShutdown);
+        lock (_settle)
+        {
+            var crash = CrashLog.SettleReboot(target.Journal, target.Sentinel, _host, uncleanShutdown);
+            // What is left of a record from before a clean reboot describes a state the reboot reset: dropped, as recovery
+            // drops it, before anything puts its cells "back". Until 0.4.0 the start's apply did: another tool's old value,
+            // held as an original from the boot before, went back over a card at stock and was then held as Clocktail's.
+            if (target.Journal.Inspect().Reason == RecoveryReason.Rebooted) target.Journal.Adopt();
+            return crash;
+        }
     }
 
     private static string JudgeBusy(string busy) => $"a stability run is in progress ({busy}); the write window is held, try again when it finishes";
@@ -365,6 +374,7 @@ public sealed class BrokerDispatcher
 
     private BrokerResponse Profile(IGpuTarget target, BrokerRequest req)
     {
+        Settle(target);   // a record from before the boot is settled before anything here reads or puts back its cells
         var path = DailyProfile.PathBeside(target.Journal.Path);
         var profile = DailyProfile.Load(path);
         switch (req.Kind)
@@ -372,15 +382,18 @@ public sealed class BrokerDispatcher
             case "show":
                 return Ok(new { success = true, path, profile, card = new { vbios = target.Vbios, driver = target.Driver } });
             case "preview":
+            case "preview-adopt":
             {
                 // What keep, or a preset or saved profile (Value: its name), would make the daily profile, against the daily
-                // profile and the card: nothing is written or saved. The agent shows it before asking.
-                var (writes, left) = req.Value is { Length: > 0 } name ? (PresetWrites(target, name), []) : KeepWrites(target, profile);
+                // profile and the card: nothing is written or saved. The agent shows it before asking. "preview-adopt" is
+                // what "adopt" would keep (0.4.0).
+                bool adopt = req.Kind == "preview-adopt";
+                var (writes, left, _) = req.Value is { Length: > 0 } name && !adopt ? (PresetWrites(target, name), [], []) : KeepWrites(target, profile, adopt);
                 var cardNow = CardValues(target, writes);
                 return Ok(new
                 {
                     success = true,
-                    source = req.Value is { Length: > 0 } n ? $"'{n}'" : "keep_as_daily",
+                    source = req.Value is { Length: > 0 } n && !adopt ? $"'{n}'" : adopt ? "keep_as_daily (adopt)" : "keep_as_daily",
                     changes = DailyProfile.InWriteOrder(writes).Select(w => new
                     {
                         kind = w.Kind, key = w.Key, becomes = w.Value,
@@ -392,17 +405,26 @@ public sealed class BrokerDispatcher
                 });
             }
             case "keep":
+            case "adopt":
             {
-                var (writes, _) = KeepWrites(target, profile);
+                // "adopt" (0.4.0) keeps what another tool left on the card too (FactoryStock: the curve, the P0 and clock-domain
+                // offsets, the voltage demands, the boost), so the service puts it back after every boot and the other tool
+                // can be closed.
+                bool adopt = req.Kind == "adopt";
+                var (writes, _, adopted) = KeepWrites(target, profile, adopt);
                 var inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
                 bool trialWall = inForce?.PowerMw != null;
                 // A trial that crashed but is still on the card (its put-back held off) is never what a keep takes from it.
                 if (inForce?.Ending == Experiment.Crash)
                     return Fail($"the trial on the card crashed ({inForce.Change}) and waits for the card to be free to go back: a crash is not kept; back_to_daily", BrokerCode.CannotWrite);
-                if (writes.Count == 0) return Fail("nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
+                if (writes.Count == 0)
+                    return Fail(adopt ? "nothing on the card differs from stock or from the daily profile; nothing to keep" : "nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
                 var trialKept = CloseTrial(target, Experiment.Stable, "kept as the daily profile");
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
-                var kept = new DailyProfile(DailyProfile.InWriteOrder(writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
+                // What was adopted before stays adopted (a trial over it records it as its original); this keep's own adds to it.
+                IReadOnlyList<ProfileWrite> adoptedAll = [.. (profile?.Adopted ?? []).Where(a => !adopted.Any(n => n.Kind == a.Kind && n.Key == a.Key)), .. adopted];
+                var kept = new DailyProfile(DailyProfile.InWriteOrder(writes), _host.Now, History: profile?.History, Adopted: adoptedAll.Count > 0 ? adoptedAll : null)
+                    .On(target.Vbios, target.Driver)
                     .Noted(_host.Now, req.Value is { } why ? $"kept: {listed} ({why})" : $"kept: {listed}");
                 kept.Save(path);
                 // A trial's lowered wall or current limit is still on the card: the kept wall goes back on now (and the
@@ -412,6 +434,7 @@ public sealed class BrokerDispatcher
                 Log(target, "Kept as the new daily profile", [
                     req.Value is { } note ? $"Note: {note}" : null,
                     trialKept != null ? $"From trial: {trialKept.Game}, {trialKept.Change} ({Limits(trialKept)})" : null,
+                    adopted.Count > 0 ? $"Adopted from another tool (on the card, never written by Clocktail): {string.Join(", ", adopted.Select(w => $"{w.Kind}/{w.Key}"))}" : null,
                     profile != null
                         ? "Taken from the card: what the trials tuned (the curves, offsets, rails, voltage demands, the clock ratio and a clock cap); the power limit stays the old daily profile's; current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept"
                         : trialWall ? "A trial's power limit, current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept" : "Current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept",
@@ -453,6 +476,46 @@ public sealed class BrokerDispatcher
                     return (rec, rec);
                 }).Answer;
                 return new BrokerResponse(r.Ok, r.Error, Element(new { success = r.Ok, path, profile, recover = r.Result }), r.Code);
+            }
+            case "factory":
+            {
+                // The card to NVIDIA's own settings (the agent's stock since 0.4.0): what "stock" does, then every setting
+                // another tool left (FactoryStock) written to its default and let go of (ToFactory). "stock" alone, the
+                // uninstall's, still gives back only what Clocktail changed: the card as Clocktail found it.
+                if (profile != null && !profile.Suspended)
+                {
+                    profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
+                    profile.Save(path);
+                    Log(target, "Daily profile suspended", ["The card is at stock until the daily profile is loaded or kept again"]);
+                }
+                var left = Leave(target, Experiment.Survived, "the card went back to stock", _ =>
+                {
+                    var rec = Dispatch(new BrokerRequest(BrokerRequest.OpRecover, target.StableId));
+                    // The trial leaves the record once the give-back landed, whatever the other tool's settings do after it.
+                    return (rec.Ok ? ToFactory(target, rec) : rec, rec);
+                });
+                var r = left.Answer;
+                List<string?> Strings(string name) => r.Result is { } res && res.TryGetProperty(name, out var a) && a.ValueKind == JsonValueKind.Array
+                    ? [.. a.EnumerateArray().Select(x => x.GetString())] : [];
+                // Only ToFactory's answer carries not_cleared: without it the give-back did not land and nothing else was looked at.
+                bool surveyed = r.Result is { } sr && sr.TryGetProperty("not_cleared", out _);
+                var cleared = Strings("cleared");
+                var notCleared = Strings("not_cleared");
+                Log(target, r.Ok ? "Card put to stock" : "Card not all put to stock", [
+                    !surveyed ? "The give-back did not land: nothing another tool set was looked at"
+                    : cleared.Count > 0 ? "Cleared what another tool had set:" : notCleared.Count == 0 ? "Nothing another tool had set was on the card" : null,
+                    .. cleared.Select(c => $"- {c}"),
+                    .. notCleared.Select(c => $"Not cleared: {c}"),
+                    .. Writes(r),
+                    profile != null ? "The daily profile is suspended until load_daily" : null]);
+                return new BrokerResponse(r.Ok, r.Error, Element(new
+                {
+                    success = r.Ok, path, profile,
+                    items = r.Result is { } a && a.TryGetProperty("items", out var its) ? its : (JsonElement?)null,
+                    applied = r.Result is { } b && b.TryGetProperty("applied", out var ap) ? ap : (JsonElement?)null,
+                    cleared,
+                    not_cleared = r.Result is { } c && c.TryGetProperty("not_cleared", out var nc) ? nc : (JsonElement?)null,
+                }), r.Code);
             }
             case "apply":
             {
@@ -624,7 +687,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"profile needs show, preview, keep, off, stock, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, preview, preview-adopt, keep, adopt, off, stock, factory, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -773,7 +836,9 @@ public sealed class BrokerDispatcher
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
-                        if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!) is { } aside)
+                        // The trial writes its curve right after (unless it keeps the one on the card): a curve this broker does
+                        // not hold (adopted, or another tool's the person tunes from) is set aside too, and comes back with it.
+                        if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!, curveFollows: !keepCurve) is { } aside)
                         {
                             written.Add(aside);
                             if (!aside.Ok) break;
@@ -976,15 +1041,17 @@ public sealed class BrokerDispatcher
     /// fixed fan duty, nor a wall a trial lowered; once a profile is kept, only what an agent tunes is taken from the card
     /// (DailyProfile.KeptFromCard) and the wall stays as kept. The second list says what is held and not kept, and why.
     /// </summary>
-    private (List<ProfileWrite> Writes, List<string> NotKept) KeepWrites(IGpuTarget target, DailyProfile? profile)
+    private (List<ProfileWrite> Writes, List<string> NotKept, List<ProfileWrite> Adopted) KeepWrites(IGpuTarget target, DailyProfile? profile, bool adopt = false)
     {
         var writes = new List<ProfileWrite>();
         var notKept = new List<string>();
+        var adopted = new List<ProfileWrite>();
         var writer = new OwnedWriter(_hw, target.Journal, target.Sentinel, _host);
         // A wall a trial set was lowered to sample the curve lower down: never the daily one, with a profile kept
         // or not (the daily wall is set on its own: "wall").
         bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
-        foreach (var item in target.Journal.Inspect().Items)
+        var held = target.Journal.Inspect().Items;
+        foreach (var item in held)
         {
             if (TrialOnly(item)) { notKept.Add($"{item.Id}: trial-only (a current limit, a fixed fan duty, the F8 request, or a clock floor, point lock or Boost Lock)"); continue; }
             if (trialWall && item.Kind == PowerCap.Kind) { notKept.Add($"{item.Id}: a trial's wall; the daily wall is set with set_daily_power_limit"); continue; }
@@ -993,17 +1060,91 @@ public sealed class BrokerDispatcher
             var now = writer.Look(target.Session, cell) ?? throw new InvalidOperationException($"{cell.Id} could not be read; nothing kept");
             if (now != item.Original) writes.Add(new ProfileWrite(item.Kind, item.Key, now));
         }
+        // Adopt: what another tool left on the card and Clocktail neither holds nor keeps (the curve, the P0 and clock-domain
+        // offsets, the voltage demands, the boost) is kept as it is now. Its wall, fixed fans and clock locks are not: the
+        // daily wall and a cap are set through Clocktail, and fixed fans and the other locks are trial-only. The boost is one
+        // setting through two APIs (FactoryStock.Boost): adopted once, by the key this card writes it through, and not at all
+        // while Clocktail holds or keeps either.
+        if (adopt)
+        {
+            string? Kept(string kind, string key) => profile is { Suspended: false } p ? p.Writes.FirstOrDefault(w => w.Kind == kind && w.Key == key)?.Value : null;
+            var cells = FactoryStock.Survey(_hw, target.Session, (kind, key) => held.FirstOrDefault(i => i.Kind == kind && i.Key == key)?.Original, Kept);
+            bool boostOurs = cells.Any(c => c.Kind == VoltBoost.Kind && (c.Original != null || c.Daily != null)) || writes.Any(w => w.Kind == VoltBoost.Kind);
+            string? boostKey = FactoryStock.BoostKey(_hw, target.Session);
+            foreach (var c in cells)
+            {
+                if (c.Now is not { } now || now == c.Stock || c.Original != null || c.Daily == now || c.Sibling) continue;
+                if (c.Kind == VoltBoost.Kind && (boostOurs || c.Key != boostKey)) continue;
+                if (Adoptable(c.Kind)) { writes.Add(new ProfileWrite(c.Kind, c.Key, now)); adopted.Add(new ProfileWrite(c.Kind, c.Key, now)); }
+                else notKept.Add($"{c.Id}: {c.Name} {c.Describe(now)}, left by another tool: " + (c.Kind, c.Key) switch
+                {
+                    (PowerCap.Kind, _) => "the daily wall is set on its own (set_daily_power_limit)",
+                    (ClockLimitWrites.Kind, ClockLimitWrites.MaxKey) => "another tool's clock cap is not adopted: set one with set_clock_lock in a trial, and a keep keeps it",
+                    _ => "a fixed fan duty, a clock floor, a point lock or Boost Lock is trial-only",
+                });
+            }
+        }
         // Once a profile is kept, what an agent tunes is taken from the card (DailyProfile.KeptFromCard): the curves,
         // the memory offset, MSVDD, XBAR/SYS/Video. The wall stays as kept, so a wall lowered to sample the curve
-        // lower down never becomes the daily one.
+        // lower down never becomes the daily one. What the profile keeps from the card and the card still holds stays,
+        // held or not: a value that went on as no change (one adopted, one another tool had set the same) is not held,
+        // and a keep after a trial elsewhere used to drop it from the profile.
         if (profile != null)
         {
             notKept.AddRange(writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)).Select(w => $"{w.Kind}/{w.Key}: stays as the daily profile keeps it"));
+            var fromCard = profile.Writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key) && !DailyProfile.TrialOnly(w.Kind, w.Key)
+                && !writes.Any(x => x.Kind == w.Kind && x.Key == w.Key) && !held.Any(i => i.Kind == w.Kind && i.Key == w.Key)).ToList();
+            var cardNow = CardValues(target, fromCard);
             // A lock a profile kept before locks were trial-only (0.2.5) is not carried over.
             writes = [.. profile.Writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key) && !DailyProfile.TrialOnly(w.Kind, w.Key)),
+                      .. fromCard.Where(w => cardNow.GetValueOrDefault($"{w.Kind}/{w.Key}") == w.Value),
                       .. writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key))];
         }
-        return (writes, notKept);
+        return (writes, notKept, adopted);
+    }
+
+    /// <summary>What "adopt" takes from another tool: what a daily profile keeps from the card anyway, but the clock cap.</summary>
+    private static bool Adoptable(string kind) =>
+        kind is VfWrites.Kind or ClockOffsets.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind or VoltBoost.Kind;
+
+    /// <summary>
+    /// The card to NVIDIA's own settings after a give-back (<paramref name="recovered"/>): every setting whose default is
+    /// known without a record (<see cref="FactoryStock"/>) and that the card holds at another value, another tool's, is
+    /// written to that default through the ordinary write and let go of, so stock is the card's baseline from here and
+    /// nothing gives the other tool's value back later. A write that does not go on is named and the rest still go, but
+    /// a card held busy (a stability run, another operation) stops it there.
+    /// </summary>
+    private BrokerResponse ToFactory(IGpuTarget target, BrokerResponse recovered)
+    {
+        var applied = new List<JsonElement>();
+        var cleared = new List<string>();
+        var notCleared = new List<string>();
+        foreach (var c in FactoryStock.Survey(_hw, target.Session, (_, _) => null, (_, _) => null).Where(c => c.Now != c.Stock))
+        {
+            // The boost's two APIs are one setting, its own path first (FactoryStock.Survey): that write may have cleared both.
+            if (c.Kind == VoltBoost.Kind && LookNow(target, c.Kind, c.Key, c.Stock) == c.Stock) continue;
+            var r = Dispatch(WriteOf(target, c.Kind, c.Key, c.Stock));
+            applied.AddRange(AppliedOf(r));
+            if (r.Ok)
+            {
+                target.Journal.Release(c.Kind, c.Key);
+                cleared.Add($"{c.Name}: {c.Describe(c.Now)} → stock ({c.Describe(c.Stock)})");
+                continue;
+            }
+            notCleared.Add($"{c.Name} ({c.Describe(c.Now)}): {WhyNot(r) ?? "not written"}");
+            if (r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy) break;
+        }
+        var items = recovered.Result is { } rec && rec.TryGetProperty("items", out var its) && its.ValueKind == JsonValueKind.Array ? its : (JsonElement?)null;
+        bool ok = notCleared.Count == 0;
+        return new BrokerResponse(ok, ok ? null : $"not everything another tool set went back to stock: {string.Join("; ", notCleared)}",
+            Element(new { success = ok, items, applied, cleared, not_cleared = notCleared }), ok ? null : BrokerCode.Failed);
+    }
+
+    /// <summary>A cell's value on the card now; null when it cannot be read.</summary>
+    private string? LookNow(IGpuTarget target, string kind, string key, string value)
+    {
+        try { return OwnedWriter.Look(_hw, target.Session, WriteRegistry.Find(kind)!.Prepare(_hw, target.Session, key, value, WriteOptions.Recovery).Cell); }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or FormatException) { return null; }
     }
 
     /// <summary>A preset's writes, or a saved profile's, by name; throws when there is neither, or the preset is another model's.</summary>
@@ -1201,7 +1342,10 @@ public sealed class BrokerDispatcher
     private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)
     {
         bool Written(OwnedItem i) => profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);
-        return target.Journal.Inspect().Items
+        // Only a record this broker may act on: one from before the boot (Settle drops it) or another GPU's is not a debt.
+        var plan = target.Journal.Inspect();
+        if (plan.Reason is not (RecoveryReason.OwnedByThisProcess or RecoveryReason.OwnerDied)) return [];
+        return plan.Items
             .Where(i => TrialOnly(i) || !Written(i) && (whole || i.Kind == PowerCap.Kind || i.Kind == RailWrites.Kind && i.Key == RailWrites.Key(Rail.Msvdd)))
             .OrderBy(i => DailyProfile.Rank(i.Kind));
     }

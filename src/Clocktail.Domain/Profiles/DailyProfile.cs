@@ -20,7 +20,9 @@ public sealed record ProfileWrite(string Kind, string Key, string Value);
 /// The journal's originals stay the card's stock; this is the last-known-good above it. <see cref="Suspended"/> means
 /// stock until someone loads or keeps a profile again. <see cref="Vbios"/> and <see cref="Driver"/> are what the card ran
 /// when it was kept or loaded (null from a build before 0.2.3): the offsets were measured on that firmware's curve, so
-/// a profile kept on another VBIOS does not go on by itself (<see cref="OtherVbios"/>).
+/// a profile kept on another VBIOS does not go on by itself (<see cref="OtherVbios"/>). <see cref="Adopted"/> is what a keep
+/// took from another tool (0.4.0's "adopt"), each at the value it adopted: a trial over it records that value as its
+/// original, and it is still Clocktail's baseline, not another tool's. Later keeps carry it on.
 /// </summary>
 public sealed record DailyProfile(
     IReadOnlyList<ProfileWrite> Writes,
@@ -28,7 +30,8 @@ public sealed record DailyProfile(
     bool Suspended = false,
     IReadOnlyList<string>? History = null,
     string? Vbios = null,
-    string? Driver = null)
+    string? Driver = null,
+    IReadOnlyList<ProfileWrite>? Adopted = null)
 {
     public const string FileName = "profile.json";
 

@@ -1910,11 +1910,12 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
         Assert.Equal(2, pstateWrites);
 
-        // A curve this broker does not hold is not its to wipe: the memory write is refused, as before.
+        // A curve this broker does not hold (another tool's, or one adopted) is set aside too, since 0.4.0: the trial writes
+        // its curve right after the memory offset, so nothing of it is lost. Until then the memory write was refused.
         _journal.Release(VfWrites.Kind, VfWrites.CoreKey);
         t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = daily, change = "memory 0 → +179 MHz", memory_khz = 179_000, keep_curve = true })));
-        Assert.False(t.Ok);
-        Assert.Equal(0, MemoryKhz());
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(179_000, MemoryKhz());
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
     }
 

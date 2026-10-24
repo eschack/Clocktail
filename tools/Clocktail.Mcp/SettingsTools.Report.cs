@@ -13,7 +13,7 @@ using ModelContextProtocol.Server;
 namespace Clocktail.Mcp;
 
 /// <summary>
-/// "How's my card doing": every setting as original (stock) → now with the change and a safety mark, the live readings
+/// "How's my card doing": every setting as stock → now with the change and a safety mark, the live readings
 /// with theirs, and one verdict, as rows and as a Markdown table an agent shows as it is. The marks come from fixed rules,
 /// not from the agent: ✅ within NVIDIA's own limits for the card (or the range measured on the reference card), ⚠️
 /// outside them and worth a look, ⛔ act now. Safety, not stability: a ✅ setting can still crash a game, and stress_test
@@ -39,8 +39,9 @@ public sealed partial class SettingsTools
 
     [McpServerTool(Name = "card_report", ReadOnly = true, OpenWorld = true), Description(
         "How's my card doing: THE call for 'how is my card', 'is this safe', 'what did we change', 'status'. Every setting " +
-        "as original (stock) → now with the change and a safety mark, then live readings (temperature, power, clock and " +
-        "voltage, what holds the clock), then one verdict. The marks come from fixed rules: ✅ within NVIDIA's own limits for " +
+        "as stock → now with the change and a safety mark, then live readings (temperature, power, clock and " +
+        "voltage, what holds the clock), then one verdict. A 'Not set by Clocktail' row means another tool (MSI Afterburner, " +
+        "NVIDIA App) left settings on the card: it is NOT at stock; tell the person before any tuning. The marks come from fixed rules: ✅ within NVIDIA's own limits for " +
         "this card (or the range measured on the reference card), so nothing strains the hardware; ⚠️ outside them, worth a " +
         "look; ⛔ act now; ℹ️ information. Safety, not stability: whether it holds in every game is what stress_test and play " +
         "decide. Show 'table' to the person exactly as it is (Markdown with emoji), then add one or two sentences of your own. " +
@@ -72,25 +73,30 @@ public sealed partial class SettingsTools
         var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
         live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
         var chart = CurveChart(s, l);
-        var all = rows.Concat(live).ToList();
-        var act = all.Where(r => r.Mark == Act).ToList();
-        var look = all.Where(r => r.Mark == Look).ToList();
-        string verdict = act.Count > 0
-            ? $"{Act} Act now: {string.Join(", ", act.Select(r => r.Name.ToLowerInvariant()))}. {string.Join(" ", act.Select(r => r.Note))}"
-            : look.Count > 0
-                ? $"{Look} {look.Count} thing{(look.Count == 1 ? "" : "s")} to look at: {string.Join("; ", look.Select(r => $"{r.Name.ToLowerInvariant()} ({r.Note})"))}. Everything else is within NVIDIA's own limits."
-                : $"{Safe} All good: every setting is within NVIDIA's own limits for this card, and it is running healthy.";
+        string verdict = Verdict(rows.Concat(live).ToList());
+        // The table alone carries the rows and the chart: until 0.4.0 they went out twice (as JSON rows beside it), which a
+        // small model's context paid for and nothing read.
         return Out(new
         {
             gpu = Str(s, "gpu"),
             verdict,
-            settings = rows.Select(Plain),
-            live = live.Select(Plain),
+            not_stock = Arr(s, "not_set_by_clocktail").Any() ? true : (bool?)null,
             update_available = newer,
-            vf_chart = chart.Count == 0 ? null : string.Join('\n', chart),
             table = Table(Str(s, "gpu") ?? "GPU", rows, chart, live, verdict),
         });
     });
+
+    /// <summary>The one-line verdict over every row: what to act on, else what to look at, else all good.</summary>
+    private static string Verdict(List<ReportRow> all)
+    {
+        var act = all.Where(r => r.Mark == Act).ToList();
+        var look = all.Where(r => r.Mark == Look).ToList();
+        return act.Count > 0
+            ? $"{Act} Act now: {string.Join(", ", act.Select(r => r.Name.ToLowerInvariant()))}. {string.Join(" ", act.Select(r => r.Note))}"
+            : look.Count > 0
+                ? $"{Look} {look.Count} thing{(look.Count == 1 ? "" : "s")} to look at: {string.Join("; ", look.Select(r => $"{r.Name.ToLowerInvariant()} ({r.Note})"))}. Everything else is within NVIDIA's own limits."
+                : $"{Safe} All good: every setting is within NVIDIA's own limits for this card, and it is running healthy.";
+    }
 
     /// <summary>The temperature's mark: ⛔ at NVIDIA's own slowdown point (no margin left) or 90 °C, ⚠️ within 5 °C of it
     /// or from 85 °C, ✅ else. The margin is the driver's T.Limit, where it gives one.</summary>
@@ -101,11 +107,39 @@ public sealed partial class SettingsTools
     public static IReadOnlyList<(string Name, string Mark, string Note)> ReportRows(JsonElement settings, JsonElement limiter) =>
         [.. SettingRows(settings).Concat(LiveRows(settings, limiter)).Select(r => (r.Name, r.Mark, r.Note))];
 
-    private static object Plain(ReportRow r) => new { setting = r.Name, original = r.Original, now = r.Now, change = r.Change, safe = r.Mark, note = r.Note };
+    /// <summary>The same rows with what each says the card holds now (the Now column).</summary>
+    public static IReadOnlyList<(string Name, string Now)> ReportNow(JsonElement settings, JsonElement limiter) =>
+        [.. SettingRows(settings).Concat(LiveRows(settings, limiter)).Select(r => (r.Name, r.Now))];
 
     private static List<ReportRow> SettingRows(JsonElement s)
     {
         var rows = new List<ReportRow>();
+
+        // Another tool's settings first: with any, the card is not at stock, whatever the rows below say about each one.
+        // Until 0.4.0 a curve left before Clocktail's first write was its "original", shown as stock (a tester, 2026-10-24).
+        var notOurs = Arr(s, "not_set_by_clocktail").Where(x => x.ValueKind == JsonValueKind.Object).ToList();
+        var foreign = notOurs.Where(x => Str(x, "cell") != null).ToDictionary(x => Str(x, "cell")!, StringComparer.Ordinal);
+        // Clocktail's value over another tool's (a trial, or the daily profile written over it): what a give-back returns to.
+        string over = Bool(s, "trial_in_force") == true ? "a Clocktail trial" : "Clocktail's daily profile";
+        string? By(params string[] cells) => cells.Select(c => foreign.GetValueOrDefault(c)).FirstOrDefault(x => x.ValueKind == JsonValueKind.Object) is { ValueKind: JsonValueKind.Object } e
+            ? Str(e, "found") == Str(e, "now") ? "set by another tool, not Clocktail"
+            : $"{over} over another tool's {Str(e, "found")}, which a give-back (a crash, the uninstall) returns to"
+            : null;
+        if (notOurs.Count > 0)
+        {
+            var tools = Arr(s, "other_oc_tools").Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : null).OfType<string>().ToList();
+            rows.Add(new("🧰", "Not set by Clocktail", "stock",
+                string.Join("; ", notOurs.Select(x => Str(x, "found") == Str(x, "now") ? $"{Str(x, "setting")} {Str(x, "now")}"
+                    : $"{Str(x, "setting")} {Str(x, "found")} ({over} over it now)")),
+                "≠ stock", Look,
+                $"{(tools.Count > 0 ? string.Join(" and ", tools) : OtherTools.Unseen)} left these on the card, so it is NOT at stock: " +
+                "tell the person, then tune from them, put the card to stock (stock, which keeps no copy of them), or keep them as Clocktail's daily profile (preview_daily adopt=true, then keep_as_daily adopt=true)"));
+        }
+        // The service does not answer: what is not stock may be Clocktail's own daily profile or another tool's.
+        var unknown = Arr(s, "not_stock_owner_unknown").Where(x => x.ValueKind == JsonValueKind.Object).ToList();
+        if (unknown.Count > 0)
+            rows.Add(new("🧰", "Not stock, owner unknown", "stock", string.Join("; ", unknown.Select(x => $"{Str(x, "setting")} {Str(x, "now")}")), "≠ stock", Look,
+                "the Clocktail service does not answer, so whether Clocktail's daily profile or another tool set these is unknown: install_service (one UAC prompt) or check the ClocktailBroker scheduled task, then card_report again"));
 
         // Power limit: the board's own range is NVIDIA's limit.
         var pw = Obj(s, "power");
@@ -118,7 +152,7 @@ public sealed partial class SettingsTools
             rows.Add(new("⚡", "Power limit", "?", "?", "?", Look, pwErr));
         else
             rows.Add(new("⚡", "Power limit", V(stockW, "W"), V(limitW, "W"), Change(limitW, stockW, "W"), powerOk ? Safe : Look,
-                Join(maxW is { } bm ? $"board max {F(bm)} W" : null,
+                Join(By("power/fe"), maxW is { } bm ? $"board max {F(bm)} W" : null,
                      dailyW is { } dw && limitW is { } lwNow && Math.Abs(dw - lwNow) > 0.5 ? $"daily {F(dw)} W; a trial set this one" : null,
                      notHeld ? $"the card enforces {F(firmwareW)} W, not the {F(limitW)} W asked for: back_to_daily writes the request again" : null,
                      powerOk || notHeld ? null : "outside the board's own range")));
@@ -134,7 +168,7 @@ public sealed partial class SettingsTools
         string? vfErr = Unread(vf);
         if (vfErr != null) (curveNow, curveChange) = ("?", "?");
         rows.Add(new("📈", "V/F curve", "stock", curveNow, curveChange, vfErr != null ? Look : Safe,
-            vfErr ?? Join(topMhz is { } tm && topMv is { } tv ? $"tops out at {F(tm)} MHz @ {F(tv)} mV{(flat ? " (flat top)" : "")}" : null,
+            vfErr ?? Join(By("vf/core"), topMhz is { } tm && topMv is { } tv ? $"tops out at {F(tm)} MHz @ {F(tv)} mV{(flat ? " (flat top)" : "")}" : null,
                 "offsets move clocks, never the voltage limit")));
 
         // The P0 offsets: the core's only when set (the curve is the tool), memory always.
@@ -149,7 +183,8 @@ public sealed partial class SettingsTools
             string note = key == "memory"
                 ? now > MeasuredMemoryMhz ? $"above the reference's +{F(MeasuredMemoryMhz)}: this card's own tests decide" : "NVML shows it doubled"
                 : "the V/F curve is the better tool for the core";
-            rows.Add(new(icon, name, $"{Sg(stock)} MHz", $"{Sg(now)} MHz", Change(now, stock, "MHz"), inRange ? Safe : Look, inRange ? note : "outside the driver's range"));
+            rows.Add(new(icon, name, $"{Sg(stock)} MHz", $"{Sg(now)} MHz", Change(now, stock, "MHz"), inRange ? Safe : Look,
+                Join(By($"pstates20/{key}"), inRange ? note : "outside the driver's range")));
         }
 
         // The rails: REL/ALT above 0 is past NVIDIA's own reliability limit; no MAX past the 1150 mV ceiling.
@@ -200,13 +235,14 @@ public sealed partial class SettingsTools
             else note = off > XbarCliffMhz ? $"+{F(dem)} mV keeps MSVDD off its floor" : off > 0 ? "within the measured range" : "stock";
             string change = Join(off != offS ? $"{Arrow(off - offS)} {Sg(off - offS)} MHz" : null, dem != demS ? $"{Arrow(dem - demS)} {Sg(dem - demS)} mV" : null) is { Length: > 0 } c ? c : "—";
             rows.Add(new("🔀", name, $"{Sg(offS)} MHz, {Sg(demS)} mV", $"{Sg(off)} MHz, {Sg(dem)} mV", change, mark,
-                Join(note, clk is { } k && k > 0 ? $"running {F(k)} MHz now" : null)));
+                Join(By($"clockdomain/{key}", $"vdemand/{key}"), note, clk is { } k && k > 0 ? $"running {F(k)} MHz now" : null)));
         }
 
-        // Voltage boost: no measurable effect on a 5090; shown only when set.
+        // Voltage boost: every rail's REL limit (on 621.01 the one voltage control the driver still takes); shown only when set.
         var vb = Obj(s, "voltage_boost");
         if (Num(vb, "independent_pct") is { } ib && ib != (Num(vb, "stock_independent_pct") ?? 0))
-            rows.Add(new("🔋", "Voltage boost", $"{F(Num(vb, "stock_independent_pct") ?? 0)} %", $"{F(ib)} %", Change(ib, Num(vb, "stock_independent_pct") ?? 0, "%"), Safe, "no measurable effect on a 5090"));
+            rows.Add(new("🔋", "Voltage boost", $"{F(Num(vb, "stock_independent_pct") ?? 0)} %", $"{F(ib)} %", Change(ib, Num(vb, "stock_independent_pct") ?? 0, "%"), Safe,
+                Join(By("boost/independent", "boost/legacy"), "every rail's REL limit +5 mV per 25 %")));
 
         // The fan curve: full speed no later than stock's.
         var curve = Arr(s, "fans", "curves").FirstOrDefault(c => Bool(c, "editable") == true);
@@ -344,6 +380,11 @@ public sealed partial class SettingsTools
                     _ => "nothing: the load asks for less",
                 }, "", id is "thermal" or "hardware_slowdown" ? Look : Info, Str(l, "votes") is { } v ? $"{v} samples agree" : ""));
 
+        // Another overclocking program running: it writes the same settings and can put its own back at any time.
+        var tools = Arr(s, "other_oc_tools").Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : null).OfType<string>().ToList();
+        if (tools.Count > 0)
+            rows.Add(new("🧰", "Overclocking tool running", "", string.Join(", ", tools), "", Look, OtherTools.Advice(tools)));
+
         // What is on the card in the long run: the daily profile, and a trial not yet kept.
         var daily = Obj(s, "daily_profile");
         if (daily is { } dp && Str(dp, "error") != null)
@@ -352,7 +393,9 @@ public sealed partial class SettingsTools
                 "the Clocktail service does not answer, so nothing can be changed, kept or put back after a crash: install_service (one UAC prompt), or check the ClocktailBroker scheduled task"));
             return rows;
         }
-        string profile = daily == null ? "none: the card runs stock" : Bool(daily, "suspended") == true ? "suspended: stock until load_daily"
+        // Without a profile the card runs what Clocktail found, which is stock only when no other tool set anything.
+        string found = Arr(s, "not_set_by_clocktail").Any() ? "what another tool set, not stock (see 'Not set by Clocktail')" : "stock";
+        string profile = daily == null ? $"none: the card runs {found}" : Bool(daily, "suspended") == true ? $"suspended: {found} until load_daily"
             : Str(daily.Value, "kept_at") is { Length: >= 10 } kept ? $"kept {kept[..10]}" : "kept";
         var off = DailyOffCard(s);
         // A profile kept on another VBIOS stays off the card (the service leaves it at stock); a new driver only asks for a test.
@@ -466,7 +509,7 @@ public sealed partial class SettingsTools
         var b = new StringBuilder();
         b.AppendLine($"### 🩺 Card report · {gpu}");
         b.AppendLine();
-        b.AppendLine("| | Setting | Original | Now | Change | Safe | Note |");
+        b.AppendLine("| | Setting | Stock | Now | Change | Safe | Note |");
         b.AppendLine("|---|---|---|---|---|---|---|");
         foreach (var r in rows) b.AppendLine($"| {r.Icon} | {r.Name} | {r.Original} | {r.Now} | {r.Change} | {r.Mark} | {r.Note} |");
         b.AppendLine();

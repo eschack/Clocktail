@@ -92,7 +92,10 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
     }
 
     /// <summary>Read the cell as it is now, outside any transaction (the same query its transaction would ask). Null when unreadable.</summary>
-    public string? Look(GpuSession gpu, OwnedCell cell)
+    public string? Look(GpuSession gpu, OwnedCell cell) => Look(hw, gpu, cell);
+
+    /// <summary><see cref="Look(GpuSession, OwnedCell)"/> for a reader that holds no journal (a survey of the card).</summary>
+    public static string? Look(NvClient hw, GpuSession gpu, OwnedCell cell)
     {
         var buf = cell.Spec.ReadBuffer();
         var r = cell.Spec.Index is { } i ? hw.Call(gpu, cell.Spec.Get, i, buf) : hw.Call(gpu, cell.Spec.Get, buf);

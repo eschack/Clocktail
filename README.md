@@ -26,7 +26,7 @@ Or run it yourself (you'll need Node.js):
 npx -y clocktail setup
 ```
 
-Either way, setup shows you what it's going to change before it changes anything. You pick the agents, it backs up their config, installs the service, and Windows asks for admin rights once. Restart your agent when it's done. Your card stays at stock until you say otherwise.
+Either way, setup shows you what it's going to change before it changes anything. You pick the agents, it backs up their config, installs the service, and Windows asks for admin rights once. Restart your agent when it's done. Clocktail writes nothing to your card until you say so.
 
 It doesn't update itself. When a new version is out, "How's my card doing?" mentions it at the bottom. Run the same setup command again (or ask your agent to), restart, done. Your settings and profiles stay where they are. The update check reads exactly one thing from npm, the latest version number, and sends nothing about you or your card. `CLOCKTAIL_NO_UPDATE_CHECK=1` turns it off.
 
@@ -37,6 +37,26 @@ And it doesn't have to be Claude. Any model that's decent with tools will do. Th
 ![A local model in OpenCode answering "what's my graphics cards OC status" with card_report: a verdict, what changed from stock with ✅ marks, and the live core clock](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/local-model-card-report.jpg)
 
 *Qwen3.8 27B in llama.cpp, through OpenCode, on the same RTX 5090 it's reporting on. The card took it well.*
+
+### Small model? Go lite
+
+```
+npx -y clocktail setup --lite
+```
+
+The full toolbox is 52 tools and a manual's worth of instructions, about 19k tokens before you've said hello. A local model in a 32k window can't fit that next to its own agent's prompt, and Ollama won't tell you: it quietly drops the start of the conversation, instructions first, and your agent forgets what it was doing. `--lite` hands the agent 22 tools and a one-page brief, about 6.5k tokens. Give Ollama all the context your VRAM allows anyway (`OLLAMA_CONTEXT_LENGTH`; 64k is comfortable).
+
+### The model matters more than the app
+
+The same Clocktail ran smoothly in Cursor on a frontier model and went in circles on a small free one. Pick the best model you can afford; DeepSeek V4.1 Flash in OpenCode is a fine budget pick.
+
+Some agents run every tool without asking (Freebuff, anything in YOLO mode). Trials are small, bounded and undone on their own, so that's survivable. The changes that stay, a new daily profile, the daily power limit, Clocktail asks you about itself: a question in your agent where it can show one, a Windows dialog where it can't. A model can't click that. `CLOCKTAIL_CONFIRM=off` if you'd rather approve everything in your agent.
+
+The other way round, Claude Code asks before every single read. `npx -y clocktail setup --allow-reads` lets the read-only tools through (card_report, gpu_status and friends); every write still asks.
+
+### Already tuned in MSI Afterburner?
+
+Clocktail notices. Whatever another tool left on the card (an undervolt curve, a memory offset, a power limit, fixed fans) shows up in "How's my card doing?" as **Not set by Clocktail**, so your agent won't mistake your undervolt for NVIDIA's curve. Then it's your call: tune from it, wipe it (`stock` means NVIDIA's stock, and Clocktail asks first, because it keeps no copy), or hand the curve and offsets over (`keep_as_daily` with `adopt`; the power limit goes in with `set_daily_power_limit`) and let Afterburner retire. If Afterburner is still running, it says so: two programs writing the same card is a fight nobody wins. NVIDIA App's automatic tuning lives in the driver and comes back after every restart, so switch it off in NVIDIA App if you want stock to stay stock.
 
 ### Then just talk to it
 
@@ -87,7 +107,7 @@ While you play, it watches the card four times a second and tells you what it se
 - **A lab for what games can't measure.** Memory and the uncore get their own load engine, `clocktail-lab` (StabilityLab's, moved in). It checks every result on the CPU and times the DRAM and the crossbar. Your agent can leave it sweeping the memory offset, or hunting for the best mix of XBAR, its ratio and the voltage boost, each step compared A B B A against the best so far. The winner is measured once more against your daily settings before it's named, and it keeps nothing until you say so. If something else is using the GPU, a screen saver included, it waits until it's gone instead of trusting the numbers, and a comparison something disturbed anyway is run again.
 - **It counts your frames.** While you play, the agent sees your fps, the 1 % and 0.1 % lows and the frame times, through Intel's PresentMon. Nothing gets injected into the game. "Did that help?" gets answered in frames, not vibes.
 - **Keep as many profiles as you like.** "Quiet", "games", whatever you want. Switch with a sentence.
-- **Nothing sticks unless you say so.** Every write is read back and can be undone. A background service keeps your daily settings and puts them back after every reboot, every wake-up and every driver reset, including the ones you caused. It also checks that the firmware is really holding the power limit you asked for, because once every reading said 600 W while the card quietly ran at 575 W for hours. Flash a new VBIOS and it waits for your OK instead of stacking old offsets on a new curve. If the driver drops out mid-sentence, your agent stays connected.
+- **Nothing sticks unless you say so.** Clocktail asks you itself before anything that stays, whatever your agent thinks. Every write is read back and can be undone (the one exception, `stock` clearing what another tool left, asks you first too). A background service keeps your daily settings and puts them back after every reboot, every wake-up and every driver reset, including the ones you caused. It also checks that the firmware is really holding the power limit you asked for, because once every reading said 600 W while the card quietly ran at 575 W for hours. Flash a new VBIOS and it waits for your OK instead of stacking old offsets on a new curve. If the driver drops out mid-sentence, your agent stays connected.
 - **It knows when to stop.** Nothing gets written while the GPU looks hung. Stress runs stop at 85 °C. Leave it mapping overnight and it stops after two crashes, rather than hanging the card over and over with nobody watching. Clock locks that would keep the card high at idle are for testing only and never end up in your daily settings.
 
 ![Asked what it tests with, the agent lays out its toolbox: stress_test and lab_test as the two judges, watch and live_start for real play, how crashes get recorded, two combos, the rule game-stable = the highest stress-passing clock minus 30–60 MHz, then the V/F curve tools](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/stability-toolbox.jpg)
@@ -125,7 +145,7 @@ The founders preset has the second row. It had the first one too, until driver 6
 npx -y clocktail uninstall
 ```
 
-Your card goes back to stock, and the service, the files and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card won't remember any of this.
+Clocktail puts back every setting it changed, so your card is how it was before Clocktail (stock, unless Afterburner and friends got there first and you didn't have `stock` clear them), and the service, the files and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card won't remember any of this.
 
 ## The zip
 
@@ -142,7 +162,9 @@ If you really want to be the robot yourself, here's how.
 4. In that folder, run `.\Clocktail.Broker.exe install` and approve admin rights once. Or skip it: your agent calls `install_service` the first time it needs to write something.
 5. Restart your agent.
 
-To update, close every agent first (Windows won't overwrite a program that's running; setup has a way around that, but you're doing this by hand), unzip the new version over the old one, and run `.\Clocktail.Broker.exe install` again, or the service stays on the old version. To remove it, run `.\Clocktail.Broker.exe stock`, then `.\Clocktail.Broker.exe uninstall`, take clocktail out of your agent's config and delete the folder. Your profiles and tuning logs are in `%LocalAppData%\Clocktail` if you want those gone too.
+For a small local model, add `--lite` after the path (or set `CLOCKTAIL_TOOLS=lite`).
+
+To update, close every agent first (Windows won't overwrite a program that's running; setup has a way around that, but you're doing this by hand), unzip the new version over the old one, and run `.\Clocktail.Broker.exe install` again, or the service stays on the old version. To remove it, run `.\Clocktail.Broker.exe stock` (it puts back what Clocktail changed), then `.\Clocktail.Broker.exe uninstall`, take clocktail out of your agent's config and delete the folder. Your profiles and tuning logs are in `%LocalAppData%\Clocktail` if you want those gone too.
 
 Or paste the line under "Set up Clocktail" into your agent and go make a cup of tea. Robot work is best left to robots.
 

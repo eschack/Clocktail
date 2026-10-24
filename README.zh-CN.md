@@ -26,7 +26,7 @@
 npx -y clocktail setup
 ```
 
-安装程序会先列出它在你电脑上找到的 AI 助手和要改的配置（改之前都会备份），你点头了才动手。中间 Windows 会弹一次管理员权限，同意就行。装完重启一下 AI 助手。在你开口之前，显卡一直是出厂设置。
+安装程序会先列出它在你电脑上找到的 AI 助手和要改的配置（改之前都会备份），你点头了才动手。中间 Windows 会弹一次管理员权限，同意就行。装完重启一下 AI 助手。在你开口之前，Clocktail 不会往显卡写任何东西。
 
 它不会自己更新。出了新版，问一句“我的卡现在怎么样”，表格最后一行会提醒你。再跑一遍 `npx -y clocktail@latest setup`（也可以让 AI 替你跑），重启 AI 助手就好，显卡设置和你存的配置都不会动。检查更新时它只去 npm 看一眼最新版本号，你电脑和显卡的信息一概不发。不想让它查，设个环境变量 `CLOCKTAIL_NO_UPDATE_CHECK=1`。
 
@@ -37,6 +37,26 @@ npm 下载慢的话，先换国内镜像：`npm config set registry https://regi
 ![本地模型在 OpenCode 里回答“我的显卡超频状态”：调用 card_report，给出结论、相对出厂改了什么（打 ✅）和当前核心频率](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/local-model-card-report.jpg)
 
 *Qwen3.8 27B 跑在 llama.cpp 里，接 OpenCode，用的正是它在汇报的这张 RTX 5090。显卡给自己写体检报告，倒也坦荡。*
+
+### 模型小？上精简版
+
+```
+npx -y clocktail setup --lite
+```
+
+完整版有 52 个工具，外加一本手册那么多的说明，你还没开口打招呼，19k 左右的 token 就先没了。上下文只有 32k 的本地模型，塞完 AI 助手自己的提示词就装不下了，而且 Ollama 不会告诉你：它悄悄把对话开头扔掉，最先扔的就是这些说明，AI 聊着聊着就忘了自己在干什么。`--lite` 只给 22 个工具和一页纸的简报，大约 6.5k token。就算用了 lite，也照样给 Ollama 开到显存撑得住的最大上下文（`OLLAMA_CONTEXT_LENGTH`，64k 就很宽裕）。
+
+### 用哪个模型，比用哪个软件要紧
+
+同一个 Clocktail，在 Cursor 里接顶级模型一路顺畅，换成免费的小模型就开始原地转圈。挑你用得起的最好的模型；预算紧的话，OpenCode 里的 DeepSeek V4.1 Flash 就很划算。
+
+有些 AI 助手调用工具从来不问你（比如 Freebuff，或者任何开了 YOLO 模式的）。试验都是小步、有上限、到点自己会撤回的，所以出不了大事。真正会留下来的改动，比如新的日常设置、日常功耗墙，Clocktail 会亲自来问你：AI 助手能弹问题的，就在 AI 助手里问；弹不了的，就弹一个 Windows 对话框。这个框，模型点不了。你要是宁愿全在 AI 助手里批准，就设 `CLOCKTAIL_CONFIRM=off`。
+
+Claude Code 正好反过来，哪怕只是读一下都要先问你。`npx -y clocktail setup --allow-reads` 会放行只读的工具（card_report、gpu_status 这些），写入照样要问。
+
+### 已经在 MSI Afterburner 里调过了？
+
+Clocktail 看得出来。别的软件留在卡上的东西（降压曲线、显存偏移、功耗墙、固定风速），问一句“我的卡现在怎么样”，都会标成 **Not set by Clocktail**，这样 AI 就不会把你的降压曲线当成 NVIDIA 的原厂曲线。接下来你说了算：在它的基础上接着调；清掉（`stock` 回到的是 NVIDIA 的出厂设置；Clocktail 不留备份，所以会先问你）；或者把曲线和偏移交给 Clocktail 接管（`keep_as_daily` 加上 `adopt`，功耗墙用 `set_daily_power_limit` 另设），让 Afterburner 光荣退休。Afterburner 要是还开着，它会直说：两个程序抢着写同一张卡，这架谁也打不赢。NVIDIA App 的自动超频住在驱动里，每次重启都会回来，想让出厂设置一直是出厂设置，就去 NVIDIA App 里把它关掉。
 
 ### 然后跟它聊
 
@@ -87,7 +107,7 @@ npm 下载慢的话，先换国内镜像：`npm config set registry https://regi
 - **游戏测不出来的，交给实验室。** 显存和 uncore 有自己的负载引擎 `clocktail-lab`（StabilityLab 那套，搬了进来），所有结果都让 CPU 逐位核对，顺便测 DRAM 和 crossbar 到底跑多快。你可以让 AI 自己去扫显存偏移，或者自己找 XBAR、比例和电压加成的最佳组合，每一步都跟目前最好的那组按 A B B A 比一遍。赢家还要再跟你的日常设置单独比一次才算数，最后告诉你谁赢了，你不点头，什么都不留。要是有别的东西在用显卡（屏保也算），它会等它走了再测，不拿脏数据糊弄你；测到一半被打扰的那轮，会整轮重测。
 - **帧数它自己会看。** 你打游戏时，AI 能直接看到平均帧、1% 和 0.1% 低帧、帧生成时间，用的是 Intel 的 PresentMon，由后台服务来跑，不往游戏里注入任何东西。“调了有没有用”，拿帧数说话，不凭感觉。
 - **想存几套就存几套。** “安静”一套、“游戏”一套，一句话就能切。
-- **一切都能撤回。** 每次写入都会回读核对，随时能退回去。后台服务记着你的日常设置，每次开机、睡眠唤醒、驱动重置后都会自动恢复，包括你自己作出来的那几次。它还会核对固件是不是真按你设的功耗墙在跑，因为真出过一次：读数全是 600 W，卡却悄悄按 575 W 跑了好几个小时。刷了别的 VBIOS，它会等你点头，不会把旧的偏移直接套到新的出厂曲线上。驱动半路掉了也不用重连，AI 那边接着用。
+- **一切都能撤回。** 凡是会留下来的改动，Clocktail 都会亲自先问你一句，AI 助手说了不算。每次写入都会回读核对，随时能退回去（唯一的例外是 `stock` 清掉别的软件留下的设置，这一步同样会先问你）。后台服务记着你的日常设置，每次开机、睡眠唤醒、驱动重置后都会自动恢复，包括你自己作出来的那几次。它还会核对固件是不是真按你设的功耗墙在跑，因为真出过一次：读数全是 600 W，卡却悄悄按 575 W 跑了好几个小时。刷了别的 VBIOS，它会等你点头，不会把旧的偏移直接套到新的出厂曲线上。驱动半路掉了也不用重连，AI 那边接着用。
 - **该停的时候它会停。** 显卡看着像卡死了，就不写新的试验。压测到 85 °C 自动停。夜里没人看着跑曲线，崩两次就停手，免得显卡一遍遍卡死也没人知道。会让显卡待机时也顶在高频的频率锁只给测试用，绝不留进日常设置。
 
 ![问它拿什么测稳定，它把工具箱摊开：两个裁判 stress_test 和 lab_test，盯真实游戏的 watch 和 live_start，崩溃怎么记，两个常用组合，那条规矩“游戏稳定 = 压测能过的最高频率减 30–60 MHz”，再往下是调 V/F 曲线的工具](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/stability-toolbox.jpg)
@@ -127,7 +147,7 @@ founders 预设里有第二行。第一行原本也在，621.01 不收了，只�
 npx -y clocktail uninstall
 ```
 
-显卡恢复出厂设置，服务、文件和 AI 助手里的配置都会删干净。你的调校记录默认留在 `%LocalAppData%\Clocktail`，加 `--purge` 一起删。显卡不会记得发生过什么。
+Clocktail 改过的每一项设置都会改回去，显卡回到装 Clocktail 之前的样子（一般就是出厂设置，除非 Afterburner 那帮软件先来过、而你又没让 `stock` 把它们清掉），服务、文件和 AI 助手里的配置也都会删干净。你的调校记录默认留在 `%LocalAppData%\Clocktail`，加 `--purge` 一起删。显卡不会记得发生过什么。
 
 ## GitHub 上的 zip
 
@@ -144,7 +164,9 @@ Clocktail 是围着 AI 助手设计的，不建议手动安装。Releases 页面
 4. 在那个文件夹里打开终端，运行 `.\Clocktail.Broker.exe install`，同意一次管理员权限。懒得弄也行，AI 助手第一次要写显卡时会自己调用 `install_service`。
 5. 重启 AI 助手。
 
-升级：先关掉所有 AI 助手（Windows 不让覆盖正在运行的程序；安装程序有办法绕过去，你是手动的，没这待遇），把新 zip 解压覆盖，再运行一次 `.\Clocktail.Broker.exe install`，不然后台服务还是旧版。卸载：依次运行 `.\Clocktail.Broker.exe stock` 和 `.\Clocktail.Broker.exe uninstall`，从 AI 助手的配置里删掉 clocktail，再删掉文件夹。调校记录在 `%LocalAppData%\Clocktail`，想删得一干二净就连它一起删。
+本地小模型的话，在路径后面加上 `--lite`（或者设环境变量 `CLOCKTAIL_TOOLS=lite`）。
+
+升级：先关掉所有 AI 助手（Windows 不让覆盖正在运行的程序；安装程序有办法绕过去，你是手动的，没这待遇），把新 zip 解压覆盖，再运行一次 `.\Clocktail.Broker.exe install`，不然后台服务还是旧版。卸载：依次运行 `.\Clocktail.Broker.exe stock`（把 Clocktail 改过的都改回去）和 `.\Clocktail.Broker.exe uninstall`，从 AI 助手的配置里删掉 clocktail，再删掉文件夹。调校记录在 `%LocalAppData%\Clocktail`，想删得一干二净就连它一起删。
 
 当然，你也可以把上面“安装”那段话贴给 AI 助手，然后去泡杯茶。机器人的活，还是交给机器人干。
 

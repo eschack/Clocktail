@@ -52,7 +52,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>adjust_curve on an idle card: the last load within this long (a stress run that just ended), its last 10 s.</summary>
     public static readonly TimeSpan LastLoadWithin = TimeSpan.FromMinutes(2), LastLoadSpan = TimeSpan.FromSeconds(10);
 
-    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    /// <summary>Compact, with emoji and units as themselves (SettingsTools.Json): every token of an answer is one an agent
+    /// with a small context pays for; until 0.4.0 these were indented and escaped.</summary>
+    private static readonly JsonSerializerOptions Json = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     [McpServerTool(Name = "gpu_status", ReadOnly = true, OpenWorld = false), Description(
         "Where the card runs right now: NVVDD/MSVDD, core clock, the V/F point it sits on (stock, current and daily offset), " +
@@ -137,14 +139,29 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "still in force from an earlier session ends first and the daily profile goes back on, as end_session does. " +
         "unattended=true when the person is away (an overnight stress mapping): after maxCrashes crashes (default 2) no " +
         "new trial is written until a new session, so the card is not hung over and over with nobody there; the daily " +
-        "profile stays on and nothing steps down.")]
+        "profile stays on and nothing steps down. warnings: another tool's settings on the card (not stock: every trial starts " +
+        "from them) or another overclocking program running; tell the person before the first trial.")]
     public string BeginSession(
         [Description("The game being played.")] string game,
         [Description("Anything worth keeping with the data (settings, scene).")] string? note = null,
         [Description("The person is away: stop writing new trials after maxCrashes crashes.")] bool unattended = false,
-        [Description("With unattended: the crashes allowed before trials stop, 1..10 (default 2).")] int maxCrashes = 2) =>
-        maxCrashes is < 1 or > 10 ? Out(new { success = false, error = "maxCrashes is 1..10" })
-        : Reply(card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note, unattended, max_crashes = maxCrashes })));
+        [Description("With unattended: the crashes allowed before trials stop, 1..10 (default 2).")] int maxCrashes = 2)
+    {
+        if (maxCrashes is < 1 or > 10) return Out(new { success = false, error = "maxCrashes is 1..10" });
+        var r = card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note, unattended, max_crashes = maxCrashes }));
+        if (!r.Ok) return Reply(r);
+        var warnings = new List<string>();
+        try
+        {
+            if (new SettingsTools(card).NotStock() is { Count: > 0 } others)
+                warnings.Add($"the card is not at stock: another tool set {string.Join(", ", others.Select(o => $"{o.Name} {o.Describe(o.Found)}"))}. " +
+                    "Every trial starts from these and back_to_daily returns to them: tell the person, and ask whether to tune from them, " +
+                    "put the card to stock first (stock), or keep them as Clocktail's daily profile (keep_as_daily adopt=true)");
+        }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException) { }
+        if (OtherTools.Running() is { Count: > 0 } running) warnings.Add(OtherTools.Advice(running));
+        return warnings.Count == 0 ? Reply(r) : Merge(Reply(r), new { warnings });
+    }
 
     [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +
@@ -760,20 +777,54 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public string BackToDaily([Description("Why, for the tuning log.")] string? reason = null) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "apply", reason ?? "back_to_daily (agent)"), null);
 
-    [McpServerTool(Name = "stock", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "Put the card back to stock, as NVIDIA shipped it, and keep it there: every setting Clocktail ever wrote goes back to " +
-        "the value it found, and the daily profile is suspended (kept, not deleted), so nothing puts it back at the next start " +
-        "or driver reset until load_daily. The trial in force (if any) ends as survived. Tell the person before calling this.")]
-    public string Stock()
+    [McpServerTool(Name = "stock", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
+        "Put the card to stock, NVIDIA's own settings, and keep it there: every setting Clocktail wrote goes back, then every " +
+        "setting another tool left (card_report's 'Not set by Clocktail': an MSI Afterburner curve, a memory offset, a power " +
+        "limit, fixed fans, a clock lock) is written to NVIDIA's default (cleared lists them). The daily profile is suspended " +
+        "(kept, not deleted), so nothing puts it back at the next start or driver reset until load_daily; what another tool set " +
+        "is not kept anywhere, and only that tool can put it back, so then Clocktail asks the person itself (a question in the " +
+        "agent, or a Windows dialog). The trial in force (if any) ends as survived. Another tool still running may write its " +
+        "settings back (card_report says), and NVIDIA App's automatic tuning comes back after every restart until it is turned " +
+        "off in NVIDIA App. Tell the person before calling this.")]
+    public async Task<string> Stock(McpServer server, CancellationToken cancellationToken = default)
     {
-        // Since 0.3.7 "stock" suspends the profile and puts the card back in one operation, so its trial leaves the record
-        // only once that landed, and answers with the recovery; a service from before does not know it, and "off" then a
-        // recovery stand in.
+        // Another tool's settings cleared are gone for good (the broker lets go of them): the person says yes to that.
+        IReadOnlyList<Clocktail.Domain.FactoryCell> others;
+        try { others = new SettingsTools(card).NotStock(); }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException) { others = []; }
+        if (others.Count == 0) return Stock();
+        return await Asked(server,
+            $"Put your graphics card to NVIDIA's stock settings. This clears what another tool set ({string.Join(", ", others.Select(o => $"{o.Name} {o.Describe(o.Found)}"))}); " +
+            "Clocktail keeps no copy of it, so only that tool can put it back. Your daily profile is kept and load_daily puts it back.",
+            cancellationToken, Stock);
+    }
+
+    private string Stock()
+    {
+        // Since 0.4.0 "factory": what "stock" did (the profile suspended, what the service holds given back), then what
+        // another tool left written to NVIDIA's default. A service from 0.3.7 on knows "stock" alone (the card as Clocktail
+        // found it), one from before "off" then a recovery: the answer says the other tool's settings stayed.
+        var factory = card.Broker(BrokerRequest.OpProfile, "factory");
+        if (factory.Code != BrokerCode.BadRequest)
+        {
+            var cleared = factory.Result is { } fr && fr.TryGetProperty("cleared", out var cl) && cl.ValueKind == JsonValueKind.Array && cl.GetArrayLength() > 0 ? cl : (JsonElement?)null;
+            return Merge(Applied(factory, null), new { cleared });
+        }
+        const string older = "the service is older than this server: only Clocktail's own settings went back, and anything another tool set stays on the card; call install_service (with the person's OK) to update it, then stock again";
         var stock = card.Broker(BrokerRequest.OpProfile, "stock");
         if (stock.Code != BrokerCode.BadRequest)
-            return Applied(stock.Result is { } res && res.TryGetProperty("recover", out var rec) && rec.ValueKind == JsonValueKind.Object ? stock with { Result = rec } : stock, null);
+            return Merge(Applied(stock.Result is { } res && res.TryGetProperty("recover", out var rec) && rec.ValueKind == JsonValueKind.Object ? stock with { Result = rec } : stock, null), new { note = older });
         var off = card.Broker(BrokerRequest.OpProfile, "off");
-        return off.Ok ? Applied(card.Broker(BrokerRequest.OpRecover), null) : Applied(off, null);
+        return Merge(off.Ok ? Applied(card.Broker(BrokerRequest.OpRecover), null) : Applied(off, null), new { note = older });
+    }
+
+    /// <summary>One answer's JSON object with more fields; a field that is null is left out.</summary>
+    private static string Merge(string answer, object more)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(answer)!.AsObject();
+        foreach (var p in System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(more, Json))!.AsObject().ToList())
+            if (p.Value != null) node[p.Key] = p.Value.DeepClone();
+        return JsonText.Unescape(node.ToJsonString(Json));
     }
 
     [McpServerTool(Name = "load_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
@@ -785,10 +836,18 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     [McpServerTool(Name = "preview_daily", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "What the daily profile would become, before asking the person: with no name, what keep_as_daily would keep (every " +
         "cell on the card this trial and the ones before it touched, not only the last step), and what it would not keep and " +
-        "why; with a preset's or saved profile's name, what load_preset would load. Each change is daily now → becomes, with " +
+        "why; adopt=true, what keep_as_daily adopt=true would keep (another tool's settings too); with a preset's or saved " +
+        "profile's name, what load_preset would load. Each change is daily now → becomes, with " +
         "the card's value now. Writes nothing. Show it, then ask.")]
-    public string PreviewDaily([Description("A preset's or saved profile's name; omit for keep_as_daily.")] string? name = null) =>
-        Reply(card.Broker(BrokerRequest.OpProfile, "preview", name));
+    public string PreviewDaily(
+        [Description("A preset's or saved profile's name; omit for keep_as_daily.")] string? name = null,
+        [Description("Preview keep_as_daily adopt=true: another tool's settings kept too.")] bool adopt = false) =>
+        adopt ? Older(card.Broker(BrokerRequest.OpProfile, "preview-adopt")) : Reply(card.Broker(BrokerRequest.OpProfile, "preview", name));
+
+    /// <summary>A reply, unless the service is too old for the op (0.4.0's adopt): then that, and how to update it.</summary>
+    private static string Older(BrokerAnswer r) => r.Code == BrokerCode.BadRequest
+        ? Out(new { success = false, error = "the service is older than this server and cannot adopt another tool's settings: call install_service (with the person's OK) to update it", code = r.Code })
+        : Reply(r);
 
     [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
@@ -800,20 +859,68 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Everything a trial set is kept, not just the last change: call back_to_daily first if only the curve should be. " +
         "The curve kept is the one on the card: if the trial ran under a lowered wall or limit, the curve is what matters, " +
         "not the wall it was found under. The trial in force (if any) " +
-        "is recorded as stable. The old and the new profile go into the tuning log. Ask the person before calling this.")]
-    public string KeepAsDaily([Description("Why this becomes the daily profile (games and minutes it survived).")] string note)
+        "is recorded as stable. adopt=true also keeps what another tool left on the card and Clocktail never wrote (card_report's " +
+        "'Not set by Clocktail': an MSI Afterburner curve, offsets, voltage demands, the boost), so the service puts it back after every " +
+        "boot and the person can close that tool; its power limit and fans are not kept. The old and the new profile go into the tuning log. " + AsksItself)]
+    public async Task<string> KeepAsDaily(
+        McpServer server,
+        [Description("Why this becomes the daily profile (games and minutes it survived).")] string note,
+        [Description("Keep another tool's settings on the card too (show preview_daily adopt=true first).")] bool adopt = false,
+        CancellationToken cancellationToken = default)
     {
-        var r = card.Broker(BrokerRequest.OpProfile, "keep", note);
-        if (!r.Ok || r.Result is not { } res) return Reply(r);
-        var writes = res.GetProperty("profile").GetProperty("Writes").EnumerateArray()
-            .Select(w => $"{w.GetProperty("Kind").GetString()}/{w.GetProperty("Key").GetString()} = {w.GetProperty("Value").GetString()}");
-        return Out(new { success = true, daily = writes });
+        var preview = card.Broker(BrokerRequest.OpProfile, adopt ? "preview-adopt" : "preview");
+        if (adopt && preview.Code == BrokerCode.BadRequest) return Older(preview);
+        if (!preview.Ok) return Reply(preview);
+        return await Asked(server, $"Make what is on your graphics card now your daily profile ({Changes(preview)}). Clocktail puts it back after every start and driver reset.", cancellationToken, () =>
+        {
+            var r = card.Broker(BrokerRequest.OpProfile, adopt ? "adopt" : "keep", note);
+            if (!r.Ok || r.Result is not { } res) return Reply(r);
+            var writes = res.GetProperty("profile").GetProperty("Writes").EnumerateArray()
+                .Select(w => $"{w.GetProperty("Kind").GetString()}/{w.GetProperty("Key").GetString()} = {w.GetProperty("Value").GetString()}");
+            return Out(new { success = true, daily = writes });
+        });
     }
+
+    /// <summary>For the description of each tool the person confirms (<see cref="Consent"/>).</summary>
+    private const string AsksItself = "Clocktail asks the person itself before it does this (a question in the agent, or a Windows dialog): " +
+        "say in chat what it will change first; when they do not confirm, nothing is changed.";
+
+    /// <summary>The person's yes (<see cref="Consent"/>) before <paramref name="then"/>; without it, why not, and nothing done.</summary>
+    private static async Task<string> Asked(McpServer server, string what, CancellationToken ct, Func<string> then) =>
+        await Consent.Ask(server, what, ct) is { } no
+            ? Out(new { success = false, error = no, code = "not_confirmed", written = WriteOutcome.None })
+            : Guard(then);
+
+    /// <summary>A profile preview's changes in a few words ("V/F curve, memory offset"), for the person's question.</summary>
+    private static string Changes(BrokerAnswer preview)
+    {
+        var names = preview.Result is { } r && r.TryGetProperty("changes", out var c) && c.ValueKind == JsonValueKind.Array
+            ? c.EnumerateArray().Select(x => Setting(Str(x, "kind"), Str(x, "key"))).Distinct().ToList() : [];
+        return names.Count == 0 ? "no change from the daily profile" : string.Join(", ", names);
+    }
+
+    private static string Setting(string? kind, string? key) => (kind, key) switch
+    {
+        ("vf", _) => "V/F curve",
+        ("pstates20", "memory") => "memory offset",
+        ("pstates20", _) => "core offset",
+        ("clockdomain", var k) => $"{k?.ToUpperInvariant()} offset",
+        ("vdemand", var k) => $"{(k == "graphics" ? "core" : k?.ToUpperInvariant())} voltage demand",
+        ("boost", _) => "voltage boost",
+        ("power", _) => "power limit",
+        ("fancurve", _) => "fan curve",
+        ("fanstop", _) => "fan stop band",
+        ("rails", var k) => $"{k?.ToUpperInvariant()} offsets",
+        ("clockratio", _) => "XBAR/core ratio",
+        ("clocklimit", _) => "clock cap",
+        _ => $"{kind}/{key}",
+    };
 
     [McpServerTool(Name = "list_presets", ReadOnly = true, OpenWorld = false), Description(
         "The daily profiles that ship with Clocktail, each with the card model it was tuned on and whether this card is that " +
-        "model, and the profiles the person saved under a name (save_profile). A fresh install runs the card at stock; a " +
-        "preset is a starting point the person may choose instead. load_preset loads either kind by name.")]
+        "model, and the profiles the person saved under a name (save_profile). A fresh install writes nothing (the card is what " +
+        "Clocktail found; card_report says whether that is stock); a preset is a starting point the person may choose instead. " +
+        "load_preset loads either kind by name.")]
     public string ListPresets() => Guard(() =>
     {
         var saved = card.Broker(BrokerRequest.OpProfile, "saved");
@@ -839,18 +946,25 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "save", name)));
 
     [McpServerTool(Name = "delete_profile", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. Ask the person first.")]
-    public string DeleteProfile([Description("The saved profile's name, from list_presets.")] string name) =>
-        Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
+        "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. " + AsksItself)]
+    public Task<string> DeleteProfile(McpServer server, [Description("The saved profile's name, from list_presets.")] string name, CancellationToken cancellationToken = default) =>
+        Asked(server, $"Delete the profile saved as '{name}'. It cannot be undone; the settings on your graphics card do not change.", cancellationToken,
+            () => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
 
     [McpServerTool(Name = "load_preset", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make a preset, or a profile saved with save_profile, the daily profile and put it on the card now: it replaces the " +
         "daily profile (the old one goes into the tuning log; save_profile it first if the person may want it back) and goes on " +
         "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
         "is still other silicon: after loading one, run stress_test before trusting it. Show preview_daily with the name " +
-        "first, then ask the person before calling this.")]
-    public string LoadPreset([Description("The preset's or saved profile's name, from list_presets.")] string name) =>
-        Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null);
+        "first. " + AsksItself)]
+    public async Task<string> LoadPreset(McpServer server, [Description("The preset's or saved profile's name, from list_presets.")] string name, CancellationToken cancellationToken = default)
+    {
+        // The preview refuses an unknown name and another model's preset: then nobody is asked about a load that cannot happen.
+        var preview = card.Broker(BrokerRequest.OpProfile, "preview", name);
+        if (!preview.Ok) return Reply(preview);
+        return await Asked(server, $"Load '{name}' as your daily profile and put it on your graphics card now ({Changes(preview)}); Clocktail puts it back after every start.",
+            cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null));
+    }
 
     [McpServerTool(Name = "install_service", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Install (or update) the Clocktail service, the one elevated process that does every write and puts the daily " +
@@ -1225,7 +1339,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     private static string Reply(BrokerAnswer r) =>
         Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written = r.Written, next = r.Written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, result = r.Result });
 
-    private static string Out(object o) => JsonSerializer.Serialize(o, Json);
+    private static string Out(object o) => JsonText.Serialize(o, Json);
 
     /// <summary>A refusal or an unreadable card as the tool's answer, with the reason: the SDK would otherwise hide the
     /// message, and the agent needs it to know what to change.</summary>

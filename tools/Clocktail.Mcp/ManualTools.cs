@@ -29,6 +29,11 @@ public sealed class ManualTools
     /// <summary>The server instructions: Manual/instructions.md, sent to every agent when it connects.</summary>
     public static string Instructions => Topics.Value.TryGetValue("instructions", out var t) ? t : "";
 
+    /// <summary>The lite tool set's (<see cref="LiteMode"/>): Manual/instructions-lite.md.</summary>
+    public static string LiteInstructions => Topics.Value.TryGetValue("instructions-lite", out var t) ? t : Instructions;
+
+    private static bool IsInstructions(string topic) => topic.StartsWith("instructions", StringComparison.OrdinalIgnoreCase);
+
     [McpServerTool(Name = "manual", ReadOnly = true, OpenWorld = false), Description(
         "The Clocktail manual for the agent: the tuning method phase by phase and why each step comes where it does, " +
         "answers to the questions people ask, Blackwell (voltage rails, clock domains, the V/F curve, what limits the clock), " +
@@ -38,9 +43,9 @@ public sealed class ManualTools
     public static string Manual([Description("The topic, from the index; omit for the index.")] string? topic = null)
     {
         var topics = Topics.Value;
-        if (!string.IsNullOrWhiteSpace(topic) && topics.TryGetValue(topic.Trim(), out var text) && !topic.Trim().Equals("instructions", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(topic) && topics.TryGetValue(topic.Trim(), out var text) && !IsInstructions(topic.Trim()))
             return text;
-        var index = topics.Where(t => !t.Key.Equals("instructions", StringComparison.OrdinalIgnoreCase))
+        var index = topics.Where(t => !IsInstructions(t.Key))
             .OrderBy(t => Order(t.Key)).ThenBy(t => t.Key, StringComparer.Ordinal)
             .Select(t => $"- {t.Key}: {Summary(t.Value)}");
         var head = string.IsNullOrWhiteSpace(topic) ? "" : $"No topic named '{topic}'.\n\n";

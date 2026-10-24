@@ -17,7 +17,8 @@ public class ToolAnnotationsTests
     public void The_tools_that_need_the_persons_yes_are_the_destructive_ones()
     {
         var rule = Regex.Match(ManualTools.Instructions, @"Ask the person before ([^.]+)\.").Groups[1].Value;
-        var asked = Regex.Matches(rule, "[a-z_]+_[a-z_]+").Select(m => m.Value).ToHashSet();
+        var names = Tools.Select(t => t.Name!).ToHashSet();
+        var asked = Regex.Matches(rule, @"\b[a-z][a-z_]*\b").Select(m => m.Value).Where(names.Contains).ToHashSet();   // stock has no underscore
         Assert.NotEmpty(asked);
         Assert.Equal(asked.Order(), Tools.Where(t => t.Destructive && !t.ReadOnly).Select(t => t.Name!).Order());
     }

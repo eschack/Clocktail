@@ -8,12 +8,12 @@ Under heavy load a modern GPU is held by its power limit, not by its clock. At a
 - Time: one to three evenings. Stress runs need nobody at the keyboard; game checks need them for 5-10 minutes each.
 - Expect a few driver resets: a 30-second freeze or black screen, then the desktop. Harmless; the service records the crash against the trial that hung and puts the daily profile back by itself, unless a new trial is in force by then.
 - What the reference RTX 5090 got: about +200 MHz under the wall at the same power; Blender 6-7 % faster with MSVDD and XBAR's first settings; then, with the ratio and MSVDD raised along with XBAR, the crossbar 5-6 % faster again and the memory's bandwidth 7.8 % higher at the same offset; the memory error-free in the lab up to the driver's +3000, kept at +1758, where bandwidth stops rising (3DMark agreed). Their chip may do more or less; that is what the testing finds out.
-- Close other tools that write clocks (MSI Afterburner, NVIDIA App's auto-tune) for the whole process.
+- Close other tools that write clocks (MSI Afterburner, NVIDIA App's auto-tune) for the whole process, and turn off their apply-at-startup: MSI Afterburner writes its settings again when it starts with Windows, after sleep and on profile switches. NVIDIA App's automatic tuning lives in the driver and comes back after every restart until it is turned off in NVIDIA App. `card_report` shows another tool's settings ("Not set by Clocktail") and a program running ("Overclocking tool running").
 - For the lab's jobs (phases 6 and 7) also close whatever else uses the GPU (a local AI model, a game, a launcher's download) and set the screen saver to none: a screen saver drawing cost the crossbar test 19 % on the reference card. The lab notices and measures again, for up to 10 minutes a run.
 - Case airflow matters more than fan speed: every degree cooler case air is a degree cooler GPU.
 
 ## Phase 0: baseline at stock
-Do: `card_settings` (confirm stock), `begin_session` ("baseline"), `stress_test load=100 seconds=180` to bring the card to its running temperature, then `stress_test load=100 seconds=60` and `limiter` during load.
+Do: `card_report` (confirm stock: no "Not set by Clocktail" row; with one, `stock` first, with the person's OK, or the baseline is the other tool's), `begin_session` ("baseline"), `stress_test load=100 seconds=180` to bring the card to its running temperature, then `stress_test load=100 seconds=60` and `limiter` during load.
 Record: p50 clock, NVVDD, board power, temperature, and what holds it.
 Expect (5090): ~2700 MHz at ~1025 mV, on the 575 W wall, 75-80 C.
 Why first: every later gain is measured against this, at the same load and temperature. The clock under full load at the wall is the number games feel.
@@ -113,7 +113,8 @@ The lab's jobs do this by themselves: `tune_uncore` runs each candidate A B B A,
 - A new game crashes later: `data_points`, lower that region 15-30 MHz in a session, keep again.
 - After a driver update: `stress_test` 60 s at load 100 and at load 50. The driver owns the stock curve and the temperature compensation; `card_report` says when the driver is not the one the profile was kept on.
 - After a VBIOS flash: the daily profile does not go on by itself (its offsets were found on the old stock curve). `load_daily` puts it on and binds it to the new VBIOS; `stress_test` at load 100 and 50 right after, and lower in a session where it fails.
-- They want stock for a while: `stock`. Back: `load_daily`.
+- They want stock for a while: `stock` (another tool's settings go too). Back: `load_daily`.
+- They tuned in MSI Afterburner and want Clocktail to look after it: `preview_daily adopt=true`, then `keep_as_daily adopt=true` (Clocktail asks them to confirm), then they turn off Afterburner's apply-at-startup. The power limit is set on its own (`set_daily_power_limit`).
 
 ## Guiding the person
 - Before each phase: what you will do, how long it takes, what they will see (fans, a possible freeze), and what you need from them.

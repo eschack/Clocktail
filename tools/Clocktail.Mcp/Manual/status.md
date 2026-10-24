@@ -18,6 +18,8 @@ What each status field means, what is normal, how to name the limiter, and the t
 
 ## card_settings
 Everything Clocktail can write, as it is on the card now, next to stock and the daily profile: power limit, core and memory P0 offsets, the V/F curve (as offsets, with the core's voltage demand), each rail's REL/ALT/OV/VMIN offsets and the resulting limits, XBAR/SYS/Video clock offsets and voltage demands, the voltage boost, the XBAR/core clock ratio, fans, the fan curve and the zero-RPM band, rail current limits, and the daily profile itself. Use it for "what is set on my card", "what is different from stock", and before any change. Beside the settings:
+- `stock_*`: NVIDIA's own value where it is known without a record (the curve, the P0, XBAR, SYS and Video offsets, the voltage demands, the boost, the fans' mode, the board's default wall); for the rails, the fan curve, the zero-RPM band and the clock ratio, what the card held before Clocktail first wrote it.
+- `not_set_by_clocktail`: every setting that is not stock and that Clocktail did not set, with stock, what Clocktail found and the value now. When it is there, the card is not at stock (`manual start`, first session). `other_oc_tools`: overclocking programs running now.
 - `power.firmware_w`: the board limit the firmware enforces; it must equal `limit_w`, the request (`manual power-thermal`).
 - `current_limits.policies`: the driver's whole power-policy table, each record's limit and reading now; one near 100 % under load can hold the clock.
 - `clock_locks`: locks in the driver's clock-limit record (`set_clock_lock`, `nvidia-smi -lgc`, Boost Lock), whoever set them.

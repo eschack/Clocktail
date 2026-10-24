@@ -9,7 +9,7 @@ namespace Clocktail.Mcp;
 [McpServerToolType]
 public sealed class LiveTools(LiveWatch live)
 {
-    private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+    private static readonly JsonSerializerOptions Json = SettingsTools.Json;
 
     [McpServerTool(Name = "live_start", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Watch the card live while the person plays or runs a benchmark, for as long as it takes: sampled 4 times a second in the " +
@@ -44,10 +44,10 @@ public sealed class LiveTools(LiveWatch live)
 
     private static string Guard(Func<object> tool)
     {
-        try { return JsonSerializer.Serialize(tool(), Json); }
+        try { return JsonText.Serialize(tool(), Json); }
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
-            return JsonSerializer.Serialize(new { success = false, error = e.Message }, Json);
+            return JsonText.Serialize(new { success = false, error = e.Message }, Json);
         }
     }
 }

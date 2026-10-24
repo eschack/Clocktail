@@ -73,7 +73,7 @@ The limits hold:
 Most of the gain comes from running each clock at less voltage, which is gentler on the chip, not harsher. The real risk is a crash, which the service undoes. Warranty terms on overclocking vary by card maker; say so if asked.
 
 ## Why did my settings come back after a crash or reboot?
-The service keeps the daily profile and writes it again after every boot and every driver reset. A driver reset alone puts the wall back to 575 W; the service restores the daily one first. `stock` turns that off until `load_daily`.
+The service keeps the daily profile and writes it again after every boot and every driver reset. A driver reset alone puts the wall back to 575 W; the service restores the daily one first. `stock` turns that off until `load_daily`, and clears what another tool left on the card.
 
 ## Why does the agent go so slowly?
 Each step is one change and one test, so a crash points at exactly one thing. Large steps were how the reference card hung: 2 of 3 hangs began right after a write under full load.

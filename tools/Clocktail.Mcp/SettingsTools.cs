@@ -31,8 +31,14 @@ public sealed partial class SettingsTools(Card card)
     public const int LimiterSamples = 5;
     public static readonly TimeSpan LimiterGap = TimeSpan.FromMilliseconds(200);
 
-    /// <summary>Compact, and an unknown or absent value is left out rather than spelled null: these answers are long.</summary>
-    private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+    /// <summary>Compact, and an unknown or absent value is left out rather than spelled null: these answers are long. Emoji,
+    /// Braille, ° and → go out as themselves: escaped, they were half of card_report (1265 \uXXXX in 14.7k characters,
+    /// 0.3.8), and a small model had to decode them before it could show the table.</summary>
+    public static readonly JsonSerializerOptions Json = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     private static readonly ClockDomainId[] Domains = [ClockDomainId.Xbar, ClockDomainId.Sys, ClockDomainId.Video];
 
@@ -47,9 +53,15 @@ public sealed partial class SettingsTools(Card card)
         "perf_limits (the driver's ceiling and floor per clock domain and the limit that set each), tdr (Windows' driver " +
         "timeout), pcie (the PCIe link: generation and width now, the most the card and slot allow together, the card's own " +
         "highest generation, replays since boot; the link slows down at idle by design) and the VBIOS and driver the daily " +
-        "profile is bound to. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
-        "journal), or the value now where Clocktail holds nothing; daily_* is the daily profile's value, absent where it " +
-        "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
+        "profile is bound to. stock_* is NVIDIA's own value where it is known without a record (the V/F curve, the P0, XBAR, " +
+        "SYS and Video offsets, the voltage demands, the voltage boost, the fans' mode: all 0 or auto; the power limit: the " +
+        "board's default); for the rails, the fan curve, the zero-RPM band and the clock ratio it is what the card held before " +
+        "Clocktail first wrote the setting (the ownership journal), or the value now where Clocktail holds nothing. " +
+        "not_set_by_clocktail lists every setting that is not stock and that Clocktail did not set (another tool's: MSI " +
+        "Afterburner, NVIDIA App, nvidia-smi), with stock, what Clocktail found and the value now: when it is there, the card is " +
+        "NOT at stock, whatever else says so. not_stock_owner_unknown lists settings that are not stock while the service does " +
+        "not answer, so whether Clocktail's daily profile or another tool set them is unknown. other_oc_tools names overclocking programs running now. daily_* is the daily " +
+        "profile's value, absent where it keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
         "the card does not hold now ([] = the card is on it; absent when none is kept, it is suspended or a trial is in " +
         "force). power.firmware_w is the board limit the firmware enforces (its power-policy record), which must equal " +
@@ -64,9 +76,12 @@ public sealed partial class SettingsTools(Card card)
         IReadOnlyDictionary<string, string> writes = new Dictionary<string, string>();
         IReadOnlyDictionary<string, string>? originals = null;
         object? daily = null, held = null, lastCrash = null;
-        try { writes = Daily(out daily); } catch (Exception e) when (Soft(e)) { daily = new { error = e.Message }; }
+        bool suspended = false, dailyRead = false;
+        IReadOnlyDictionary<string, string> adopted = new Dictionary<string, string>();
+        try { writes = Daily(out daily, out suspended, out adopted, out dailyRead); } catch (Exception e) when (Soft(e)) { daily = new { error = e.Message }; }
         try { originals = Held(out held, out lastCrash); } catch (Exception e) when (Soft(e)) { held = new { error = e.Message }; }
-        var c = new Context(writes, originals);
+        var factory = Factory(writes, dailyRead ? originals : null, suspended, adopted, out var notOurs, out var unknownOwner);
+        var c = new Context(writes, originals, factory.ToDictionary(f => f.Id, f => f.Stock));
         Card.Sample? sample = null;
         try { sample = card.ReadSample(); } catch (Exception e) when (Soft(e)) { }
         var t = sample?.Telemetry;
@@ -83,6 +98,9 @@ public sealed partial class SettingsTools(Card card)
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
+            not_set_by_clocktail = notOurs,
+            not_stock_owner_unknown = unknownOwner,
+            other_oc_tools = OtherTools.Running() is { Count: > 0 } running ? running : null,
             // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. One the
             // journal does not hold was set by another tool and outlives it.
             pcie = Section(() => Pcie(card.PcieLink()) ?? throw new InvalidOperationException("NVML does not answer")),
@@ -129,7 +147,7 @@ public sealed partial class SettingsTools(Card card)
         if (DailyOffCard(doc.RootElement) is not { } off) return json;
         var node = JsonNode.Parse(json)!.AsObject();
         node["daily_differs_on_card"] = new JsonArray([.. off.Select(x => (JsonNode?)x)]);
-        return node.ToJsonString(Json);
+        return JsonText.Unescape(node.ToJsonString(Json));
     });
 
     [McpServerTool(Name = "limiter", ReadOnly = true, OpenWorld = false), Description(
@@ -229,15 +247,61 @@ public sealed partial class SettingsTools(Card card)
         catch (InvalidOperationException) { return null; }
     }
 
-    /// <summary>What every section compares against: the daily profile's writes and the journal's originals, both by
-    /// "kind/key" in the write path's own encodings. Originals are null when the journal could not be read.</summary>
-    private sealed class Context(IReadOnlyDictionary<string, string> daily, IReadOnlyDictionary<string, string>? originals)
+    /// <summary>What every section compares against: the daily profile's writes, the journal's originals and NVIDIA's own
+    /// values where they are known (<see cref="FactoryStock"/>), all by "kind/key" in the write path's own encodings.
+    /// Originals are null when the journal could not be read.</summary>
+    private sealed class Context(IReadOnlyDictionary<string, string> daily, IReadOnlyDictionary<string, string>? originals, IReadOnlyDictionary<string, string> factory)
     {
         public string? Daily(string kind, string key) => daily.GetValueOrDefault($"{kind}/{key}");
 
-        /// <summary>Before Clocktail first wrote the cell: the journal's original, or <paramref name="now"/> when it holds
-        /// nothing there (Clocktail never wrote it). Unknown when the journal could not be read.</summary>
-        public string? Stock(string kind, string key, string now) => originals == null ? null : originals.GetValueOrDefault($"{kind}/{key}") ?? now;
+        /// <summary>Stock: NVIDIA's own value where it is known; else what the card held before Clocktail first wrote the
+        /// cell, the journal's original, or <paramref name="now"/> when it holds nothing there (Clocktail never wrote it).
+        /// Unknown when neither is known and the journal could not be read. Until 0.4.0 it was always the journal's, so a
+        /// curve another tool left before Clocktail's first write read as stock.</summary>
+        public string? Stock(string kind, string key, string now) =>
+            factory.GetValueOrDefault($"{kind}/{key}") ?? (originals == null ? null : originals.GetValueOrDefault($"{kind}/{key}") ?? now);
+    }
+
+    /// <summary>The settings another tool left on the card (<see cref="FactoryCell.OtherTool"/>), for a tool without
+    /// card_settings at hand (begin_session). Empty when the journal or the card cannot be read.</summary>
+    internal IReadOnlyList<FactoryCell> NotStock()
+    {
+        var writes = Daily(out _, out bool suspended, out var adopted, out bool read);
+        var originals = Held(out _, out _);
+        return originals == null || !read ? [] : Factory(writes, originals, suspended, adopted, out _, out _).Where(f => f.OtherTool).ToList();
+    }
+
+    /// <summary>
+    /// The settings whose NVIDIA default is known, read now (<see cref="FactoryStock.Survey"/>), and in <paramref name="notOurs"/>
+    /// the ones another tool set (null when there are none): each with stock, what Clocktail found, the value now and the
+    /// daily profile's, in words. Without the journal or the daily profile (null <paramref name="originals"/>: the service
+    /// does not answer) Clocktail's own daily profile cannot be told from another tool's settings, so those cells go to
+    /// <paramref name="unknownOwner"/> instead: until 0.4.0's review they were called another tool's.
+    /// </summary>
+    private IReadOnlyList<FactoryCell> Factory(IReadOnlyDictionary<string, string> daily, IReadOnlyDictionary<string, string>? originals, bool suspended,
+        IReadOnlyDictionary<string, string> adopted, out object? notOurs, out object? unknownOwner)
+    {
+        notOurs = unknownOwner = null;
+        IReadOnlyList<FactoryCell> cells;
+        try
+        {
+            cells = card.WithDriver((hw, s) => FactoryStock.Survey(hw, s,
+                (kind, key) => originals?.GetValueOrDefault($"{kind}/{key}"),
+                (kind, key) => suspended ? null : daily.GetValueOrDefault($"{kind}/{key}"),
+                (kind, key) => adopted.GetValueOrDefault($"{kind}/{key}")));
+        }
+        catch (Exception e) when (Soft(e)) { return []; }
+        var others = cells.Where(f => f.OtherTool).ToList();
+        if (others.Count == 0) return cells;
+        if (originals == null)
+            unknownOwner = others.Select(f => new { setting = f.Name, cell = f.Id, stock = f.Describe(f.Stock), now = f.Describe(f.Now) }).ToList();
+        else
+            notOurs = others.Select(f => new
+            {
+                setting = f.Name, cell = f.Id, stock = f.Describe(f.Stock), found = f.Describe(f.Found), now = f.Describe(f.Now),
+                daily = f.Daily is { } d ? f.Describe(d) : null, clocktail_holds = f.Original != null,
+            }).ToList();
+        return cells;
     }
 
     private object Power(Context c, TelemetrySnapshot? t)
@@ -507,15 +571,29 @@ public sealed partial class SettingsTools(Card card)
 
     /// <summary>The daily profile's writes by "kind/key", and (in <paramref name="section"/>) the profile in short: when it
     /// was kept, whether it is suspended, what it keeps; null when none is kept, an error when the broker cannot say.</summary>
-    private IReadOnlyDictionary<string, string> Daily(out object? section)
+    private IReadOnlyDictionary<string, string> Daily(out object? section) => Daily(out section, out _, out _, out _);
+
+    /// <param name="suspended">The profile is suspended (stock until load_daily).</param>
+    /// <param name="adopted">What a keep adopted from another tool, by "kind/key" (DailyProfile.Adopted).</param>
+    /// <param name="read">The broker answered: false when it does not, and then nothing is known of the profile.</param>
+    private IReadOnlyDictionary<string, string> Daily(out object? section, out bool suspended, out IReadOnlyDictionary<string, string> adopted, out bool read)
     {
         var writes = new Dictionary<string, string>();
+        var took = new Dictionary<string, string>();
+        adopted = took;
+        suspended = false;
         var r = card.Broker(BrokerRequest.OpProfile, "show");
+        read = r.Ok && r.Result != null;
         if (!r.Ok || r.Result is not { } res) { section = new { error = r.Error ?? "the daily profile could not be read" }; return writes; }
         if (!res.TryGetProperty("profile", out var p) || p.ValueKind != JsonValueKind.Object) { section = null; return writes; }
+        suspended = p.TryGetProperty("Suspended", out var sp) && sp.ValueKind == JsonValueKind.True;
         foreach (var w in p.GetProperty("Writes").EnumerateArray())
             if (Text(w, "Kind") is { } kind && Text(w, "Key") is { } key && Text(w, "Value") is { } value)
                 writes[$"{kind}/{key}"] = value;
+        if (p.TryGetProperty("Adopted", out var ad) && ad.ValueKind == JsonValueKind.Array)
+            foreach (var w in ad.EnumerateArray())
+                if (Text(w, "Kind") is { } kind && Text(w, "Key") is { } key && Text(w, "Value") is { } value)
+                    took[$"{kind}/{key}"] = value;
         string? last = p.TryGetProperty("History", out var h) && h.ValueKind == JsonValueKind.Array && h.GetArrayLength() > 0 ? h[h.GetArrayLength() - 1].GetString() : null;
         // What the card ran when the profile was kept, against what it runs now (null where either is unknown).
         string? keptVbios = Text(p, "Vbios"), keptDriver = Text(p, "Driver");
@@ -649,7 +727,7 @@ public sealed partial class SettingsTools(Card card)
 
     private static bool Soft(Exception e) => e is not OutOfMemoryException;
 
-    private static string Out(object o) => JsonSerializer.Serialize(o, Json);
+    private static string Out(object o) => JsonText.Serialize(o, Json);
 
     /// <summary>An unreadable card as the tool's answer, with the reason: the SDK would otherwise hide the message.</summary>
     private static string Guard(Func<string> tool)

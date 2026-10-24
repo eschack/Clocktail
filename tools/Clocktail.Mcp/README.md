@@ -4,13 +4,15 @@ The agent's hands. Each change is a **trial** in a session; the person plays, th
 
 `npx -y clocktail setup` installs it and connects your agents. By hand: it is a stdio MCP server, so point any MCP client at `clocktail-mcp.exe` (`%LocalAppData%\Programs\Clocktail` after setup, or `tools\Clocktail.Mcp\bin\Release\net10.0` after `dotnet build -c Release tools/Clocktail.Mcp`). The service must be installed: it does every write, and `install_service` installs it.
 
+`--lite` (or `CLOCKTAIL_TOOLS=lite`) lists 22 tools and short instructions (Manual/instructions-lite.md) instead of 52 and the full ones, about 6.5k tokens instead of 19k, for small local models; a tool left out still answers when called by name. `CLOCKTAIL_CONFIRM` sets how the tools that change what stays (`keep_as_daily`, `load_preset`, `set_daily_power_limit`, `set_power_cap`, `delete_profile`, and `stock` when it would clear another tool's settings) ask the person themselves: `auto` (an MCP elicitation where the client offers it, else a Windows dialog), `dialog`, or `off`.
+
 What the agent starts is a relay that loads no driver library and runs the same program again with `--worker`, which holds the GPU. When the driver goes away (a reset, an update, a device restart) the worker ends or dies in it, and the relay answers the calls it had in flight, starts a new worker and goes on: the agent keeps its tools. `CLOCKTAIL_MCP_DIRECT=1` runs it as one process. A read waits for the driver at most 5 s (`CLOCKTAIL_MCP_DRIVER_WAIT_S`) and then says so.
 
 ## Tools
 
 | Tool | What |
 |---|---|
-| `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). |
+| `card_report` | 🩺 How's my card doing: every setting as stock → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). A "Not set by Clocktail" row names another tool's settings (the card is then not at stock), and "Overclocking tool running" a program that writes the card back. |
 | `manual` | The agent's manual: the method phase by phase and why, every control and how to combine them, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
 | `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM, the 16-pin input, the PCIe link. |
@@ -20,11 +22,11 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `curve_around` | Curve points near a voltage. |
 | `watch` | Sample one stretch of play: p10/p50/p90 of clock, voltage, XBAR, power, temperature, VRAM; time on the wall; the game's fps and its 1 % and 0.1 % lows (PresentMon, run by the service). |
 | `live_start` / `live_read` / `live_stop` | Watch a whole session of play live: 4 samples a second, a line every 10 s under load (clock, voltage and curve point, MSVDD, XBAR, power vs the wall, temperature, fans, what held the clock), and a line when load starts or stops, the clock freezes, the card stops answering or runs hot; each line ends with the game's fps. The log can be followed as it is written (Claude Code's Monitor); every sample goes to a CSV. |
-| `list_presets` / `load_preset` | The profiles that ship with Clocktail and the ones saved by name; load one as the daily profile. Ask the person first. |
-| `save_profile` / `delete_profile` | Save the daily profile under a name ("quiet", "games") to switch back to later; delete a saved one. |
-| `set_daily_power_limit` | The daily power limit. Ask the person first. |
+| `list_presets` / `load_preset` | The profiles that ship with Clocktail and the ones saved by name; load one as the daily profile; the person confirms it themselves. |
+| `save_profile` / `delete_profile` | Save the daily profile under a name ("quiet", "games") to switch back to later; delete a saved one (the person confirms that themselves). |
+| `set_daily_power_limit` | The daily power limit; the person confirms it themselves. |
 | `begin_session` / `end_session` | Start a session for a game / end it and go back to the daily profile. |
-| `preview_daily` | What `keep_as_daily` (or `load_preset`) would make the daily profile, before asking. Writes nothing. |
+| `preview_daily` | What `keep_as_daily` (or `load_preset`, or `keep_as_daily adopt=true`) would make the daily profile, before asking. Writes nothing. |
 | `adjust_curve` | Raise or lower the V/F points in a voltage band around the working point (one trial). |
 | `flatten_curve` | The curve flat from a voltage up; only lowers (one trial). |
 | `set_curve` | The whole V/F curve at once, every point's offset (one trial). |
@@ -40,7 +42,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand, or the core's voltage demand (one trial). |
 | `set_power_limit` | Move the power limit for a trial, to run the curve lower down. Never kept. |
 | `set_current_limit` | Set the NVVDD or MSVDD current limit for a trial, up to the driver's maximum. Never kept. |
-| `set_power_cap` | The second board power request (F8) for a trial; it cannot be deleted once made. Never kept. Ask the person first. |
+| `set_power_cap` | The second board power request (F8) for a trial; it cannot be deleted once made. Never kept. The person confirms it themselves. |
 | `set_fan_speed` | Hold the fans at a fixed duty for a trial (thermal tests). Never kept. |
 | `stress_test` | Run NVIDIA's `nvgwls.exe` on what is on the card; a failure is recorded as the trial's crash. |
 | `lab_test` | Run the lab (StabilityLab's engine) on what is on the card: burn, light, pulse, memory in five access orders, latency, l2 (the crossbar); every result checked bit for bit; a failure is the trial's crash. |
@@ -48,8 +50,8 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `tune_uncore` | The uncore tuner in the background: XBAR with its voltage demand, the XBAR/core ratio and MSVDD, each candidate a trial compared A B B A on the crossbar's (L2) bandwidth; keeps nothing. |
 | `mark_stable` / `mark_crash` | Record the trial's outcome. |
 | `back_to_daily` | Put the daily profile back now. |
-| `stock` / `load_daily` | The card to stock and kept there (the daily profile suspended) / the daily profile back on. |
-| `keep_as_daily` | Keep what the trials set as the daily profile (not the trial wall, the F8 request, current limits or fixed fans). Ask the person first. |
+| `stock` / `load_daily` | The card to NVIDIA's stock and kept there, another tool's settings cleared too (the person confirms that: nothing keeps a copy; the daily profile is suspended) / the daily profile back on. |
+| `keep_as_daily` | Keep what the trials set as the daily profile (not the trial wall, the F8 request, current limits or fixed fans); `adopt=true` keeps another tool's settings too. The person confirms it themselves. |
 | `data_points` | Every trial so far, summarized per curve point. |
 | `log_note` / `read_log` | The tuning log. |
 

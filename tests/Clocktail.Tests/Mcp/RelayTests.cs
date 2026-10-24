@@ -53,6 +53,33 @@ public class RelayTests
         return r;
     }
 
+    /// <summary>A worker's own question (Consent's elicitation) keeps to that worker: a new worker numbers its requests
+    /// from 1 again, and a yes the person gave the old question must never answer the new one (0.4.0's review).</summary>
+    [Fact]
+    public void An_answer_to_an_ended_workers_question_never_reaches_the_next_worker()
+    {
+        var r = Connected();
+        r.FromClient(Req(2, "tools/call", "keep_as_daily"));
+        _children[0].Line(Req(1, "elicitation/create"));
+        Assert.Equal("w1:1", (string)Last(_out)["id"]!);
+
+        _children[0].Exit(75);
+        var cancelled = _out.Select(l => JsonNode.Parse(l)!).Single(n => (string?)n["method"] == "notifications/cancelled");
+        Assert.Equal("w1:1", (string)cancelled["params"]!["requestId"]!);
+
+        _scheduled[^1].Then();                                          // the next worker, initialized again
+        _children[1].Line(Res(JsonNode.Parse("\"clocktail-relay-initialize\"")!));
+        _children[1].Line(Req(1, "elicitation/create"));
+        Assert.Equal("w2:1", (string)Last(_out)["id"]!);
+        int got = _children[1].Got.Count;
+
+        r.FromClient(Res(JsonValue.Create("w1:1"), "yes"));            // the old question's answer: dropped
+        Assert.Equal(got, _children[1].Got.Count);
+        Assert.Contains(_log, l => l.Contains("dropped"));
+        r.FromClient(Res(JsonValue.Create("w2:1"), "yes"));            // the new one's: to the new worker, with its own id
+        Assert.Equal(1, (int)JsonNode.Parse(_children[1].Got[^1])!["id"]!);
+    }
+
     [Fact]
     public void Lines_pass_both_ways_unchanged()
     {

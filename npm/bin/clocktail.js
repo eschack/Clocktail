@@ -33,15 +33,16 @@ const ENV = process.env;
 const XDG = ENV.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const inHome = (...p) => path.join(HOME, ...p);
 
-/** The stdio entry each config dialect expects. */
-function entry(dialect) {
+/** The stdio entry each config dialect expects; `lite` starts the server with its small tool set (--lite, 0.4.0). */
+function entry(dialect, lite) {
+  const args = lite ? ['--lite'] : [];
   switch (dialect) {
-    case 'opencode': return { type: 'local', command: [SERVER], enabled: true };
-    case 'opencode_v2': return { type: 'local', command: [SERVER] };   // V2 connects a server unless it says disabled
-    case 'stdio': return { type: 'stdio', command: SERVER, args: [] };
-    case 'copilot': return { type: 'stdio', command: SERVER, args: [], tools: ['*'] };
-    case 'commandcode': return { transport: 'stdio', enabled: true, command: SERVER, args: [] };
-    default: return { command: SERVER, args: [] };
+    case 'opencode': return { type: 'local', command: [SERVER, ...args], enabled: true };
+    case 'opencode_v2': return { type: 'local', command: [SERVER, ...args] };   // V2 connects a server unless it says disabled
+    case 'stdio': return { type: 'stdio', command: SERVER, args };
+    case 'copilot': return { type: 'stdio', command: SERVER, args, tools: ['*'] };
+    case 'commandcode': return { transport: 'stdio', enabled: true, command: SERVER, args };
+    default: return { command: SERVER, args };
   }
 }
 
@@ -62,11 +63,11 @@ function jsonClient(id, label, file, o = {}) {
     id, label, file, note: o.note,
     present: () => fs.existsSync(o.marker || path.dirname(file)),
     connected() { const d = readJson(file); return !!(d && (dig(d, locate(d).keys) || {})[NAME]); },
-    add() {
+    add({ lite } = {}) {
       const d = readJson(file, true) || {};
       const { keys, dialect } = locate(d);
       const table = digCreate(d, keys);
-      table[NAME] = { ...entry(dialect), ...keptEnv(table[NAME]) };
+      table[NAME] = { ...entry(dialect, lite || wasLite(table[NAME])), ...keptEnv(table[NAME]) };
       writeJson(file, d);
     },
     remove() {
@@ -87,15 +88,18 @@ function tomlClient(id, label, file) {
     id, label, file,
     present: () => fs.existsSync(path.dirname(file)),
     connected: () => readText(file).includes(header),
-    add() {
+    add({ lite } = {}) {
       const text = readText(file);
       const kept = withoutTomlTable(text, `mcp_servers.${NAME}`).trimEnd();
       // The person's own variables (the CLOCKTAIL_MCP_* caps) survive an update: an env line, or the env subtable.
-      const envLine = tomlTableLines(text, `mcp_servers.${NAME}`).slice(1).filter(l => /^\s*env\s*=/.test(l));
+      // So does --lite, chosen once.
+      const lines = tomlTableLines(text, `mcp_servers.${NAME}`).slice(1);
+      const envLine = lines.filter(l => /^\s*env\s*=/.test(l));
       const envTable = tomlTableLines(text, `mcp_servers.${NAME}.env`);
+      lite = lite || lines.some(l => /^\s*args\s*=.*["']--lite["']/.test(l));
       fs.mkdirSync(path.dirname(file), { recursive: true });
       backup(file);
-      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = []\n`
+      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = [${lite ? "'--lite'" : ''}]\n`
         + envLine.map(l => l.trim() + '\n').join('')
         + (envTable.length ? `\n${envTable.join('\n').trimEnd()}\n` : ''));
     },
@@ -149,16 +153,18 @@ function openCode() {
 const CLIENTS = [
   {
     id: 'claude-code', label: 'Claude Code', file: 'claude mcp (user scope)',
-    present: () => !!which('claude') || fs.existsSync(ENV.CLAUDE_CONFIG_DIR || inHome('.claude')),
+    present: () => !!which('claude') || fs.existsSync(claudeDir()),
     connected: () => run('claude', ['mcp', 'get', NAME], { quiet: true }).status === 0,
-    add() {
-      if (!which('claude')) throw new Error(`the claude command is not on PATH; run: claude mcp add ${NAME} -s user -- "${SERVER}"`);
-      // Already pointing at the server: left as it is, with any -e variables the person gave it (an update replaces the
-      // exe in place, so the entry needs no change).
+    add({ lite } = {}) {
+      if (!which('claude')) throw new Error(`the claude command is not on PATH; run: claude mcp add ${NAME} -s user -- "${SERVER}"${lite ? ' --lite' : ''}`);
+      // Already pointing at the server, with --lite when it is wanted: left as it is, with any -e variables the person
+      // gave it (an update replaces the exe in place, so the entry needs no change). An entry started with --lite keeps it.
       const now = run('claude', ['mcp', 'get', NAME], { quiet: true });
-      if (now.status === 0 && (now.stdout || '').toLowerCase().includes(SERVER.toLowerCase())) return;
+      const out = now.status === 0 ? now.stdout || '' : '';
+      const wasLite = /^\s*Args:.*--lite/m.test(out);
+      if (out.toLowerCase().includes(SERVER.toLowerCase()) && (wasLite || !lite)) return;
       run('claude', ['mcp', 'remove', NAME, '-s', 'user'], { quiet: true });
-      const r = run('claude', ['mcp', 'add', NAME, '-s', 'user', '--', SERVER], { quiet: true });
+      const r = run('claude', ['mcp', 'add', NAME, '-s', 'user', '--', SERVER, ...(lite || wasLite ? ['--lite'] : [])], { quiet: true });
       if (r.status !== 0) throw new Error(`claude mcp add failed: ${(r.stderr || r.stdout || '').trim()}`);
     },
     remove: () => !!which('claude') && run('claude', ['mcp', 'remove', NAME, '-s', 'user'], { quiet: true }).status === 0,
@@ -186,6 +192,40 @@ const CLIENTS = [
   jsonClient('zcode', 'ZCode', inHome('.zcode', 'cli', 'config.json'), { locate: () => ({ keys: ['mcp', 'servers'] }) }),
 ];
 
+// ---- Claude Code's permissions (--allow-reads) --------------------------------------------------------------------
+// The read-only tools, named one by one: Claude Code runs them without asking and still asks before every write. Never
+// a wildcard (mcp__clocktail__*): that would let the writes through too.
+const READS = ['card_report', 'gpu_status', 'card_settings', 'limiter', 'curve_around', 'data_points', 'read_log', 'manual',
+  'list_presets', 'preview_daily', 'diagnostic_report', 'lab_status', 'live_read'].map(t => `mcp__${NAME}__${t}`);
+const claudeDir = () => ENV.CLAUDE_CONFIG_DIR || inHome('.claude');
+const claudeSettings = () => path.join(claudeDir(), 'settings.json');
+
+/** The reads into permissions.allow, each once; the rest of the file stays as it was. False when all were there. */
+function allowReads() {
+  const file = claudeSettings();
+  let d;
+  try { d = readJson(file, true) || {}; }
+  catch { throw new Error(`${file} is not plain JSON, so it was left alone; allow the reads in Claude Code's /permissions instead`); }
+  const p = digCreate(d, ['permissions']);
+  if (p.allow !== undefined && !Array.isArray(p.allow)) throw new Error(`permissions.allow in ${file} is not a list, so it was left alone`);
+  const missing = READS.filter(r => !(p.allow || []).includes(r));
+  if (!missing.length) return false;
+  p.allow = [...(p.allow || []), ...missing];
+  writeJson(file, d);
+  return true;
+}
+
+/** Exactly those rules out again (uninstall), whoever added them; every other rule stays. */
+function disallowReads() {
+  const file = claudeSettings();
+  const d = readJson(file);
+  const allow = d && dig(d, ['permissions', 'allow']);
+  if (!Array.isArray(allow) || !allow.some(r => READS.includes(r))) return false;
+  d.permissions.allow = allow.filter(r => !READS.includes(r));
+  writeJson(file, d);
+  return true;
+}
+
 // ---- commands ----------------------------------------------------------------------------------------------------
 
 async function setup(opts) {
@@ -202,6 +242,11 @@ async function setup(opts) {
     say(`    - add Clocktail to ${c.label}  (${c.file}${c.id === 'claude-code' ? '' : ', backed up first'})`);
     if (c.note) say(`      ${c.note}`);
   }
+  if (opts.lite) say('    - start Clocktail with the lite tool set (for small local models)');
+  // The reads are a Claude Code setting: without Claude Code in the list there is nothing to allow them in.
+  const allowing = opts.allowReads && chosen.some(c => c.id === 'claude-code');
+  if (allowing) say(`    - let Claude Code read the card without asking; every change still asks  (${claudeSettings()}, backed up first)`);
+  else if (opts.allowReads) say('    - skip --allow-reads: it is for Claude Code, which is not being connected');
   if (!opts.noService) say('    - install the Clocktail service (Windows asks for admin rights once)');
   const card = cardState();
   say(`    - leave your card as it is: ${card.now}`);
@@ -210,9 +255,10 @@ async function setup(opts) {
   if (opts.plan || (!opts.yes && !process.stdin.isTTY)) {
     const found = CLIENTS.filter(c => safe(() => c.present()));
     const ids = chosen.length ? chosen.map(c => c.id).join(',') : 'none';
+    const flags = [opts.noService && '--no-service', opts.lite && '--lite', opts.allowReads && '--allow-reads'].filter(Boolean);
     say(`
   Nothing has been changed. To approve this plan, run:
-    npx -y clocktail@latest setup --yes --client ${ids}${opts.noService ? ' --no-service' : ''}
+    npx -y clocktail@latest setup --yes --client ${ids}${flags.map(f => ` ${f}`).join('')}
 
   Agents found: ${found.map(c => `${c.id} (${c.label})`).join(', ') || 'none'}.
   To connect only some of them, list their ids after --client.
@@ -247,10 +293,14 @@ async function setup(opts) {
 
   // 2. The agents.
   for (const c of chosen) {
-    try { c.add(); say(`  connected ${c.label}  (${c.file})`); }
+    try { c.add({ lite: opts.lite }); say(`  connected ${c.label}  (${c.file})`); }
     catch (e) { say(`  could not connect ${c.label}: ${e.message}`); }
   }
-  if (chosen.length === 0) say(`  no agent connected. Point any MCP client at:\n    ${SERVER}`);
+  if (chosen.length === 0) say(`  no agent connected. Point any MCP client at:\n    ${SERVER}${opts.lite ? '  (argument: --lite)' : ''}`);
+  if (allowing) {
+    try { say(`  ${allowReads() ? 'allowed' : 'already allowed'} Clocktail's read-only tools in Claude Code  (${claudeSettings()})`); }
+    catch (e) { say(`  could not allow the reads in Claude Code: ${e.message}`); }
+  }
 
   // 3. The service.
   if (opts.noService) say('  service not installed (--no-service). Your agent can install it later with install_service.');
@@ -276,11 +326,13 @@ Uninstall any time:  npx -y clocktail uninstall
 
 async function uninstall(opts) {
   say('\nClocktail uninstall\n');
-  let atStock = !cardState().profile;
+  // `stock` gives back what Clocktail changed, nothing more: the card is as it was before Clocktail, which is stock unless
+  // another tool (MSI Afterburner, NVIDIA App's automatic tuning) had changed it first.
+  let givenBack = !cardState().profile;
   if (fs.existsSync(BROKER)) {
-    say('  putting the card back to stock');
-    atStock = run(BROKER, ['stock'], { quiet: true }).status === 0;
-    if (!atStock) say('  the service did not answer, so the card could not be put back to stock now: it returns to stock at the next restart');
+    say('  giving back every setting Clocktail changed');
+    givenBack = run(BROKER, ['stock'], { quiet: true }).status === 0;
+    if (!givenBack) say('  the service did not answer, so the settings could not be given back now: the card sheds them at the next restart');
     say('  removing the service (Windows will ask for admin rights once)');
     run(BROKER, ['uninstall']);
   }
@@ -288,6 +340,9 @@ async function uninstall(opts) {
     try { if (c.present() && c.remove()) say(`  disconnected ${c.label}`); }
     catch (e) { say(`  could not disconnect ${c.label}: ${e.message}`); }
   }
+  // Whether or not --allow-reads put them there: the rules name tools that are gone now.
+  try { if (disallowReads()) say(`  removed Clocktail's read permissions from Claude Code  (${claudeSettings()})`); }
+  catch (e) { say(`  could not remove Clocktail's read permissions from Claude Code: ${e.message}`); }
   removeMovedAside();
   try { fs.rmSync(INSTALL_DIR, { recursive: true, force: true }); say(`  removed ${INSTALL_DIR}`); }
   catch (e) { say(`  could not remove ${INSTALL_DIR} (${e.code}): it is open in ${agentList(runningServers()) || 'another program'}; close it and run uninstall again`); }
@@ -297,7 +352,8 @@ async function uninstall(opts) {
   } else if (fs.existsSync(STATE_DIR)) {
     say(`  kept your profiles and tuning logs in ${STATE_DIR} (--purge removes them)`);
   }
-  say(atStock ? '\nUninstalled. The card is at stock. It never knew.\n' : '\nUninstalled. The card returns to stock at the next restart.\n');
+  say(givenBack ? '\nUninstalled. The card is as it was before Clocktail (stock, unless another tool had tuned it first). It never knew.\n'
+    : '\nUninstalled. The card sheds Clocktail\'s settings at the next restart.\n');
 }
 
 /** Every part checked for real: the files, the service answering with a GPU, the server starting and listing its
@@ -367,11 +423,13 @@ Clocktail ${VERSION}: agent-assisted overclocking for NVIDIA RTX 50, served over
   npx -y clocktail setup        install, connect your agents, install the service
       --client a,b              connect these without asking (${CLIENTS.map(c => c.id).join(', ')}, or none)
       --no-service              skip the service (your agent can install it later)
+      --lite                    a smaller tool set and short instructions, for small local models (updates keep it)
+      --allow-reads             let Claude Code run Clocktail's read-only tools without asking (every change still asks)
       --yes                     do not ask before making the changes
       --plan                    show what setup would change and change nothing (what an agent shows you first)
   npx -y clocktail verify       check every part for real: files, service, server, agents
   npx -y clocktail status       what is installed and connected
-  npx -y clocktail uninstall    card back to stock, service and files removed
+  npx -y clocktail uninstall    every setting Clocktail changed given back, service and files removed
       --purge                   also delete profiles and tuning logs
 `);
 }
@@ -440,8 +498,9 @@ function cardState() {
   }
   const kept = best && typeof best.KeptAt === 'string' ? ` (kept ${best.KeptAt.slice(0, 10)})` : '';
   if (best && !best.Suspended) return { profile: best, now: `on your daily profile${kept}`, done: `Your card keeps its daily profile${kept}: setup never touches the card.` };
-  if (best) return { profile: best, now: `at stock (your daily profile${kept} is suspended)`, done: `Your card stays at stock; your daily profile${kept} is kept, and load_daily puts it back.` };
-  return { profile: null, now: 'at stock', done: 'Your card is still at stock: nothing has been overclocked yet, which is the safest overclock.' };
+  // No profile says nothing of other tools (Afterburner, NVIDIA App's tuning): "no Clocktail settings", never "stock".
+  if (best) return { profile: best, now: `with no Clocktail settings on it (your daily profile${kept} is suspended)`, done: `Your card stays without Clocktail's settings; your daily profile${kept} is kept, and load_daily puts it back.` };
+  return { profile: null, now: 'with no Clocktail settings on it', done: 'Your card carries no Clocktail settings yet, which is the safest overclock.' };
 }
 
 /** The installed server's running copies, each with the program that started it (the agent). */
@@ -505,6 +564,12 @@ function tomlTableLines(text, name) {
   return out;
 }
 
+/** True when an existing entry starts the server with --lite (in args, or in OpenCode's command array): an update without
+ * the flag keeps that choice. */
+function wasLite(old) {
+  return !!old && typeof old === 'object' && [old.args, old.command].some(a => Array.isArray(a) && a.includes('--lite'));
+}
+
 /** What of an existing entry the person set themselves and an update keeps: its environment ("environment" in
  * OpenCode), where the CLOCKTAIL_MCP_* caps live. */
 function keptEnv(old) {
@@ -546,12 +611,14 @@ function fail(msg) { say(`\n  ${msg}\n`); process.exit(1); }
 // ---- entry --------------------------------------------------------------------------------------------------------
 
 // Loaded by the tests as a module: hand them the agents and run nothing.
-if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList, serversByAgent }; return; }
+if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList, serversByAgent, allowReads, disallowReads }; return; }
 
 const argv = process.argv.slice(2);
 const opts = {
   client: (() => { const i = argv.indexOf('--client'); return i >= 0 ? argv[i + 1] : null; })(),
   noService: argv.includes('--no-service'),
+  lite: argv.includes('--lite'),
+  allowReads: argv.includes('--allow-reads'),
   purge: argv.includes('--purge'),
   yes: argv.includes('--yes') || argv.includes('-y'),
   plan: argv.includes('--plan'),

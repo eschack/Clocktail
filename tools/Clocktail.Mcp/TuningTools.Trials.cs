@@ -389,35 +389,45 @@ public sealed partial class TuningTools
         "no way to delete one: from then on it can only go back to the board's maximum (600 W), which is where back_to_daily, " +
         "end_session, a crash and the agent disconnecting put it, until the next boot. The lower of FE and F8 holds (on the " +
         "reference card F8 500 W under FE 600 W held the board at 500 W), so at the board's maximum it limits nothing; " +
-        "gpu_status's power limit shows a change a few seconds late. The board's range (400-600 W on a 5090). Never kept. " +
-        "Ask the person before calling this.")]
-    public string SetPowerCap(
+        "gpu_status's power limit shows a change a few seconds late. The board's range (400-600 W on a 5090). Never kept. " + AsksItself)]
+    public async Task<string> SetPowerCap(
+        McpServer server,
         [Description("The F8 request, W.")] double watts,
-        [Description("Why (what it is meant to show).")] string? reason = null) => Guard(() =>
+        [Description("Why (what it is meant to show).")] string? reason = null,
+        CancellationToken cancellationToken = default)
     {
-        if (watts > MaxPowerW || watts < MinPowerW) throw new ArgumentException($"the request is {MinPowerW}..{MaxPowerW} W");
-        uint mw = (uint)Math.Round(watts * 1000);
-        var f8 = card.WithDriver(PowerRequestsReader.Read).Additional;
-        string from = f8.Present ? string.Create(CultureInfo.InvariantCulture, $"{f8.Mw / 1000.0:0.#} W") : "absent";
-        return Trial(string.Create(CultureInfo.InvariantCulture, $"F8 power request {from} → {mw / 1000.0:0.#} W"), reason,
-            new() { ["writes"] = new[] { new { kind = PowerCap.Kind, key = PowerCap.Key(PowerRequestKind.Additional), value = mw.ToString(CultureInfo.InvariantCulture), create = true } } });
-    });
+        if (watts > MaxPowerW || watts < MinPowerW) return Out(new { success = false, error = $"the request is {MinPowerW}..{MaxPowerW} W" });
+        return await Asked(server, string.Create(CultureInfo.InvariantCulture,
+            $"Set the second board power request (F8) to {watts:0.#} W for a test: ending the test puts it back to the board's maximum, but once made the request itself cannot be deleted until the next restart."),
+            cancellationToken, () =>
+        {
+            uint mw = (uint)Math.Round(watts * 1000);
+            var f8 = card.WithDriver(PowerRequestsReader.Read).Additional;
+            string from = f8.Present ? string.Create(CultureInfo.InvariantCulture, $"{f8.Mw / 1000.0:0.#} W") : "absent";
+            return Trial(string.Create(CultureInfo.InvariantCulture, $"F8 power request {from} → {mw / 1000.0:0.#} W"), reason,
+                new() { ["writes"] = new[] { new { kind = PowerCap.Kind, key = PowerCap.Key(PowerRequestKind.Additional), value = mw.ToString(CultureInfo.InvariantCulture), create = true } } });
+        });
+    }
 
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +
         "(set_power_limit) is never kept, so this is how the daily one changes. 400-600 W on an RTX 5090 (575 W stock). Set it " +
         "before tuning the curve: the wall decides where on the curve heavy load runs. On the reference card the last 100 W " +
         "bought about 10 % frames (GTA V 78 → 86 fps from 500 to 600 W); 475-500 W is the efficient zone. While a trial runs " +
-        "under its own wall, the daily one goes on when the trial ends. Ask the person before calling this.")]
-    public string SetDailyPowerLimit([Description("The daily power limit, W.")] double watts) => Guard(() =>
+        "under its own wall, the daily one goes on when the trial ends. " + AsksItself)]
+    public async Task<string> SetDailyPowerLimit(McpServer server, [Description("The daily power limit, W.")] double watts, CancellationToken cancellationToken = default)
     {
-        if (watts > MaxPowerW || watts < MinPowerW) throw new ArgumentException($"the daily power limit is {MinPowerW}..{MaxPowerW} W");
-        uint mw = (uint)Math.Round(watts * 1000);
-        var r = card.Broker(BrokerRequest.OpProfile, "wall", mw.ToString(CultureInfo.InvariantCulture));
-        if (!r.Ok) return Reply(r);
-        var after = ReadAfter(out var unread);
-        return Out(new { success = true, daily_power_limit_w = mw / 1000.0, written = r.Written, power_limit_w = after?.Telemetry?.PowerEnforcedWatts, warning = unread });
-    });
+        if (watts > MaxPowerW || watts < MinPowerW) return Out(new { success = false, error = $"the daily power limit is {MinPowerW}..{MaxPowerW} W" });
+        return await Asked(server, string.Create(CultureInfo.InvariantCulture, $"Set your graphics card's daily power limit to {watts:0.#} W, now and after every start."),
+            cancellationToken, () =>
+        {
+            uint mw = (uint)Math.Round(watts * 1000);
+            var r = card.Broker(BrokerRequest.OpProfile, "wall", mw.ToString(CultureInfo.InvariantCulture));
+            if (!r.Ok) return Reply(r);
+            var after = ReadAfter(out var unread);
+            return Out(new { success = true, daily_power_limit_w = mw / 1000.0, written = r.Written, power_limit_w = after?.Telemetry?.PowerEnforcedWatts, warning = unread });
+        });
+    }
 
     [McpServerTool(Name = "watch", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Sample the card for a stretch while the person plays (twice a second) and summarize it: p10/p50/p90 of the core clock, " +

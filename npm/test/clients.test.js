@@ -132,3 +132,85 @@ test('a relay counts once: the worker under it is not an agent', () => {
   ];
   assert.deepStrictEqual(serversByAgent(rows, dir), [{ pid: 100, agent: 'Claude Code' }, { pid: 200, agent: 'OpenCode' }]);
 });
+
+// --lite (server 0.4.0): every dialect starts the server with it, and an update without the flag keeps the choice.
+test('--lite reaches the server in every dialect, and an update without it keeps it', () => {
+  const json = { cursor: { command: SERVER, args: ['--lite'] }, vscode: { type: 'stdio', command: SERVER, args: ['--lite'] },
+    copilot: { type: 'stdio', command: SERVER, args: ['--lite'], tools: ['*'] },
+    commandcode: { transport: 'stdio', enabled: true, command: SERVER, args: ['--lite'] } };
+  for (const [id, want] of Object.entries(json)) {
+    const c = byId(id), key = id === 'vscode' ? 'servers' : 'mcpServers';
+    fs.writeFileSync(c.file, JSON.stringify({ [key]: { theirs: { command: 'x' } } }));
+    c.add({ lite: true });
+    assert.deepStrictEqual(read(c.file)[key], { theirs: { command: 'x' }, clocktail: want }, id);
+    c.add();
+    assert.deepStrictEqual(read(c.file)[key].clocktail, want, `${id}: an update keeps --lite`);
+  }
+  // Set by hand next to the person's env: both survive.
+  const f = byId('cursor').file;
+  fs.writeFileSync(f, JSON.stringify({ mcpServers: { clocktail: { command: 'old.exe', args: ['--lite'], env: { A: '1' } } } }));
+  byId('cursor').add();
+  assert.deepStrictEqual(read(f).mcpServers.clocktail, { command: SERVER, args: ['--lite'], env: { A: '1' } });
+
+  const oc = byId('opencode');
+  fs.writeFileSync(oc.file, JSON.stringify({ mcp: { servers: { theirs: { type: 'local', command: ['x'] } } } }));
+  oc.add({ lite: true });
+  oc.add();
+  assert.deepStrictEqual(read(oc.file).mcp.servers.clocktail, { type: 'local', command: [SERVER, '--lite'] });   // V2
+  fs.writeFileSync(oc.file, JSON.stringify({ mcp: { rea: { type: 'local', command: ['x'], enabled: true } } }));
+  oc.add({ lite: true });
+  oc.add();
+  assert.deepStrictEqual(read(oc.file).mcp.clocktail, { type: 'local', command: [SERVER, '--lite'], enabled: true });   // V1
+
+  const t = byId('codex').file;
+  fs.writeFileSync(t, 'model = "o"\n');
+  byId('codex').add({ lite: true });
+  byId('codex').add();
+  assert.ok(fs.readFileSync(t, 'utf8').includes(`[mcp_servers.clocktail]\ncommand = '${SERVER}'\nargs = ['--lite']\n`));
+  fs.writeFileSync(t, '[mcp_servers.clocktail]\ncommand = "old"\nargs = ["--lite"]\n\n[mcp_servers.clocktail.env]\nA = "1"\n');
+  byId('codex').add();
+  const toml = fs.readFileSync(t, 'utf8');
+  assert.ok(toml.includes("args = ['--lite']"), 'a hand-written --lite is kept');
+  assert.match(toml, /\[mcp_servers\.clocktail\.env\]\nA = "1"/);
+  assert.strictEqual(toml.split('--lite').length, 2, 'once');
+});
+
+// --allow-reads: Claude Code stops asking before each read and still asks before every write.
+const READS = ['card_report', 'gpu_status', 'card_settings', 'limiter', 'curve_around', 'data_points', 'read_log', 'manual',
+  'list_presets', 'preview_daily', 'diagnostic_report', 'lab_status', 'live_read'].map(t => `mcp__clocktail__${t}`);
+
+test('--allow-reads adds the 13 reads once each, next to what was there; uninstall takes back only those', () => {
+  const { allowReads, disallowReads } = require('../bin/clocktail.js');
+  const f = h('.claude', 'settings.json');
+  assert.strictEqual(disallowReads(), false, 'no file: nothing to take back');
+  put(f, JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(git status)', READS[0]], deny: ['Read(.env)'] } }));
+  assert.strictEqual(allowReads(), true);
+  assert.strictEqual(allowReads(), false, 'twice: nothing more to add');
+  let d = read(f);
+  assert.strictEqual(d.model, 'opus');
+  assert.deepStrictEqual(d.permissions, { allow: ['Bash(git status)', ...READS], deny: ['Read(.env)'] });
+  assert.ok(!d.permissions.allow.some(r => r.includes('*')), 'never a wildcard: it would let the writes through');
+  assert.ok(fs.existsSync(f + '.clocktail.bak'), 'backed up first');
+
+  d.permissions.allow.push('mcp__clocktail__stock');   // the person's own rule for a write stays theirs
+  fs.writeFileSync(f, JSON.stringify(d));
+  assert.strictEqual(disallowReads(), true);
+  assert.deepStrictEqual(read(f), { model: 'opus', permissions: { allow: ['Bash(git status)', 'mcp__clocktail__stock'], deny: ['Read(.env)'] } });
+  assert.strictEqual(disallowReads(), false);
+
+  fs.writeFileSync(f, '{ // mine\n}');
+  assert.throws(() => allowReads(), /not plain JSON/);
+  assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ // mine\n}');
+});
+
+test('--allow-reads follows CLAUDE_CONFIG_DIR and creates the file when there is none', () => {
+  const { allowReads, disallowReads } = require('../bin/clocktail.js');
+  process.env.CLAUDE_CONFIG_DIR = h('claude-elsewhere');
+  try {
+    allowReads();
+    const f = h('claude-elsewhere', 'settings.json');
+    assert.deepStrictEqual(read(f), { permissions: { allow: READS } });
+    disallowReads();
+    assert.deepStrictEqual(read(f), { permissions: { allow: [] } });
+  } finally { delete process.env.CLAUDE_CONFIG_DIR; }
+});
