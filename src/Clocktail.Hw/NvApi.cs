@@ -39,6 +39,9 @@ public sealed unsafe class NvApi : INvApi, IDisposable
 
     private nint _lib;
     private delegate* unmanaged[Cdecl]<uint, nint> _query;
+    /// <summary>Interface pointers by ID, filled on first use under its own lock: the broker's telemetry sampler and its
+    /// request threads resolve interfaces at the same time (two GPUs, or a call that holds no GPU's lock), and a Dictionary
+    /// written from two threads at once can lose entries or corrupt itself (0.3.7).</summary>
     private readonly Dictionary<uint, nint> _cache = new();
 
     public static NvApi Load()
@@ -57,13 +60,19 @@ public sealed unsafe class NvApi : INvApi, IDisposable
         return api;
     }
 
+    /// <summary>NVAPI bound to a stand-in nvapi_QueryInterface, so the interface cache is tested without a driver.</summary>
+    internal static NvApi FromQuery(delegate* unmanaged[Cdecl]<uint, nint> query) => new() { _query = query };
+
     /// <summary>Returns the function pointer for an interface ID, or 0 when the driver does not expose it.</summary>
     public nint Query(uint id)
     {
-        if (_cache.TryGetValue(id, out var p)) return p;
-        p = _query(id);
-        _cache[id] = p;
-        return p;
+        lock (_cache)
+        {
+            if (_cache.TryGetValue(id, out var p)) return p;
+            p = _query(id);
+            _cache[id] = p;
+            return p;
+        }
     }
 
     /// <summary>Slot resolution for <see cref="NvClient"/>: 0 when the driver does not expose the interface.</summary>
