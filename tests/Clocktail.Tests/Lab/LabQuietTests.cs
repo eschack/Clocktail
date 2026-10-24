@@ -23,17 +23,18 @@ public class LabQuietTests
     }
 
     /// <summary>After a run that saw a driver reset, a job puts the daily profile back only once the service has recorded
-    /// the crash (the trial it wrote is out of force), or after 30 s.</summary>
+    /// the crash (the trial it wrote is out of force), or after 30 s; no answer from the service is not a record.</summary>
     [Fact]
     public void After_a_reset_a_job_waits_for_the_service_to_record_the_crash()
     {
-        var answers = new Queue<string?>(["2026-10-24T10:00:00", "2026-10-24T10:00:00", null]);
+        const string written = "2026-10-24T10:00:00";
+        var answers = new Queue<(string?, bool)>([(written, true), (null, false), (written, true), (null, true)]);
         var slept = TimeSpan.Zero;
-        Assert.True(LabJob.Recorded(() => answers.Dequeue(), "2026-10-24T10:00:00", TimeSpan.FromSeconds(30), t => slept += t));
-        Assert.Equal(TimeSpan.FromSeconds(2), slept);
+        Assert.True(LabJob.Recorded(() => answers.Dequeue(), written, TimeSpan.FromSeconds(30), t => slept += t));
+        Assert.Equal(TimeSpan.FromSeconds(3), slept);   // the service that did not answer once did not end the wait
 
         int asked = 0;
-        Assert.False(LabJob.Recorded(() => { asked++; return "2026-10-24T10:00:00"; }, "2026-10-24T10:00:00", LabJob.CrashRecordWait, _ => { }));
+        Assert.False(LabJob.Recorded(() => { asked++; return (null, false); }, written, LabJob.CrashRecordWait, _ => { }));
         Assert.Equal(31, asked);
     }
 }

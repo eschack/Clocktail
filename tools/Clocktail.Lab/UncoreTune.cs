@@ -421,6 +421,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
             stamp = TrialAt();
             var a1 = Run(a);
+            if (a1.DriverResets > 0) return Reset(a1, candidate: false);
             // lab_stop kills the measuring child: its run is inconclusive, and that is not the candidate's failure.
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
             if (Moved() is { } m1) return m1;
@@ -428,11 +429,13 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
             stamp = TrialAt();
             var b1 = Run(b);
+            if (b1.DriverResets > 0) return Reset(b1, candidate: true);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
             if (b1.Verdict == LabResult.Fail) return Crash(b1);
             if (Moved() is { } m2) return m2;
             if (b1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b1.Detail ?? b1.Verdict));
             var b2 = Run(b);
+            if (b2.DriverResets > 0) return Reset(b2, candidate: true);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
             if (b2.Verdict == LabResult.Fail) return Crash(b2);
             if (Moved() is { } m3) return m3;
@@ -440,6 +443,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
             stamp = TrialAt();
             var a2 = Run(a);
+            if (a2.DriverResets > 0) return Reset(a2, candidate: false);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
             if (Moved() is { } m4) return m4;
             var j = UncoreSearch.Judge(a1, b1, b2, a2);
@@ -464,14 +468,25 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         // that put the daily profile back) means the run measured something else.
         Comparison? Moved() => TrialAt() == stamp ? null : Done(Comparison.Unjudged, "the trial on the card changed during the measurement: the run is not the setting's");
 
+        // A bad bit with the GPU alive: recorded here, against the candidate.
         Comparison Crash(UncoreRun r)
         {
-            // A driver reset is the service's to record, and nothing more of the job's goes on until it has; a bad bit with
-            // the GPU alive is recorded here.
-            if (r.DriverResets is not > 0) Broker("crash", $"tune_uncore {b}: {r.Detail}");
-            else CrashRecorded(stamp);
+            Broker("crash", $"tune_uncore {b}: {r.Detail}");
             Thread.Sleep(5000);
             return Done(Comparison.Failed, r.Detail ?? "the candidate's run failed");
+        }
+
+        // A driver reset in any run ends the comparison. The service records the crash, against the setting on the card when
+        // the GPU stopped answering (the candidate's, or the incumbent's), only once it has given back what is held, which it
+        // cannot while this job holds judge.lock: the lock goes first, then the job waits for the record before anything of
+        // its own touches the card. Until 0.3.8 the job held the lock through its wait, the give-back waited on the job, and
+        // the next comparison's write took the trial off the record first (or the crash went unrecorded).
+        Comparison Reset(UncoreRun r, bool candidate)
+        {
+            lease?.Dispose();
+            CrashRecorded(stamp);
+            return candidate ? Done(Comparison.Failed, r.Detail ?? "the candidate's run ended in a driver reset")
+                : Done(Comparison.Unjudged, "a driver reset during the incumbent's run: " + (r.Detail ?? "it failed"));
         }
     }
 

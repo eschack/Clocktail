@@ -61,6 +61,31 @@ public class FlightRecorderTests
         Assert.Equal((T0.AddSeconds(39.5), T0.AddSeconds(40.2)), FlightRecorder.Hang(blocked, T0.AddSeconds(42)));
     }
 
+    /// <summary>The hang is the last episode before the reset: an earlier slow look, or the frozen tail of an earlier reset
+    /// still in the window, is not it, while a read that blocked through the TDR delay is; a stretch that ended long before
+    /// the reset is not this hang either. Taking the first one in the window blamed the trial before the one that hung.</summary>
+    [Fact]
+    public void The_hang_is_the_last_episode_before_the_reset_not_an_earlier_one()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i <= 60; i++) w.Add(S(i * 0.5, 2895, 910, 598.6, readMs: i == 10 ? 1200 : 5));   // 0 .. 30 s, one slow look at 5 s
+        for (int i = 0; i < 40; i++) w.Add(S(30.5 + i * 0.5, 3180, 1000, 126));                         // frozen from 30.5 s to 50 s
+        Assert.Equal((T0.AddSeconds(30), T0.AddSeconds(30.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
+
+        var x = new List<FlightSample>();
+        for (int i = 0; i < 6; i++) x.Add(S(i * 0.5, 2895, 910, 598.6));                      // 0 .. 2.5 s
+        for (int i = 0; i < 11; i++) x.Add(S(3 + i * 0.5, 3180, 1000, 126));                  // an earlier reset's frozen tail, 3 .. 8 s
+        for (int i = 0; i < 46; i++) x.Add(S(8.5 + i * 0.5, 1500, 800, 120, util: 30));       // answering again, 8.5 .. 31 s
+        x.Add(S(31.5, 2895, 910, 598.6, readMs: 20_000));                                     // blocked from 31.5 s until the reset
+        Assert.Equal((T0.AddSeconds(31), T0.AddSeconds(31.5)), FlightRecorder.Hang(x, T0.AddSeconds(52)));
+
+        var y = new List<FlightSample>();
+        for (int i = 0; i < 20; i++) y.Add(S(i * 0.5, 2895, 910, 598.6));                     // 0 .. 9.5 s
+        for (int i = 0; i < 21; i++) y.Add(S(10 + i * 0.5, 3180, 1000, 126));                 // frozen 10 .. 20 s
+        for (int i = 0; i < 40; i++) y.Add(S(20.5 + i * 0.5, 1500, 800, 120, util: 30));      // answering, 20.5 .. 40 s
+        Assert.Equal((T0.AddSeconds(43), T0.AddSeconds(43)), FlightRecorder.Hang(y, T0.AddSeconds(45)));
+    }
+
     /// <summary>S-4: the GPU looks hung while its readings sit frozen after power fell, or a read blocks; a steady pinned
     /// load or an old window is not a hang.</summary>
     [Fact]

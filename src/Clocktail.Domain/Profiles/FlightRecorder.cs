@@ -109,25 +109,38 @@ public sealed class FlightRecorder(TimeSpan keep)
             : null;
     }
 
+    /// <summary>The driver logs a reset once it has recovered, seconds after the hang it ends: a stretch of looks the GPU did
+    /// not answer that ended longer than this before the reset was seen is an earlier episode, not this hang.</summary>
+    public static readonly TimeSpan HangEndsWithin = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// When the GPU stopped answering in the hang a reset ends, and the last look before that at which it still answered,
     /// for whose crash it is: a trial written by <c>Stopped</c> was on the card when it hung (its write can be what hung
-    /// it), and one taken off the record after <c>Answered</c> was still on it. Read as <see cref="Pick"/> reads a hang:
-    /// the first blocked read or the first sample of the last frozen stretch (the recovered driver's live looks can follow
-    /// it), whichever came first; a stretch frozen from the window's first look is a steady load, as for <see cref="HungNow"/>.
-    /// Without either, both are <see cref="HangDetectAtLeast"/> before the reset was seen: the driver logs a reset only after
-    /// a hang at least that long.
+    /// it), and one taken off the record after <c>Answered</c> was still on it. The hang is the last run of looks the GPU did
+    /// not answer (a blocked read, or a look that ends a frozen stretch as <see cref="FrozenFrom"/> reads one; a stretch frozen
+    /// from the window's first look is a steady load, as for <see cref="HungNow"/>), one that reaches to within
+    /// <see cref="HangEndsWithin"/> of the reset (a blocked read counts to when it returned: it can block for the whole TDR
+    /// delay); its first look is <c>Stopped</c>. An earlier slow look, or the frozen tail of an earlier reset still in the
+    /// window, is not this hang. Without one, both are <see cref="HangDetectAtLeast"/> before the reset was seen: the driver
+    /// logs a reset only after a hang at least that long.
     /// </summary>
     public static (DateTimeOffset Answered, DateTimeOffset Stopped) Hang(IReadOnlyList<FlightSample> window, DateTimeOffset resetSeenAt)
     {
         var looks = window.Where(s => s.At <= resetSeenAt).ToList();
-        FlightSample? frozen = null;
-        for (int end = looks.Count; end > 0 && frozen == null; end--)
-            if (FrozenFrom(looks.GetRange(0, end)) is { } f && f.At != looks[0].At) frozen = f;
-        var blocked = looks.FirstOrDefault(s => s.ReadMs >= BlockedMs);
-        var first = frozen == null ? blocked : blocked == null || frozen.At <= blocked.At ? frozen : blocked;
-        if (first == null) return (resetSeenAt - HangDetectAtLeast, resetSeenAt - HangDetectAtLeast);
-        return (looks.LastOrDefault(s => s.At < first.At)?.At ?? first.At, first.At);
+        FlightSample? FrozenTo(int i) => FrozenFrom(looks.GetRange(0, i + 1)) is { } f && f.At != looks[0].At ? f : null;
+        bool Stuck(int i) => looks[i].ReadMs >= BlockedMs || FrozenTo(i) != null;
+        bool Near(int i) => resetSeenAt - (looks[i].At + TimeSpan.FromMilliseconds(looks[i].ReadMs)) <= HangEndsWithin;
+        int end = looks.Count - 1;
+        while (end >= 0 && Near(end) && !Stuck(end)) end--;   // the recovered driver's live looks come after the hang
+        if (end < 0 || !Near(end)) return (resetSeenAt - HangDetectAtLeast, resetSeenAt - HangDetectAtLeast);
+        int start = end;
+        while (true)
+        {
+            if (FrozenTo(start) is { } f) start = looks.FindIndex(s => s.At == f.At);   // back to its frozen stretch's first look
+            if (start > 0 && Stuck(start - 1)) { start--; continue; }
+            break;
+        }
+        return (start > 0 ? looks[start - 1].At : looks[start].At, looks[start].At);
     }
 
     /// <summary>A sample of the GPU under load: 60 % utilization, or (a light-load stress run, a 250 Hz square wave NVML
