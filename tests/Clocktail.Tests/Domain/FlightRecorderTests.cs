@@ -103,30 +103,17 @@ public class FlightRecorderTests
         Assert.Equal(T0.AddSeconds(51), FlightRecorder.Hang(railOnly, T0.AddSeconds(53))!.Value.Stopped);
     }
 
-    /// <summary>One reset logged as bursts seconds apart: a later burst whose window shows no hang of its own keeps the first's
-    /// times, so its crash is not recorded again against a trial written in between; one with a hang of its own, or one that
-    /// comes a minute later, is a reset of its own (2 s before it was seen, without a hang to go on).</summary>
+    /// <summary>On a GPU NVML reads, a look with no clock and no power is NVML failing during the reset even when the rail
+    /// still answers: it joins the frozen tail to the slow read of the driver coming back, as a look that read nothing does.</summary>
     [Fact]
-    public void A_later_burst_of_one_reset_keeps_its_hang()
+    public void Looks_NVML_failed_join_the_hang_though_the_rail_answered()
     {
         var w = new List<FlightSample>();
-        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));
-        for (int i = 0; i < 60; i++) w.Add(S(20.5 + i * 0.5, 3180, 1000, 126));  // frozen to 50 s
-        var hangs = new Clocktail.Domain.Broker.ResetHangs();
-        var first = hangs.For("gpu-A", w, T0.AddSeconds(51));
-        Assert.Equal((T0.AddSeconds(19.5), T0.AddSeconds(20.5)), first);
-        for (int i = 0; i < 30; i++) w.Add(S(51 + i * 0.5, 1200, 750, 90, util: 5));   // answering again
-        Assert.Equal(first, hangs.For("gpu-A", w, T0.AddSeconds(66)));          // 15 s later: the same reset
-        Assert.Equal((T0.AddSeconds(158), T0.AddSeconds(158)), hangs.For("gpu-A", w, T0.AddSeconds(160)));   // a reset of its own
-        Assert.Equal((T0.AddSeconds(8), T0.AddSeconds(8)), hangs.For("gpu-B", [], T0.AddSeconds(10)));
-
-        // Within the minute but after work since (the next candidate measured, then hung under a 2 s TDR delay that leaves no
-        // frozen stretch): a crash of that work, not the first one again.
-        var loop = new Clocktail.Domain.Broker.ResetHangs();
-        var v = new List<FlightSample>(w.Take(100));
-        loop.For("gpu-A", v, T0.AddSeconds(51));
-        for (int i = 0; i < 40; i++) v.Add(S(55 + i * 0.5, 2895, 910, 598.6));   // loaded again, 55 .. 74.5 s
-        Assert.Equal((T0.AddSeconds(75), T0.AddSeconds(75)), loop.For("gpu-A", v, T0.AddSeconds(77)));
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));        // 0 .. 19.5 s
+        for (int i = 0; i < 52; i++) w.Add(S(20.5 + i * 0.5, 3180, 1000, 126));  // frozen 20.5 .. 46 s
+        for (int i = 0; i < 8; i++) w.Add(new FlightSample(T0.AddSeconds(46.25 + i * 0.25), 5, null, 1000, null, null, null, null));   // NVML failing, the rail read
+        w.Add(S(48.25, 1200, 750, 90, util: 5, readMs: 1500));                    // the driver coming back, slowly
+        Assert.Equal((T0.AddSeconds(19.5), T0.AddSeconds(20.5)), FlightRecorder.Hang(w, T0.AddSeconds(51)));
     }
 
     /// <summary>The hang is the last episode before the reset: an earlier slow look, or the frozen tail of an earlier reset

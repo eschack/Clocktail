@@ -565,20 +565,16 @@ public sealed class BrokerDispatcher
             {
                 // Right after a driver reset, before the GPU is idle: the limit went back to 575 W, and stock clocks under
                 // the kept limit are still a safe state. A trial in force now was written after the reset's give-back (the
-                // crash record kept it, CrashedAt), and nothing of it is touched: under a wall of its own nothing is written,
-                // and under none it runs under the daily wall, as its record says, so that alone is written (the whole
-                // profile's power run would put its fan duty and current limits back too).
+                // crash record kept it, CrashedAt), and nothing of it is touched: under a wall of its own nothing is written;
+                // under none it runs under the daily wall, as its record says, which goes on as the profile's power run puts
+                // it (bound to its VBIOS, the firmware's board limit made to follow) without putting the trial's own cells
+                // back (its fan duty, its current limits).
                 if (profile is null or { Suspended: true }) return Ok(new { success = true, path, profile, applied = Array.Empty<object>() });
-                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial is { } inForce)
-                {
-                    if (inForce.PowerMw != null || profile.Writes.FirstOrDefault(w => w.Kind == PowerCap.Kind && w.Key == PowerCap.Key(PowerRequestKind.Ordinary)) is not { } daily)
-                        return Ok(new { success = true, skipped = "a trial began after the crash, under a wall of its own: the agent running it decides", profile });
-                    var put = Dispatch(WriteOf(target, daily.Kind, daily.Key, daily.Value));
-                    Log(target, "Driver reset: the daily power limit put back under the trial in force", Writes(put));
-                    return new BrokerResponse(put.Ok, put.Error, Element(new { success = put.Ok, path, profile, applied = AppliedOf(put) }), put.Code);
-                }
-                var r = ApplyProfile(target, profile, path, only: w => w.Kind == PowerCap.Kind);
-                Log(target, "Driver reset: power limit put back first", Writes(r));
+                var inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
+                if (inForce?.PowerMw != null)
+                    return Ok(new { success = true, skipped = "a trial began after the crash, under a wall of its own: the agent running it decides", profile });
+                var r = ApplyProfile(target, profile, path, only: w => w.Kind == PowerCap.Kind, trialStays: inForce != null);
+                Log(target, inForce != null ? "Driver reset: the daily power limit put back under the trial in force" : "Driver reset: power limit put back first", Writes(r));
                 return r;
             }
             case "crashed":
@@ -1458,10 +1454,11 @@ public sealed class BrokerDispatcher
     /// again without that group, which puts any cell of it this broker holds back to its original, and the other groups go
     /// on as kept. The card is then never left with half of a run, the curve set aside for a memory write and never
     /// written back. The answer fails, names each group left at stock and why (not_applied), and carries every write.
+    /// <paramref name="trialStays"/>: under a trial that stays in force, nothing held is put back first.
     /// </summary>
-    private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null)
+    private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null, bool trialStays = false)
     {
-        var (r, failed) = ApplyOnce(target, profile, path, only);
+        var (r, failed) = ApplyOnce(target, profile, path, only, trialStays);
         if (failed == null || profile == null) return r;
         var runs = new List<BrokerResponse> { r };
         var left = new List<(string Group, List<string> Cells, string Why)>();
@@ -1472,7 +1469,7 @@ public sealed class BrokerDispatcher
             bool In(ProfileWrite w) => DailyProfile.Group(w.Kind, w.Key) == group;
             left.Add((group, [.. writing.Writes.Where(In).Select(w => $"{w.Kind}/{w.Key}")], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
             writing = writing with { Writes = [.. writing.Writes.Where(w => !In(w))] };
-            (r, failed) = ApplyOnce(target, writing, path, only);
+            (r, failed) = ApplyOnce(target, writing, path, only, trialStays);
             runs.Add(r);
         }
         // The later runs write again what the first one already put on; only what they changed is worth a line.
@@ -1501,7 +1498,7 @@ public sealed class BrokerDispatcher
 
     /// <summary>One run of <see cref="ApplyProfile"/>: stops at the first write that fails, and names it when it is one of
     /// the profile's own (a held cell that did not go back is not: nothing to leave out, the run just stops).</summary>
-    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only)
+    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only, bool trialStays = false)
     {
         var applied = new List<JsonElement>();
         // A profile kept on another VBIOS goes on only when someone loads or keeps one (which binds it to this VBIOS):
@@ -1509,8 +1506,9 @@ public sealed class BrokerDispatcher
         string? skipped = profile?.OtherVbios(target.Vbios);
         var writing = skipped != null ? null : profile;
         // A trial's current limits and fixed fans are never part of a profile, nor anything else a trial set unless the
-        // profile writes it too: whatever puts the whole profile on puts them back first.
-        foreach (var held in CellsToPutBack(target, writing, whole: only == null).ToList())
+        // profile writes it too: whatever puts the whole profile on puts them back first (not under a trial that stays).
+        IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null);
+        foreach (var held in putBack.ToList())
         {
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {

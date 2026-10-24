@@ -203,7 +203,6 @@ static int Run()
     // more over 18 s, each of which saved a trace: eight identical lines in one second, and two saves of one file that
     // collided); the first of a burst saves the trace and signals the responder, which answers a burst once anyway.
     var bursts = new ResetBursts(ResetBursts.DefaultQuiet);
-    var hangs = new ResetHangs();   // when each GPU stopped answering, a later burst of the same reset keeping the first's
     void OnReset(string evidence)
     {
         var seen = DateTimeOffset.Now;
@@ -218,7 +217,12 @@ static int Run()
             {
                 foreach (var (id, window) in windows)
                 {
-                    hung[id] = hangs.For(id, window, seen);   // whose crash it is: the trial on the card then
+                    // Whose crash it is: the trial on the card when the GPU stopped answering; with no hang in the window, 2 s
+                    // before the reset was seen (the driver logs one only after a hang at least that long). A later burst of
+                    // one reset is answered as a reset of its own: kept apart, a trial written between them can take a crash
+                    // it did not cause; merged, a new trial's own crash (at light load or idle, which leaves no hang to find)
+                    // would go unrecorded, the worse of the two.
+                    hung[id] = FlightRecorder.Hang(window, seen) ?? (seen - FlightRecorder.HangDetectAtLeast, seen - FlightRecorder.HangDetectAtLeast);
                     var point = FlightRecorder.Pick(window, seen);
                     try
                     {

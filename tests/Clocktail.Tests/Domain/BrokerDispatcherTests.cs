@@ -1453,6 +1453,29 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(("NVVDD 350 A", (uint?)null), (TrialNow()!.Change, TrialNow()!.PowerMw));
     }
 
+    /// <summary>A daily profile kept on another VBIOS does not go on by itself (S14), under a kept trial either: after the
+    /// reset the card stays at the driver's wall, and the trial's own NVVDD limit stays.</summary>
+    [Fact]
+    public void A_profile_kept_on_another_VBIOS_does_not_go_on_under_a_kept_trial()
+    {
+        var d = Power(vbios: "98.02.30.00.01");
+        CurrentLimitsFixture.Install();
+        new DailyProfile([new ProfileWrite(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), "560000")], _host.Now)
+            .On("98.02.2E.00.01", null).Save(DailyProfile.PathBeside(_journal.Path));
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        var stopped = _host.Now.AddMinutes(2);
+        _host.Now = stopped.AddSeconds(30);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        _host.Now = stopped.AddSeconds(31);
+        Assert.True(d.FromClient(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        Assert.True(d.Dispatch(Crashed(stopped)).Ok);
+        d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply-power"));
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Equal("NVVDD 350 A", TrialNow()!.Change);
+    }
+
     /// <summary>Whether the give-back took a trial off the card is which trial was in force when it ran, not a comparison of
     /// clock times: a clock set back after the give-back does not make a trial written after it look given back.</summary>
     [Fact]

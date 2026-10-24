@@ -120,9 +120,9 @@ public sealed class FlightRecorder(TimeSpan keep)
     /// not answer (a blocked read, or a look that ends a frozen stretch as <see cref="FrozenFrom"/> reads one; a stretch frozen
     /// from the window's first look is a steady load, as for <see cref="HungNow"/>), one that reaches to within
     /// <see cref="HangEndsWithin"/> of the reset (a blocked read counts to when it returned: it can block for the whole TDR
-    /// delay); looks that read nothing at all, not even the rail's voltage (the driver failing every read during the reset),
-    /// join stuck looks on either side of them across up to <see cref="HangEndsWithin"/>, but start no hang (a GPU with
-    /// nothing to read reads nothing all the time). Its first look is <c>Stopped</c>.
+    /// delay); looks the driver answered nothing to during the reset (no clock and no power on a GPU NVML reads at other
+    /// looks; nothing at all, not even the rail's voltage, on one it never reads) join stuck looks on either side of them
+    /// across up to <see cref="HangEndsWithin"/>, but start no hang. Its first look is <c>Stopped</c>.
     /// An earlier slow look, or the frozen tail of an earlier reset still in the window, is not this hang. Null when there is
     /// none.
     /// </summary>
@@ -131,7 +131,8 @@ public sealed class FlightRecorder(TimeSpan keep)
         var looks = window.Where(s => s.At <= resetSeenAt).ToList();
         FlightSample? FrozenTo(int i) => FrozenFrom(looks.GetRange(0, i + 1)) is { } f && f.At != looks[0].At ? f : null;
         bool Stuck(int i) => looks[i].ReadMs >= BlockedMs || FrozenTo(i) != null;
-        bool Unread(int i) => looks[i] is { ClockMhz: null, CoreMv: null, Watts: null };
+        bool nvml = looks.Any(s => s.ClockMhz != null || s.Watts != null);   // NVML reads this GPU at some look
+        bool Unread(int i) => nvml ? looks[i] is { ClockMhz: null, Watts: null } : looks[i] is { ClockMhz: null, CoreMv: null, Watts: null };
         bool Near(int i) => resetSeenAt - (looks[i].At + TimeSpan.FromMilliseconds(looks[i].ReadMs)) <= HangEndsWithin;
         int end = looks.Count - 1;
         while (end >= 0 && Near(end) && !Stuck(end)) end--;   // the recovered driver's looks, live or unread, come after the hang
