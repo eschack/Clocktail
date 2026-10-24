@@ -38,7 +38,7 @@ public class DriverResetResponderTests
         Assert.All(_asked, a => Assert.Equal(BrokerRequest.OpRecover, a.Op));
         Assert.Equal(BrokerRequest.RecoverAfterDriverReset, _asked[0].Kind);
         Assert.Equal(BrokerRequest.RecoverAfterDriverReset, _asked[1].Kind);   // the first never reached recovery
-        Assert.Null(_asked[2].Kind);                                           // the second did: recorded once
+        Assert.Equal(BrokerRequest.RecoverAfterDriverResetAgain, _asked[2].Kind);   // the second did: recorded once, and still the reset's (the trial is "crashed"'s)
         Assert.Contains("vf/core Written", _log[^4]);
         // The crash on record and the limit at once, the profile once idle.
         Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));

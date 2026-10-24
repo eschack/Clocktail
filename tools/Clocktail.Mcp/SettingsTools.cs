@@ -574,6 +574,8 @@ public sealed partial class SettingsTools(Card card)
                 at = t.GetProperty("At").GetDateTimeOffset(),
                 change = Text(t, "Change"),
                 marked_stable = t.TryGetProperty("Marked", out var m) && m.ValueKind == JsonValueKind.True,
+                // How it ended when the card was held busy at its end: still on the card until the put-back is asked again.
+                ended_waiting_for_the_card = Text(t, "Ending"),
                 power_limit_w = Number(t, "PowerMw", 1000),
                 nvvdd_limit_a = Number(t, "NvvddMa", 1000),
                 msvdd_limit_a = Number(t, "MsvddMa", 1000),

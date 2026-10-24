@@ -53,6 +53,13 @@ public sealed record BrokerRequest(
     /// card through the reset and hangs it again.
     /// </summary>
     public const string RecoverAfterDriverReset = "driver-reset";
+    /// <summary>
+    /// The same recovery asked again (the service's retry once a first attempt reached recovery and put the reset on
+    /// record): given back without a second crash-log entry. Both kinds are the service's own and leave the trial in force
+    /// to the "crashed" step that follows them (a client cannot send them); a recovery a client asks for takes the card off
+    /// the trial, which then leaves the record (since 0.3.7).
+    /// </summary>
+    public const string RecoverAfterDriverResetAgain = "driver-reset-again";
     public const string OpPower = "power";
     public const string OpClock = "clock";
     public const string OpWrite = "write";
@@ -61,8 +68,8 @@ public sealed record BrokerRequest(
     /// <summary>
     /// The daily profile (<see cref="Clocktail.Domain.Profiles.DailyProfile"/>), by <see cref="Kind"/>: "show"; "keep"
     /// saves what this broker holds now as the profile (<see cref="Value"/>, optional: why, for the history and the
-    /// log), but once a profile is kept only the Core curve is taken from the card: its power limit and memory offset
-    /// stay as kept, and a trial's lowered wall goes back to the kept one at once; "off" suspends it; "apply" writes it unless suspended (<see cref="Value"/>: why, for the log); "load" ends a
+    /// log; never a trial that crashed and is still on the card), but once a profile is kept only the Core curve is taken from the card: its power limit and memory offset
+    /// stay as kept, and a trial's lowered wall goes back to the kept one at once; "off" suspends it and writes nothing; "stock" suspends it and puts the card back to stock in the same operation (its answer's "recover"); "apply" writes it unless suspended (<see cref="Value"/>: why, for the log); "load" ends a
     /// suspension and writes it; "preset" makes a shipped preset or a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
     /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (right after a driver reset, which puts the
@@ -81,10 +88,11 @@ public sealed record BrokerRequest(
     /// survived; power_mw first writes a board power limit for the trial (a lower wall samples the curve lower down; a
     /// curve trial after it runs under the same wall), keep_curve records the curve on the card without writing it; "note" puts the
     /// agent's own words in the tuning log (<see cref="Value"/>: the text); "stable" records the trial as stable
-    /// (<see cref="Value"/>: a note); "crash" records it as a crash the broker could not see (the game fell to the
+    /// (<see cref="Value"/>: a note; not one that has ended, its put-back held off); "crash" records it as a crash the broker could not see (the game fell to the
     /// desktop with no driver reset; <see cref="Value"/>: what the player saw) and puts the daily profile back; "release"
     /// hands back what only a watching agent may hold (a fixed fan duty, lowered current limits) when the agent has gone,
-    /// the rest of the trial staying in force; "end" closes the trial as survived, ends the session and puts the daily profile back. A crash while a trial is in force is recorded by the "crashed" step of <see cref="OpProfile"/>, at once,
+    /// the rest of the trial staying in force; "quiet" answers, as "show" does, once no operation is in flight (a measurement
+    /// that has just taken judge.lock asks it before it starts); "end" closes the trial as survived, ends the session and puts the daily profile back. A trial leaves the record only once the card has left it. A crash while a trial is in force is recorded by the "crashed" step of <see cref="OpProfile"/>, at once,
     /// and "after-reset" puts the daily profile back unchanged once the GPU is idle. Not itself a write: "try" and "end" write through the ordinary ops.
     /// </summary>
     public const string OpExperiment = "experiment";

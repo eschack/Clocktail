@@ -52,7 +52,7 @@ internal sealed class CliContext
         BrokerClient.TryCall(req, connectMs: 700)
         ?? (req.IsWrite && Elevation.NeedsElevationHere()
             ? new BrokerResponse(false, "the Clocktail broker did not answer and this process is not elevated; nothing was written (start or reinstall the broker)", Code: BrokerCode.BrokerUnreachable)
-            : Local().Dispatch(req));
+            : Local().FromClient(req));
 
     public BrokerRequest WriteRequest(string kind, string key, string value, bool takeOver = false, bool allowCreate = false, string[]? enableSlots = null) =>
         new(BrokerRequest.OpWrite, StableId, Kind: kind, Key: key, Value: value, AllowCreate: allowCreate, TakeOver: takeOver, EnableSlots: enableSlots);
@@ -88,7 +88,10 @@ internal sealed class CliContext
         var host = new SystemHost();
         var dir = Path.Combine(_stateRoot, StableId);
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        Func<string?> judge = () => JudgeLock.BusyReason(JudgeLock.Candidates(Path.Combine(_stateRoot, "judge.lock"), localAppData), host, out _);   // looked up per ask: a packaged copy may appear later
+        // Looked up per ask: a packaged copy may appear later. A run that waits for the service's operations ("quiet") cannot
+        // ask this process, so here it is judged as one that does not: every write after it took the lock stands down.
+        var judge = BrokerDispatcher.Judge(() => JudgeLock.Live(JudgeLock.Candidates(Path.Combine(_stateRoot, "judge.lock"), localAppData), host, out _) is { } run
+            ? run with { Waits = false } : null);
         var journal = new OwnershipJournal(Path.Combine(dir, "ownership.json"), host, StableId);
         var sentinel = new ApplySentinel(Path.Combine(dir, "apply.lock"), judge);   // asked again once the sentinel is on disk
         return _local = new BrokerDispatcher(Hw, new OneGpu(this, journal, sentinel), host, canWrite: !Elevation.NeedsElevationHere(), judge);

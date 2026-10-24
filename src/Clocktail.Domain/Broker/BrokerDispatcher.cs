@@ -47,7 +47,8 @@ public interface IGpuTargets
 /// and leave a black screen no one can attribute;</item>
 /// <item>a write refuses while a stability run holds its lock, so an automatic write never changes the state
 /// another tool is measuring: looked at before the window opens, and again by the sentinel once this program's
-/// own lock is on disk, so two tools that each looked and saw nothing cannot both go ahead;</item>
+/// own lock is on disk, so two tools that each looked and saw nothing cannot both go ahead; an operation already
+/// writing finishes first when the run waits for it (<see cref="Judged"/>);</item>
 /// <item>marks from before this boot are settled (<see cref="CrashLog.SettleReboot"/>) before any op reads or
 /// drops them, so the one record of a write that took the machine down is kept whichever op comes first.</item>
 /// </list>
@@ -100,26 +101,105 @@ public sealed class BrokerDispatcher
     /// holder's own writes, nested ones too, pass the lock it holds.</summary>
     public static readonly AsyncLocal<string?> CurrentLease = new();
 
+    /// <summary>
+    /// The lease of the service's own safety action, the fan guard's fans back to the curve (a card at 85 °C, or one whose
+    /// temperature cannot be read, under a fixed fan duty): it passes a measurement's judge.lock, as the holder's own writes
+    /// do. A run then measures a card whose fans changed under it; the lab sees its trial change and judges nothing, and
+    /// stress_test's crash still goes to the same settings. Since 0.3.7 stress_test holds the lock too, and its runs are what
+    /// the fan guard was made for: an agent blocked in a run cannot watch the temperature.
+    /// </summary>
+    public const string SafetyLease = "clocktail-safety";
+
+    /// <summary>
+    /// The judge's word on the operation in flight (<see cref="JudgeNow"/>), null outside one. Refused at a write, the
+    /// operation writes nothing after it, even if the lock is gone by its next write. Let through, it is admitted: a run
+    /// that takes judge.lock after that and waits for it (<see cref="JudgeLock.Info.Waits"/>: "quiet" is answered once no
+    /// operation is in flight) lets it finish (<see cref="Judge"/>). Until 0.3.7 a run starting in the
+    /// middle of a put-back left the card part back and part on the trial, with the whole trial kept in force. A run that
+    /// does not wait (StabilityLab, which looks for apply.lock before it starts; a Clocktail run from before 0.3.7) has every
+    /// write after it stand down, as before: the operation stops where it is.
+    /// </summary>
+    private static readonly AsyncLocal<Verdict?> Judged = new();
+
+    /// <summary>A judge's word on one operation: <see cref="Busy"/> why it may not write (null: it may);
+    /// <see cref="Sure"/> once a write of it was let through.</summary>
+    private sealed record Verdict(string? Busy, bool Sure = false)
+    {
+        public static readonly Verdict Open = new(Busy: null), Admitted = new(Busy: null, Sure: true);
+    }
+
+    /// <summary>
+    /// The judge of every write and of the sentinel's second look, from the run holding judge.lock now (<paramref name="live"/>,
+    /// null when none): its own writes pass (they carry its RunId as their lease: the lab writes its next candidate while it
+    /// holds the card), so do the fan guard's (<see cref="SafetyLease"/>), and so does the rest of an operation let through
+    /// before the run took the lock, when the run waits for it (<see cref="Judged"/>). Anything else waits: the run's reason.
+    /// </summary>
+    public static Func<string?> Judge(Func<JudgeLock.Info?> live) => () =>
+    {
+        if (live() is not { } run) return null;
+        string? lease = CurrentLease.Value;
+        if (run.RunId != null && run.RunId == lease || lease == SafetyLease) return null;
+        if (run.Waits && Judged.Value is { Sure: true }) return null;
+        return JudgeLock.Reason(run);
+    };
+
+    /// <summary>Set while a client's request is in flight (<see cref="FromClient"/>).</summary>
+    private static readonly AsyncLocal<bool> ClientAsks = new();
+
+    /// <summary>
+    /// A client's request: over the pipe, or the CLI's in-process. The service's own requests are not a client's: the fan
+    /// guard's "fans-back" and the lease it runs under (<see cref="SafetyLease"/>) pass a measurement's judge.lock, and the
+    /// recoveries after a driver reset leave the trial to the "crashed" step after them, so a client sending any of these is
+    /// refused. A recovery a client asks for takes the card off the trial in force, which then leaves the record
+    /// (<see cref="DispatchOne"/>).
+    /// </summary>
+    public BrokerResponse FromClient(BrokerRequest req)
+    {
+        if (req.Lease == SafetyLease || req.Op == BrokerRequest.OpExperiment && req.Kind == "fans-back"
+            || req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain)
+            return Fail("that request is the service's own (its fan guard's, or its answer to a driver reset); a client cannot send it", BrokerCode.BadRequest);
+        bool prior = ClientAsks.Value;
+        ClientAsks.Value = true;
+        try { return Dispatch(req); }
+        finally { ClientAsks.Value = prior; }
+    }
+
     public BrokerResponse Dispatch(BrokerRequest req)
     {
         string? prior = CurrentLease.Value;
-        if (req.Lease != null) CurrentLease.Value = req.Lease;
-        bool entered = false;
+        var judged = Judged.Value;
+        if (req.Lease is { } lease && lease != SafetyLease) CurrentLease.Value = lease;   // SafetyLease: HandBack's to set, not a request's
+        bool entered = false, top = false;
         try
         {
             if (Changes(req))
             {
+                top = !Monitor.IsEntered(_operation);   // not one of an operation's own requests, which come back through here
                 if (!Monitor.TryEnter(_operation, WindowWait))
                     return Fail($"another operation has held the card for over {WindowWait.TotalSeconds:0} s; nothing was done, try again", BrokerCode.WindowBusy);
                 entered = true;
+                if (top) Judged.Value = Verdict.Open;
             }
-            return DispatchOne(req);
+            return DispatchOne(req, top);
         }
         finally
         {
             if (entered) Monitor.Exit(_operation);
             CurrentLease.Value = prior;
+            if (top) Judged.Value = judged;
         }
+    }
+
+    /// <summary>Why the operation in flight may not write now (a stability run measuring), or null: the judge, asked at
+    /// every write; a refusal is kept for the rest of the operation, and a write let through admits it (<see cref="Judged"/>).
+    /// The fan guard's put-backs pass (<see cref="SafetyLease"/>).</summary>
+    private string? JudgeNow()
+    {
+        if (CurrentLease.Value == SafetyLease) return null;
+        if (Judged.Value is { Busy: { } refused }) return refused;
+        string? busy = _judgeBusyReason();
+        if (Judged.Value != null) Judged.Value = busy == null ? Verdict.Admitted : new Verdict(busy);
+        return busy;
     }
 
     /// <summary>Whether the request can change the card, the profile or the experiment: everything but the reads.</summary>
@@ -128,7 +208,7 @@ public sealed class BrokerDispatcher
         || req.Op == BrokerRequest.OpProfile && req.Kind is not ("show" or "preview" or "saved")
         || req.Op == BrokerRequest.OpExperiment && req.Kind is not ("show" or "alive");
 
-    private BrokerResponse DispatchOne(BrokerRequest req)
+    private BrokerResponse DispatchOne(BrokerRequest req, bool top)
     {
         try
         {
@@ -142,6 +222,15 @@ public sealed class BrokerDispatcher
             var target = _gpus.Resolve(req.GpuId);
             if (target == null)
                 return Fail(req.GpuId == null ? "no GPU is available" : $"no GPU with id '{req.GpuId}'", BrokerCode.NoGpu);
+
+            // A recovery a client asks for on its own (the CLI's --recover, a write session given back after a failed step, a
+            // 0.3.6 client's stock: "off", then a recovery) takes the card off any trial in force, so the trial leaves the
+            // record once it landed, as every other way off the card does (Leave). Not one inside an operation (that
+            // operation's Leave is around it), nor the service's own: after a driver reset "crashed" records the trial's
+            // crash, and at start the leftovers' recovery may come before a reset of the hang is in the System log, so the
+            // trial waits for the idle-gated daily profile. Until 0.3.7 a recovery left the trial on record over a card at stock.
+            if (top && ClientAsks.Value && req.Op == BrokerRequest.OpRecover)
+                return Leave(target, Experiment.Survived, "the card went back to stock", _ => { var r = Dispatch(req); return (r, r); }).Answer;
 
             if (!req.IsWrite)
                 return req.Op switch
@@ -159,7 +248,7 @@ public sealed class BrokerDispatcher
                 return Fail($"another write has held the window for over {WindowWait.TotalSeconds:0} s; nothing was written, try again", BrokerCode.WindowBusy);
             try
             {
-                if (_judgeBusyReason() is { } busy) return Fail(JudgeBusy(busy), BrokerCode.JudgeBusy);
+                if (JudgeNow() is { } busy) return Fail(JudgeBusy(busy), BrokerCode.JudgeBusy);
                 Settle(target);
                 return req.Op switch
                 {
@@ -175,7 +264,9 @@ public sealed class BrokerDispatcher
         }
         catch (StandDownException e)
         {
-            return Fail(JudgeBusy(e.Reason), BrokerCode.JudgeBusy);   // the lock appeared after the first look; the sentinel saw it, nothing was written
+            // The lock appeared after the first look; the sentinel saw it, nothing was written, and nothing more of the operation will be.
+            if (Judged.Value != null) Judged.Value = new Verdict(e.Reason);
+            return Fail(JudgeBusy(e.Reason), BrokerCode.JudgeBusy);
         }
         catch (Exception e) when (e is ArgumentException or FormatException or OverflowException)
         {
@@ -301,7 +392,11 @@ public sealed class BrokerDispatcher
             case "keep":
             {
                 var (writes, _) = KeepWrites(target, profile);
-                bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
+                var inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
+                bool trialWall = inForce?.PowerMw != null;
+                // A trial that crashed but is still on the card (its put-back held off) is never what a keep takes from it.
+                if (inForce?.Ending == Experiment.Crash)
+                    return Fail($"the trial on the card crashed ({inForce.Change}) and waits for the card to be free to go back: a crash is not kept; back_to_daily", BrokerCode.CannotWrite);
                 if (writes.Count == 0) return Fail("nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
                 var trialKept = CloseTrial(target, Experiment.Stable, "kept as the daily profile");
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
@@ -331,18 +426,41 @@ public sealed class BrokerDispatcher
                 return Ok(new { success = true, saved = true, switched = true, path, profile = kept });
             }
             case "off":
-                CloseTrial(target, Experiment.Survived, "the card went back to stock");
+                // Suspends the daily profile and writes nothing (the person's CLI: stock at the next start or reset). The card
+                // is as it was, so a trial in force stays in force; until 0.3.7 "off" closed it while the card still ran it.
                 if (profile == null) return Ok(new { success = true, path, profile });
                 profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
                 profile.Save(path);
-                Log(target, "Daily profile suspended", ["The card is at stock until the daily profile is loaded or kept again"]);
+                Log(target, "Daily profile suspended", ["The card is at stock from the next start or driver reset, until the daily profile is loaded or kept again"]);
                 return Ok(new { success = true, path, profile });
+            case "stock":
+            {
+                // The card to stock now (the agent's stock, an uninstall): the daily profile suspended so nothing puts it back,
+                // and what this broker holds back to its original in the same operation, so the trial in force leaves the
+                // record once that landed (Leave). Until 0.3.7 stock was "off", which closed the trial, then a recovery of
+                // its own: a recovery a stability run held off left the trial on the card and off the record.
+                if (profile != null)
+                {
+                    profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
+                    profile.Save(path);
+                    Log(target, "Daily profile suspended", ["The card is at stock until the daily profile is loaded or kept again"]);
+                }
+                var r = Leave(target, Experiment.Survived, "the card went back to stock", _ =>
+                {
+                    var rec = Dispatch(new BrokerRequest(BrokerRequest.OpRecover, target.StableId));
+                    return (rec, rec);
+                }).Answer;
+                return new BrokerResponse(r.Ok, r.Error, Element(new { success = r.Ok, path, profile, recover = r.Result }), r.Code);
+            }
             case "apply":
             {
                 // Value: why, for the log ("the broker started", an agent's back_to_daily).
-                CloseTrial(target, Experiment.Survived, "the daily profile went back on");
-                var r = ApplyProfile(target, profile, path);
-                Log(target, "Daily profile applied", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                var r = Leave(target, Experiment.Survived, "the daily profile went back on", _ =>
+                {
+                    var a = ApplyProfile(target, profile, path);
+                    return (a, a);
+                }).Answer;
+                Log(target, "Daily profile applied",[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "resume":
@@ -362,10 +480,13 @@ public sealed class BrokerDispatcher
             {
                 // The tray's "Load": the person puts the profile back on, so a suspension ends here, not at the next keep.
                 if (profile == null) return Fail("no daily profile is kept; nothing to load", BrokerCode.CannotWrite);
-                CloseTrial(target, Experiment.Survived, "the daily profile went back on");
                 profile = profile.Noted(_host.Now, "loaded by request").On(target.Vbios, target.Driver) with { Suspended = false };
                 profile.Save(path);
-                var r = ApplyProfile(target, profile, path);
+                var r = Leave(target, Experiment.Survived, "the daily profile went back on", _ =>
+                {
+                    var a = ApplyProfile(target, profile, path);
+                    return (a, a);
+                }).Answer;
                 Log(target, "Daily profile loaded", Writes(r));
                 return r;
             }
@@ -377,11 +498,10 @@ public sealed class BrokerDispatcher
                 if (preset == null) return LoadSaved(target, req.Value, profile, path);
                 if (!preset.Fits(target.Name))
                     return Fail($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}. Nothing was written", BrokerCode.CannotWrite);
-                CloseTrial(target, Experiment.Survived, $"preset '{preset.Name}' went on");
                 var loaded = new DailyProfile(DailyProfile.InWriteOrder(preset.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
                     .Noted(_host.Now, $"preset '{preset.Name}' loaded");
-                var r = ApplyProfile(target, loaded, path);
-                if (!r.Ok) return NotLoaded(target, $"preset '{preset.Name}'", r, profile, path);
+                var r = Leave(target, Experiment.Survived, $"preset '{preset.Name}' went on", _ => Loading(target, $"preset '{preset.Name}'", loaded, profile, path)).Answer;
+                if (!r.Ok) return r;
                 loaded.Save(path);
                 Log(target, $"Preset loaded · {preset.Title}", [
                     .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
@@ -488,7 +608,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"profile needs show, preview, keep, off, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, preview, keep, off, stock, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -506,13 +626,25 @@ public sealed class BrokerDispatcher
                 string game = Text(a, "game") ?? throw new ArgumentException("begin needs a game");
                 // A trial still in force from the session before ends as "end" ends it: its settings go back with the daily
                 // profile, so the new session's trials run on, and are recorded under, the daily wall and limits it says.
-                var closed = CloseTrial(target, Experiment.Survived, "a new session began");
+                // The new session does not begin over a card that is not back (as in 0.3.6): one held busy keeps the trial in
+                // force; one refused for another reason lets the record go, and the card may still hold part of it.
+                DataPoint? closed = null;
                 IReadOnlyList<string> writes = [];
-                BrokerResponse? back = closed != null ? Back(target, closed, out writes) : null;
-                if (back is { Ok: false })
+                BrokerResponse? back = null;
+                if (Experiment.Load(path)?.Trial != null)
                 {
-                    Log(target, $"Session not started · {game}", [$"Last trial: {closed!.Change}", "Back to the daily profile did not all land:", .. writes]);
-                    return new BrokerResponse(false, $"the trial in force did not all go back ({back.Error}); the new session did not begin", back.Result, back.Code);
+                    var leaving = LeaveBack(target, Experiment.Survived, "a new session began", out writes);
+                    (closed, back) = (leaving.Point, leaving.Answer);
+                    if (!leaving.Back)
+                    {
+                        Log(target, $"Session not started · {game}", [$"Last trial: {closed!.Change}", leaving.Left
+                            ? "Back to the daily profile did not all land: the record let go of the trial, but the card may still hold part of it"
+                            : "Back to the daily profile did not all land: the trial stays in force", .. writes]);
+                        return new BrokerResponse(false, leaving.Left
+                            ? $"the trial in force did not all go back ({back.Error ?? back.Code}); the new session did not begin: read the card (card_settings) before beginning again"
+                            : $"the trial in force did not go back, the card held busy ({back.Error ?? back.Code}); it stays in force and the new session did not begin: begin again once the card is free",
+                            back.Result, back.Code);
+                    }
                 }
                 // unattended: the person is away (an overnight mapping run), so the session stops writing new trials after
                 // max_crashes crashes (default 2) rather than keep hanging the card; nothing steps down, the daily profile stays.
@@ -656,7 +788,7 @@ public sealed class BrokerDispatcher
                                 : Element(new { success = false, applied = (JsonElement[])[.. written.SelectMany(AppliedOf), .. undone.SelectMany(AppliedOf)] }),
                             failed.Code);
                     }
-                    var replaced = exp.Trial is { Marked: false } ? exp.Point(Experiment.Survived, _host.Now, "replaced by the next trial") : null;
+                    var replaced = exp.Trial is { } before && Records(before, Experiment.Survived) ? exp.Point(Experiment.Survived, _host.Now, "replaced by the next trial") : null;
                     if (replaced != null) Experiment.Append(data, replaced);
                     // A curve trial runs under the wall the trial before it set, until the daily profile goes back on.
                     var trial = new ExperimentTrial(_host.Now, curve, change, UInt(a, "at_uv"), UInt(a, "at_mhz"), PowerMw: powerMw ?? exp.Trial?.PowerMw,
@@ -683,6 +815,10 @@ public sealed class BrokerDispatcher
                 {
                     var exp = Experiment.Load(path);
                     if (exp is not { Trial: { } t }) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
+                    // Ended already (back_to_daily or a crash the card held off): its ending is its data point, and a stable
+                    // mark after it would be a second one (a lab step's, or the agent's).
+                    if (t.Ending is { } ended)
+                        return Fail($"the trial in force has ended ({ended}) and waits for the card to be free to go back; nothing to mark", BrokerCode.CannotWrite);
                     var point = exp.Point(Experiment.Stable, _host.Now, req.Value)!;
                     Experiment.Append(data, point);
                     (exp with { Trial = t with { Marked = true } }).Save(path);
@@ -692,20 +828,26 @@ public sealed class BrokerDispatcher
             case "crash":
             {
                 // The game fell to the desktop with no driver reset: nothing the broker can see, so the player says so.
-                var point = CloseTrial(target, Experiment.Crash, req.Value ?? "the game crashed (reported by the player)");
-                if (point == null) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
-                var r = Back(target, point, out var writes);
-                Log(target, $"Crash · reported · {point.Game}", [   // the player, or a stress run that failed
+                if (Experiment.Load(path)?.Trial == null) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
+                var (point, r, left, _) = LeaveBack(target, Experiment.Crash, req.Value ?? "the game crashed (reported by the player)", out var writes);
+                Log(target, $"Crash · reported · {point!.Game}", [   // the player, or a stress run that failed
                     $"What happened: {point.Note}",
                     $"Trial: {point.Change}, ran {point.Minutes} min; written at {Mv(point.AtUv)}, {point.AtMhz} MHz; {Limits(point)}",
                     $"Trial curve: {point.Curve}",
-                    "Back to the daily profile:", .. writes]);
+                    "Back to the daily profile:", .. writes,
+                    left ? null : "It did not all land: the trial stays in force until something takes the card off it"]);
                 return r;
             }
             case "alive":
                 // An agent's MCP server says it is still there (TrialLease): nothing is written or saved.
                 LastAlive = _host.Now;
                 return Ok(new { success = true });
+            case "quiet":
+                // A measurement that has just taken judge.lock, before it starts: a write that looked at the lock before it
+                // was there may still be landing, so this is answered only once no operation is in flight (Dispatch runs one
+                // at a time), and with the lock held none but the run's own starts after it. The answer is "show"'s: the
+                // trial the run measures. Until 0.3.7 a run could start in the middle of another agent's write.
+                return Ok(new { success = true, path, data, experiment = Experiment.Load(path) });
             case "release":
                 // The agent running the trial is gone (its MCP server's input closed): what only a watching agent may hold
                 // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits.
@@ -718,22 +860,26 @@ public sealed class BrokerDispatcher
             case "end":
             {
                 var exp = Experiment.Load(path);
-                var point = CloseTrial(target, Experiment.Survived, "the session ended");
-                lock (_experiment) Experiment.Delete(path);
-                var r = Back(target, point, out var writes);
-                Log(target, $"Session ended · {exp?.Game}", [
+                var (point, r, left, _) = LeaveBack(target, Experiment.Survived, "the session ended", out var writes);
+                // The session ends with its trial off the card; a trial the card did not let go of keeps it open.
+                bool ends = point == null || left;
+                if (ends) lock (_experiment) Experiment.Delete(path);
+                Log(target, ends ? $"Session ended · {exp?.Game}" : $"Session not ended · {exp?.Game}", [
                     point != null ? $"Last trial: {point.Change}, ran {point.Minutes} min" : null,
-                    "Back to the daily profile:", .. writes]);
-                return r;
+                    "Back to the daily profile:", .. writes,
+                    ends ? null : "It did not all land: the trial stays in force and the session stays open (end_session again, or back_to_daily)"]);
+                return ends ? r : new BrokerResponse(false,
+                    $"the trial in force did not go back, the card held busy ({r.Error ?? r.Code}); it stays in force and the session stays open: end_session again once the card is free",
+                    r.Result, r.Code);
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, quiet, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
     /// <summary>Back to the daily profile when one is on, else to stock, so a trial never stays behind; the answer carries
-    /// the trial's data point beside the writes.</summary>
-    private BrokerResponse Back(IGpuTarget target, DataPoint? point, out IReadOnlyList<string> writes)
+    /// the trial's data point beside the writes, and comes with the put-back's own response (for <see cref="Leave"/>).</summary>
+    private (BrokerResponse Answer, BrokerResponse PutBack) Back(IGpuTarget target, DataPoint? point, out IReadOnlyList<string> writes)
     {
         var path = DailyProfile.PathBeside(target.Journal.Path);
         var profile = DailyProfile.Load(path);
@@ -741,7 +887,21 @@ public sealed class BrokerDispatcher
             ? ApplyProfile(target, profile, path)
             : Dispatch(new BrokerRequest(BrokerRequest.OpRecover, target.StableId));
         writes = profile is { Suspended: false } ? [.. Writes(back)] : ["No daily profile in force: back to stock", .. Writes(back)];
-        return new BrokerResponse(back.Ok, back.Error, Element(new { success = back.Ok, point, back = back.Result }), back.Code);
+        return (new BrokerResponse(back.Ok, back.Error, Element(new { success = back.Ok, point, back = back.Result }), back.Code), back);
+    }
+
+    /// <summary>Leaves the trial in force (<see cref="Leave"/>) through <see cref="Back"/>; the writes for the log.</summary>
+    private Leaving LeaveBack(IGpuTarget target, string outcome, string? note, out IReadOnlyList<string> writes)
+    {
+        IReadOnlyList<string> logged = [];
+        var leaving = Leave(target, outcome, note, p =>
+        {
+            var b = Back(target, p, out var w);
+            logged = w;
+            return b;
+        });
+        writes = logged;
+        return leaving;
     }
 
     private void Log(IGpuTarget target, string title, IEnumerable<string?> lines) =>
@@ -858,11 +1018,10 @@ public sealed class BrokerDispatcher
             string known = string.Join(", ", [.. Presets.All.Select(p => p.Name), .. SavedProfiles.All(file).Select(p => $"'{p.Name}'")]);
             return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
         }
-        CloseTrial(target, Experiment.Survived, $"saved profile '{name}' went on");
         var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
-        var r = ApplyProfile(target, loaded, path);
-        if (!r.Ok) return NotLoaded(target, $"saved profile '{name}'", r, profile, path);
+        var r = Leave(target, Experiment.Survived, $"saved profile '{name}' went on", _ => Loading(target, $"saved profile '{name}'", loaded, profile, path)).Answer;
+        if (!r.Ok) return r;
         loaded.Save(path);
         Log(target, $"Saved profile loaded · {name}", [
             .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
@@ -870,12 +1029,22 @@ public sealed class BrokerDispatcher
         return r;
     }
 
+    /// <summary>A preset or saved profile going on, for <see cref="Leave"/>: all of it, or (<see cref="NotLoaded"/>) the
+    /// daily profile back as it was; the card is off the trial when either landed.</summary>
+    private (BrokerResponse Answer, BrokerResponse PutBack) Loading(IGpuTarget target, string what, DailyProfile loaded, DailyProfile? profile, string path)
+    {
+        var r = ApplyProfile(target, loaded, path);
+        if (r.Ok) return (r, r);
+        var answer = NotLoaded(target, what, r, profile, path, out var back);
+        return (answer, back);
+    }
+
     /// <summary>A preset or saved profile that did not all go on (a write this card refuses, e.g. a wall above its board
     /// maximum) does not become the daily profile: the daily profile stays as it was and goes back on, so the card is
     /// never left holding part of a profile nothing keeps. The answer carries both runs' writes.</summary>
-    private BrokerResponse NotLoaded(IGpuTarget target, string what, BrokerResponse failed, DailyProfile? profile, string path)
+    private BrokerResponse NotLoaded(IGpuTarget target, string what, BrokerResponse failed, DailyProfile? profile, string path, out BrokerResponse back)
     {
-        var back = ApplyProfile(target, profile, path);
+        back = ApplyProfile(target, profile, path);
         Log(target, $"Not loaded · {what}", [
             $"Reason: {failed.Error}",
             .. Writes(failed),
@@ -902,7 +1071,8 @@ public sealed class BrokerDispatcher
     /// <summary>
     /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits, a clock floor,
     /// point lock or Boost Lock and the F8 request) back to their originals. The rest of the trial stays on the card and in
-    /// force, recorded from here as a trial of its own without what went back, the part before as survived. What went back
+    /// force, recorded from here as a trial of its own without what went back, the part before as survived (as
+    /// <see cref="Records"/> says: a trial whose ending is on record keeps it, and nothing more is recorded). What went back
     /// is the journal's word after the put-backs, not their answers: a cell still held stays in the trial's record (the
     /// caller asks again), and when nothing went back nothing is recorded but the refusal, once until something does go back.
     /// No curve is written: the GPU may be under load.
@@ -916,7 +1086,12 @@ public sealed class BrokerDispatcher
             _refused.Remove(target.StableId);
             return Ok(new { success = true, released = Array.Empty<object>() });
         }
-        var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
+        // The fan guard's fans go back under a measurement's judge.lock too (SafetyLease); everything else waits for it.
+        string? lease = CurrentLease.Value;
+        if (fansOnly) CurrentLease.Value = SafetyLease;
+        List<BrokerResponse> back;
+        try { back = held.Select(h => Dispatch(PutBack(target, h))).ToList(); }
+        finally { CurrentLease.Value = lease; }
         var left = HeldTrialCells(target).Where(Mine).ToList();
         var gone = held.Where(h => !left.Any(l => l.Id == h.Id)).ToList();
         bool ok = left.Count == 0;
@@ -933,8 +1108,9 @@ public sealed class BrokerDispatcher
             {
                 if (Experiment.Load(path) is { Trial: { } t } exp)
                 {
-                    closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}");
+                    closed = Records(t, Experiment.Survived) ? exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}") : null;
                     if (closed != null) Experiment.Append(data, closed);
+                    // An ending on record stays: the rest is still that trial waiting to go back, not a new one to record again.
                     (exp with { Trial = Without(t, gone, left) with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
                 }
             }
@@ -1049,19 +1225,90 @@ public sealed class BrokerDispatcher
     }
 
     /// <summary>Closes the trial in force, if any, with this outcome and returns its data point; null when no trial was in
-    /// force. A trial already marked stable is not recorded a second time, unless it crashed. The session stays open.</summary>
+    /// force. Recorded as <see cref="Records"/> says (a driver reset after a crash already on record is not a second one).
+    /// The session stays open. Only for a card that keeps what it holds (a keep makes the trial the daily profile) or was
+    /// taken off the trial already (a driver reset); one that has yet to be taken off it leaves through <see cref="Leave"/>.</summary>
     private DataPoint? CloseTrial(IGpuTarget target, string outcome, string? note = null, uint? crashUv = null)
     {
         lock (_experiment)
         {
             var path = Experiment.PathBeside(target.Journal.Path);
             if (Experiment.Load(path) is not { Trial: { } trial } exp) return null;
-            var point = trial.Marked && outcome != Experiment.Crash ? null : exp.Point(outcome, _host.Now, note, crashUv);
+            var point = Records(trial, outcome) ? exp.Point(outcome, _host.Now, note, crashUv) : null;
             if (point != null) Experiment.Append(Experiment.DataPathBeside(target.Journal.Path), point);
             (exp with { Trial = null }).Save(path);
             return point ?? exp.Point(outcome, _host.Now, note, crashUv);
         }
     }
+
+    /// <summary>
+    /// Whether ending <paramref name="trial"/> with <paramref name="outcome"/> writes a data point: a crash unless one is on
+    /// record for it already (after a stable mark, or after an ending whose put-back the card held off, the card still ran
+    /// the trial when it crashed); any other ending only while nothing is on record for it. So each trial's ending is
+    /// recorded once, its crash always, and a driver reset after a mark_crash the card held off is not a second crash.
+    /// </summary>
+    private static bool Records(ExperimentTrial trial, string outcome) =>
+        outcome == Experiment.Crash ? trial.Ending != Experiment.Crash : !trial.Marked && trial.Ending == null;
+
+    /// <summary>How a trial left (<see cref="Leave"/>): its data point (null when no trial was in force), the answer,
+    /// whether the record let go of it (<see cref="Left"/>), and whether the card is back: all of it, or all but whole
+    /// groups the driver will not take (<see cref="Partial"/>).</summary>
+    private readonly record struct Leaving(DataPoint? Point, BrokerResponse Answer, bool Left, bool Back);
+
+    /// <summary>
+    /// Ends the trial in force, if any, with this outcome, and has <paramref name="back"/> take the card off it (the daily
+    /// profile, stock, a preset): it gives the caller's answer and the put-back's own response, which alone says whether
+    /// the card is off the trial (<see cref="Left"/>). The data point is written first: a crash happened whatever the
+    /// put-back does. While the card is held busy (a stability run holding it, another operation) the trial stays in force
+    /// with its ending on record (<see cref="ExperimentTrial.Ending"/>): a crash before something takes the card off it is
+    /// the trial's and not the daily profile's, nothing is recorded twice (<see cref="Records"/>), and whatever does take
+    /// the card off it closes it. Until 0.3.7 the trial left the record before the put-back ran, so a put-back a stability
+    /// run held off left the card running the trial under a record that said none.
+    /// </summary>
+    private Leaving Leave(IGpuTarget target, string outcome, string? note,
+        Func<DataPoint?, (BrokerResponse Answer, BrokerResponse PutBack)> back, uint? crashUv = null)
+    {
+        var path = Experiment.PathBeside(target.Journal.Path);
+        DataPoint? point = null;
+        lock (_experiment)
+        {
+            if (Experiment.Load(path) is { Trial: { } trial } exp)
+            {
+                var written = Records(trial, outcome) ? exp.Point(outcome, _host.Now, note, crashUv) : null;
+                if (written != null) Experiment.Append(Experiment.DataPathBeside(target.Journal.Path), written);
+                // The ending on record: a crash over anything else, otherwise the first (a trial marked stable ends too).
+                (exp with { Trial = trial with { Ending = written != null ? outcome : trial.Ending ?? outcome } }).Save(path);
+                point = written ?? exp.Point(outcome, _host.Now, note, crashUv);
+            }
+        }
+        var (answer, putBack) = back(point);
+        bool landed = putBack.Ok || Partial(putBack), left = Left(putBack);
+        if (point != null && left)
+        {
+            lock (_experiment)
+                if (Experiment.Load(path) is { Trial: not null } exp)
+                    (exp with { Trial = null }).Save(path);
+            if (!landed)
+                Log(target, "Trial off the record, not all off the card", [$"Trial: {point.Change}", $"Reason: {putBack.Error ?? "the put-back did not finish"}",
+                    "Refused for a reason waiting does not cure: the record lets go of the trial as before 0.3.7, but the card may still hold part of it; read the card (card_settings)"]);
+        }
+        return new Leaving(point, answer, left, landed);
+    }
+
+    /// <summary>
+    /// Whether the trial may leave the record after what put the card back: it all went on, or all but whole groups the
+    /// driver will not take (621.01's MSVDD offsets), which went back to stock with every cell of theirs (<see cref="Partial"/>:
+    /// only when every put-back landed). A put-back the card was too busy for (a stability run holding it, another
+    /// operation in the window) keeps the trial in force, and asked again once the card is free it lands: under a run that
+    /// waits for the operation in flight nothing of it was written (<see cref="Judged"/>); one that does not wait can stop
+    /// it part-way, as before 0.3.7. One refused for a reason a wait does not cure (a cell this version cannot give back, an unreadable one, no elevation, a write the driver will not
+    /// take) lets the record go as before 0.3.7, or nothing could ever end the trial.
+    /// </summary>
+    private static bool Left(BrokerResponse r) => r.Ok || Partial(r) || r.Code is not (BrokerCode.JudgeBusy or BrokerCode.WindowBusy);
+
+    /// <summary>ApplyProfile's answer when everything went on but whole groups the driver will not take.</summary>
+    private static bool Partial(BrokerResponse r) =>
+        r.Result is { ValueKind: JsonValueKind.Object } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
 
     private static JsonElement Args(string? json)
     {

@@ -5,7 +5,7 @@ namespace Clocktail.Domain.Broker;
 
 /// <summary>
 /// The other half of a contract with StabilityLab, and the lab's own measurement lease. While a run measures a state it
-/// holds a lock file <c>{Pid, RunId, Label, StartedUtc}</c>; the broker reads it before opening a write window, so an
+/// holds a lock file <c>{Pid, RunId, Label, StartedUtc, Waits}</c>; the broker reads it before opening a write window, so an
 /// automatic write, or another agent's, never moves the hardware out from under a run in progress. The holder's own writes
 /// carry the RunId as their lease (<see cref="BrokerRequest.Lease"/>) and go through: the lab writes its next candidate
 /// without letting anyone else in between. It is the mirror of StabilityLab refusing to start while the broker's own
@@ -14,7 +14,11 @@ namespace Clocktail.Domain.Broker;
 /// </summary>
 public static class JudgeLock
 {
-    public sealed record Info(int Pid, string? RunId = null, string? Label = null, DateTimeOffset? StartedUtc = null);
+    /// <param name="Waits">The run asks the service to finish the operation in flight before it measures ("quiet", Clocktail's
+    /// runs since 0.3.7), so an operation the judge let through before the lock was taken finishes under it rather than stop
+    /// part-way (<see cref="BrokerDispatcher.Judge"/>). Without it (StabilityLab, a run from before 0.3.7)
+    /// every write after the lock stands down, as before.</param>
+    public sealed record Info(int Pid, string? RunId = null, string? Label = null, DateTimeOffset? StartedUtc = null, bool Waits = false);
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 

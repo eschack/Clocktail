@@ -54,7 +54,7 @@ public sealed class BrokerServer(Func<NamedPipeServerStream> listen, BrokerDispa
                 var read = Task.Run(() => BrokerTransport.ReadRequest(pipe));
                 if (!read.Wait(RequestTimeout)) return;   // disposing the pipe ends the stalled read
                 BrokerResponse resp;
-                try { resp = dispatcher.Dispatch(read.Result); }
+                try { resp = dispatcher.FromClient(read.Result); }
                 catch (Exception e) { resp = new BrokerResponse(false, e.Message); }   // a dispatch bug answers the client, never kills the broker
                 BrokerTransport.WriteResponse(pipe, resp);
             }

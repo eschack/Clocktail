@@ -13,7 +13,7 @@ public sealed record ExperimentTrial(
     /// <summary>The operating point when it was written: NVVDD µV and core MHz under the game's load.</summary>
     uint? AtUv,
     uint? AtMhz,
-    /// <summary>A data point was already recorded for it (marked stable); closing it records nothing more.</summary>
+    /// <summary>Marked stable: that data point is on record, so closing it records nothing more but a crash.</summary>
     bool Marked = false,
     /// <summary>The board power limit the trial runs under, mW, when a trial set one (lowered to move the operating
     /// point down the curve); null: the daily profile's.</summary>
@@ -40,7 +40,12 @@ public sealed record ExperimentTrial(
     int? XbarVdemandUv = null,
     /// <summary>Every other write the trial runs under, through its own write path (the core P0 offset, NVVDD's offsets,
     /// SYS/Video, the boost, a clock lock…), when a trial set them; null: none.</summary>
-    IReadOnlyList<ProfileWrite>? Writes = null);
+    IReadOnlyList<ProfileWrite>? Writes = null,
+    /// <summary>How the trial ended while the card had not let go of it yet (its put-back held off by a busy card), a
+    /// crash over anything else: on record, so nothing more is recorded for it but a crash after another ending (asked
+    /// again, mark_stable, a driver reset after mark_crash, a hand-back or the next trial: none adds a point), and a crash
+    /// is never kept. Null: it has not ended.</summary>
+    string? Ending = null);
 
 /// <summary>One data point: how a trial ended in a game.</summary>
 public sealed record DataPoint(

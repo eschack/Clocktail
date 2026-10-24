@@ -31,6 +31,59 @@ public sealed partial class TuningTools
 
     private string LabDir() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Clocktail", card.StableId, "lab");
 
+    /// <summary>One measurement's hold on the card (<see cref="HoldCard"/>): judge.lock, given back when disposed. Trial: the
+    /// settings of the trial in force once the card was quiet (<see cref="TrialSettings"/>; null for none), the one the run
+    /// measures; Known: the service could be asked then (one that could not be reached says nothing about it).</summary>
+    private sealed class CardHold(string path, string runId, string? trial, bool known) : IDisposable
+    {
+        public string? Trial => trial;
+        public bool Known => known;
+        public void Dispose() => JudgeLock.Release(path, runId);
+    }
+
+    /// <summary>
+    /// The card to one measurement (stress_test, lab_test): judge.lock taken, so no write but the run's own (and the fan
+    /// guard's, BrokerDispatcher.SafetyLease) lands from here, then the service asked to finish what it is in the middle of
+    /// (<see cref="Quiet"/>; the lock says the run waits so, JudgeLock.Info.Waits, so that operation finishes rather than
+    /// stop part-way), and the trial in force then, to hold the result to. Until 0.3.7 stress_test took no lock at
+    /// all, so another agent could change the card under it and its pass or crash went to whatever trial was in force at
+    /// the end; lab_test took the lock but could start in the middle of a write. On a service from before 0.3.7 a run that
+    /// held no lock then (<paramref name="olderToo"/> false: stress_test) still holds none: that service's fan guard cannot
+    /// pass the lock, and an agent blocked in the run cannot watch the temperature.
+    /// </summary>
+    private CardHold HoldCard(string label, bool olderToo)
+    {
+        string runId = $"{label.Replace('_', '-')}-{Guid.NewGuid():n}", lockPath = JudgeLock.DefaultPath();
+        if (!JudgeLock.TryAcquire(lockPath, new JudgeLock.Info(Environment.ProcessId, runId, label, DateTimeOffset.UtcNow, Waits: true), new SystemHost(),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), out var heldBy))
+            throw new InvalidOperationException($"another run holds the card ({heldBy}): wait for it to finish (lab_status), or lab_stop");
+        try
+        {
+            var quiet = Quiet(k => card.Broker(BrokerRequest.OpExperiment, k), QuietTries, Thread.Sleep, out bool older);
+            if (older && !olderToo) JudgeLock.Release(lockPath, runId);
+            return new CardHold(lockPath, runId, TrialSettings(quiet), quiet.Code != BrokerCode.BrokerUnreachable);
+        }
+        catch { JudgeLock.Release(lockPath, runId); throw; }
+    }
+
+    /// <summary>
+    /// A measurement that failed: a driver reset is the service's to record (it closes the trial with the flight recorder's
+    /// voltage seconds after the event; recording it here too wrote a second entry, and the service's then blamed the daily
+    /// profile), so that is waited for; otherwise it is recorded here, against the trial the run measured only, the one in
+    /// force at its start (<paramref name="hold"/>), or the one at its end when the service could not be asked then: a trial
+    /// with other settings now is not blamed. The crash's data point is on record even when the daily profile could not go
+    /// back on yet (the card held busy): true then too, so nobody records it again.
+    /// </summary>
+    private bool RecordCrash(CardHold hold, int? resets, string what)
+    {
+        if (hold.Known && hold.Trial == null) return false;
+        if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
+            return true;
+        if (TrialSettings(card.Broker(BrokerRequest.OpExperiment, "show")) is not { } now || hold.Known && now != hold.Trial) return false;
+        var c = card.Broker(BrokerRequest.OpExperiment, "crash", what);
+        return c.Ok || c.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == JsonValueKind.Object;
+    }
+
     [McpServerTool(Name = "lab_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Run the lab on what is on the card now: StabilityLab's load engine (CUDA, kernels the driver compiles, no toolkit), " +
         "every result checked bit for bit on the CPU, as stress_test runs nvgwls. Phases, split evenly over the seconds: burn " +
@@ -61,7 +114,6 @@ public sealed partial class TuningTools
         int maxC = maxTempC ?? StressMaxC;
         if (maxC is < 50 or > StressMaxCeilingC) throw new ArgumentException($"maxTempC is 50..{StressMaxCeilingC}");
 
-        var before = card.Read();
         string dir = Path.Combine(Path.GetTempPath(), "clocktail-lab");
         Directory.CreateDirectory(dir);
         string jsonPath = Path.Combine(dir, $"run-{Guid.NewGuid():n}.json");
@@ -72,24 +124,25 @@ public sealed partial class TuningTools
         if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
         psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(maxC.ToString(CultureInfo.InvariantCulture));   // the lab's own guard, besides this one
 
-        // The measurement holds the card: while it runs no write lands under it (another agent's, the service's own).
-        string runId = $"lab-test-{Guid.NewGuid():n}", lockPath = JudgeLock.DefaultPath();
-        if (!JudgeLock.TryAcquire(lockPath, new JudgeLock.Info(Environment.ProcessId, runId, "lab_test", DateTimeOffset.UtcNow), new SystemHost(),
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), out var heldBy))
-            throw new InvalidOperationException($"another run holds the card ({heldBy}): wait for it to finish (lab_status), or lab_stop");
-
         var samples = new List<Card.Sample>();
         int hotRun = 0;
         double? stopC = null;
         int grace = (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null)?.StressGraceS ?? 30;
-        var started = DateTime.UtcNow;
         int? code = null;
         bool hot = false, hung = false;
-        residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 60));
         using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
         Process? p = null;
+
+        // The measurement holds the card: while it runs no write lands under it (another agent's, the service's own), it
+        // starts once no write is landing, and the card is read for it from then on.
+        var hold = HoldCard("lab_test", olderToo: true);
+        Card.Look before;
+        var started = DateTime.UtcNow;
         try
         {
+            before = card.Read();
+            started = DateTime.UtcNow;
+            residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 60));
             p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
             if (OperatingSystem.IsWindows()) children?.Add(p);   // it never outlives this server
             var stderr = p.StandardError.ReadToEndAsync();
@@ -114,7 +167,7 @@ public sealed partial class TuningTools
             // Stopped and waited for on every way out (a sampling error too): nothing after this, a crash record or the daily
             // profile going back, runs under its load.
             if (p != null) { ChildProcess.Stop(p); p.Dispose(); }
-            JudgeLock.Release(lockPath, runId);
+            hold.Dispose();
             residency.StressUntil(DateTimeOffset.MinValue);
         }
 
@@ -155,19 +208,12 @@ public sealed partial class TuningTools
         if (lab is { } r && !failed && !shared && Phase(r, "memory") is { } mem)
             memoryVsLast = KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0);
 
-        bool trial = TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")) == true;
+        bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Lab {string.Join(",", list)}, {seconds} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. P50 {mhz} MHz @ NVVDD {mv} mV (curve point {pointIndex}); max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
             + (shared ? $"; other work shared the GPU ({others:0} MiB, {busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
-        bool crashRecorded = false;
-        if (failed && trial)
-        {
-            if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
-                crashRecorded = true;
-            else
-                crashRecorded = card.Broker(BrokerRequest.OpExperiment, "crash", $"lab {string.Join(",", list)} {seconds} s: {verdict}").Ok;
-        }
+        bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {seconds} s: {verdict}");
         return Out(new
         {
             passed = !failed && !hot && labVerdict == "pass",

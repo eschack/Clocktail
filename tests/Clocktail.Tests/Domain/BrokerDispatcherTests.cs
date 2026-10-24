@@ -882,6 +882,413 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("f8", Assert.Single(before.Writes!).Key);              // the part that ran with it
     }
 
+    /// <summary>A dispatcher with a trial in force (a 450 W wall) whose writes a stability run can hold off: the card a
+    /// put-back cannot reach while <paramref name="busy"/> says so.</summary>
+    private BrokerDispatcher TrialAt450(Func<string?> busy)
+    {
+        var d = Power(judge: busy);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 575 → 450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        Assert.Equal(450_000u, _requests[0xfe]);
+        return d;
+    }
+
+    private ExperimentTrial? TrialNow() => Experiment.Load(Experiment.PathBeside(_journal.Path))?.Trial;
+    private List<string> Outcomes() => [.. Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20).Select(p => p.Outcome)];
+
+    /// <summary>back_to_daily the card cannot take (here a stability run holding it) leaves the trial in force, its ending on
+    /// record: its survived point is on record once, a crash before the card is off it is the trial's (not the daily profile's), and the
+    /// back_to_daily that lands closes it without a second point. Until 0.3.7 the trial left the record first, so the card
+    /// ran the 450 W wall under a record that said no trial, and the crash would have been the daily profile's.</summary>
+    [Fact]
+    public void A_trial_leaves_the_record_only_once_the_card_has_left_it()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.False(r.Ok);
+        Assert.Equal(450_000u, _requests[0xfe]);                            // still on the card
+        Assert.Equal(("wall 575 → 450 W", Experiment.Survived, false), (TrialNow()!.Change, TrialNow()!.Ending, TrialNow()!.Marked));   // ended, not marked stable
+        Assert.Equal([Experiment.Survived], Outcomes());
+
+        var crash = d.Dispatch(Exp("crash", "the game closed to the desktop"));   // still held off: the card is on the trial
+        Assert.False(crash.Ok);
+        Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());
+        Assert.Equal("wall 575 → 450 W", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
+        Assert.NotNull(TrialNow());
+
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());   // nothing written twice
+    }
+
+    /// <summary>A new session over a trial the card did not let go of does not begin, and the trial stays in force, so
+    /// asking again puts it back first. Until 0.3.7 the first ask took the trial off the record, and the second began the
+    /// new session over a card still at the old trial's 450 W.</summary>
+    [Fact]
+    public void A_new_session_waits_until_the_trial_before_it_is_off_the_card()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.False(d.Dispatch(Exp("begin", """{"game":"B"}""")).Ok);
+        Assert.Equal("A", Experiment.Load(Experiment.PathBeside(_journal.Path))!.Game);
+        Assert.False(d.Dispatch(Exp("begin", """{"game":"B"}""")).Ok);    // asked again while it is still held: still not
+        Assert.Equal(450_000u, _requests[0xfe]);
+
+        busy = null;
+        var b = d.Dispatch(Exp("begin", """{"game":"B"}"""));
+        Assert.True(b.Ok, b.Error);
+        Assert.Equal(575_000u, _requests[0xfe]);                            // the old trial off the card first
+        Assert.Equal(("B", (ExperimentTrial?)null), (Experiment.Load(Experiment.PathBeside(_journal.Path))!.Game, TrialNow()));
+        Assert.Equal([Experiment.Survived], Outcomes());
+    }
+
+    /// <summary>end_session over a trial the card did not let go of keeps the session open with the trial in force; ending
+    /// it again once the card is free ends it.</summary>
+    [Fact]
+    public void A_session_ends_only_once_its_trial_is_off_the_card()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(Exp("end"));
+        Assert.False(r.Ok);
+        Assert.Contains("the session stays open", r.Error);
+        Assert.NotNull(TrialNow());
+
+        busy = null;
+        Assert.True(d.Dispatch(Exp("end")).Ok);
+        Assert.False(File.Exists(Experiment.PathBeside(_journal.Path)));
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal([Experiment.Survived], Outcomes());
+    }
+
+    /// <summary>"stock" suspends the profile and puts the card back to stock in one operation, so the trial leaves the
+    /// record only once that landed. Until 0.3.7 stock was "off", which closed the trial, then a recovery of its own.
+    /// "off" alone (the person's CLI: stock at the next start) writes nothing, so the trial stays in force with the card.</summary>
+    [Fact]
+    public void Stock_takes_the_card_off_the_trial_before_the_trial_leaves_the_record()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);   // a daily profile to suspend
+
+        int sets = FakeDriver.Sets;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off")).Ok);
+        Assert.Equal(sets, FakeDriver.Sets);                                  // nothing written
+        Assert.NotNull(TrialNow());                                           // the card still runs the trial
+        Assert.True(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!.Suspended);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "stock")).Ok);
+        Assert.NotNull(TrialNow());
+        Assert.Equal(450_000u, _requests[0xfe]);
+
+        busy = null;
+        var stock = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "stock"));
+        Assert.True(stock.Ok, stock.Error);
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Null(TrialNow());
+        Assert.Empty(_journal.Inspect().Items);
+        Assert.Equal(JsonValueKind.Object, stock.Result!.Value.GetProperty("recover").ValueKind);
+        sets = FakeDriver.Sets;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);   // a recovery after it: nothing left to do
+        Assert.Equal(sets, FakeDriver.Sets);
+    }
+
+    /// <summary>mark_crash asked again while the card is still held (the answer says to try again once it is free) does not
+    /// record the crash twice: an unattended session's crash budget counts each crash once. A different ending after it
+    /// (back_to_daily) records nothing more either: the crash stays the trial's ending.</summary>
+    [Fact]
+    public void A_crash_asked_again_while_the_card_is_held_is_recorded_once()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.False(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        Assert.False(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);   // asked again
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal([Experiment.Crash], Outcomes());
+        Assert.Equal(Experiment.Crash, TrialNow()!.Ending);
+
+        busy = null;
+        Assert.True(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A put-back refused for a reason no wait cures (here a cell this version cannot give back) lets the record go,
+    /// as before 0.3.7, saying the card may still hold part of the trial: otherwise nothing could ever end it.</summary>
+    [Fact]
+    public void A_put_back_that_can_never_land_lets_the_record_go_and_says_so()
+    {
+        var d = TrialAt450(() => null);
+        _journal.Claim(new OwnedItem("nosuchkind", "x", "1", _host.Now));     // held, and no write path can give it back
+        var r = d.Dispatch(Exp("end"));
+        Assert.False(r.Ok);
+        Assert.False(File.Exists(Experiment.PathBeside(_journal.Path)));    // the session ended all the same
+        Assert.Contains("Trial off the record, not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>The fan guard's fans back to the curve pass a measurement's judge.lock (the service's own safety action, a
+    /// card too hot under a fixed fan duty); every other write still waits for it.</summary>
+    [Fact]
+    public void The_fan_guards_safety_writes_pass_a_measurement_and_nothing_else_does()
+    {
+        var d = Power(judge: () => "stress_test (pid 4242)");
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);
+        BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
+        try { Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Ok); }
+        finally { BrokerDispatcher.CurrentLease.Value = null; }
+        Assert.Equal(450_000u, _requests[0xfe]);
+    }
+
+    /// <summary>The fan guard's request and its lease are the service's own, and so are its recoveries after a driver reset:
+    /// a client sending any of them is refused, and a request carrying the lease does not pass the lock with it in-process
+    /// either.</summary>
+    [Fact]
+    public void A_client_cannot_pass_a_measurement_with_the_service_s_safety_lease()
+    {
+        var d = Power(judge: () => "stress_test (pid 4242)");
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset)).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverResetAgain)).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);   // an ordinary one meets the judge
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
+    /// <summary>A trial whose ending is on record (back_to_daily, mark_crash: the card held off) is not marked stable after
+    /// it, by a lab step or the agent, and one that crashed is never kept. Before, a sweep's step after the agent's
+    /// back_to_daily wrote survived then stable for one trial, and keep could make a crash the daily profile.</summary>
+    [Fact]
+    public void A_trial_that_has_ended_is_neither_marked_stable_nor_kept()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        busy = "clocktail-lab (pid 4242)";
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(Exp("stable", "tune_memory: +500 MHz")).Code);
+        Assert.Equal([Experiment.Survived], Outcomes());
+
+        Assert.False(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);   // still on the card: the trial's crash
+        var keep = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.Equal(BrokerCode.CannotWrite, keep.Code);
+        Assert.Contains("a crash is not kept", keep.Error);
+        Assert.Null(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
+        Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A hand-back (here the trial lease's release once the agent has gone) keeps an ending on record: the rest of
+    /// the trial is still that trial waiting to go back, so putting it back records nothing more. Before, the hand-back
+    /// reopened it, and the back_to_daily after it recorded a survived point after the crash.</summary>
+    [Fact]
+    public void A_hand_back_keeps_the_trial_s_ending_and_nothing_more_is_recorded()
+    {
+        string? busy = null;
+        var d = Power(judge: () => busy);
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.False(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        busy = null;
+        Assert.True(d.Dispatch(Exp("release", "the agent disconnected")).Ok);
+        Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Equal(Experiment.Crash, TrialNow()!.Ending);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A driver reset after a mark_crash the card held off is that same crash, recorded once (an unattended
+    /// session's budget counts it once); the reset took the card off the trial, so it leaves the record.</summary>
+    [Fact]
+    public void A_driver_reset_after_a_held_mark_crash_is_not_a_second_crash()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        busy = "stress_test (pid 4242)";
+        Assert.False(d.Dispatch(Exp("crash", "stress_test failed: 3 errors")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A dispatcher judged as the service is (<see cref="BrokerDispatcher.Judge"/>, its sentinel's second look too) by
+    /// a run that takes judge.lock once the next write of the test's has reached the driver (<paramref name="lockedAfter"/>).</summary>
+    private BrokerDispatcher JudgedByARun(Func<int?> lockedAfter, bool waits)
+    {
+        var judge = BrokerDispatcher.Judge(() => lockedAfter() is { } s && FakeDriver.Sets > s
+            ? new JudgeLock.Info(4242, "stress-test-1", "stress_test", Waits: waits) : null);
+        return Power(judge: judge, sentinel: new ApplySentinel(Path.Combine(_dir, "apply.lock"), judge));
+    }
+
+    /// <summary>
+    /// The judge's word holds for a whole operation: a run that takes judge.lock while a put-back is landing and waits for it
+    /// ("quiet", Clocktail's runs since 0.3.7) lets it finish. Before 0.3.7 the next write was refused, so the NVVDD limit
+    /// went back while the 450 W wall stayed, and the trial was kept in force as if none had. The lock appears once the
+    /// put-back's first write has reached the driver: back_to_daily over a daily profile (each write a request of its own,
+    /// each judged), and stock (one recovery, every cell under its one window).
+    /// </summary>
+    [Theory]
+    [InlineData("apply")]
+    [InlineData("stock")]
+    public void A_run_that_waits_lets_a_put_back_under_way_finish(string kind)
+    {
+        int? lockedAfter = null;
+        var d = JudgedByARun(() => lockedAfter, waits: true);
+        CurrentLimitsFixture.Install();
+        if (kind == "apply") Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+
+        lockedAfter = FakeDriver.Sets;
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: kind, Value: "back_to_daily"));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Equal(kind == "apply" ? 560_000u : 575_000u, _requests[0xfe]);
+        Assert.Null(TrialNow());
+        // The run's lock is there: the next operation meets it.
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 500_000)).Code);
+    }
+
+    /// <summary>A run that does not wait for the operation in flight (StabilityLab, which looks for apply.lock before it
+    /// starts; a Clocktail run from before 0.3.7) is never written under: every write after it took the lock stands down,
+    /// as before 0.3.7, and the put-back stops where it is, the trial kept in force to be asked again.</summary>
+    [Fact]
+    public void A_run_that_does_not_wait_is_never_written_under()
+    {
+        int? lockedAfter = null;
+        var d = JudgedByARun(() => lockedAfter, waits: false);
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+
+        lockedAfter = FakeDriver.Sets;
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.Equal(lockedAfter + 1, FakeDriver.Sets);                     // the write already let through, and nothing after it
+        Assert.Equal(450_000u, _requests[0xfe]);
+        Assert.NotNull(TrialNow());
+    }
+
+    /// <summary>The service's judge: free with no run; the run's reason otherwise, but for the run's own writes (its lease)
+    /// and the fan guard's.</summary>
+    [Fact]
+    public void The_judge_lets_through_a_run_s_own_writes_and_the_fan_guard_s()
+    {
+        JudgeLock.Info? run = null;
+        var judge = BrokerDispatcher.Judge(() => run);
+        Assert.Null(judge());
+        run = new JudgeLock.Info(4242, "lab-1", "clocktail-lab lab-1", Waits: true);
+        Assert.Equal("pid 4242 'clocktail-lab lab-1'", judge());              // outside any operation a waiting run blocks too
+        try
+        {
+            BrokerDispatcher.CurrentLease.Value = "lab-1";
+            Assert.Null(judge());
+            BrokerDispatcher.CurrentLease.Value = "lab-2";
+            Assert.NotNull(judge());
+            BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
+            Assert.Null(judge());
+        }
+        finally { BrokerDispatcher.CurrentLease.Value = null; }
+    }
+
+    /// <summary>An operation the judge refused at its first write writes nothing after it, even if the lock has gone by the
+    /// next: before, the daily wall was refused, its group dropped, and the wall the broker held went back to stock, a
+    /// "partial" daily profile that let a trial off the record.</summary>
+    [Fact]
+    public void An_operation_refused_at_its_first_write_writes_nothing_after_it()
+    {
+        bool armed = false;
+        int asks = 0;
+        var d = Power(judge: () => armed && asks++ == 0 ? "stress_test (pid 4242)" : null);   // busy at the first look only
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);
+        int sets = FakeDriver.Sets;
+
+        armed = true;
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "the broker started"));
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.False(r.Result is { } res && res.TryGetProperty("partial", out var p) && p.GetBoolean());
+        Assert.Equal(sets, FakeDriver.Sets);
+        Assert.Equal(560_000u, _requests[0xfe]);
+    }
+
+    /// <summary>A recovery a client asks for takes the card off the trial, which then leaves the record: a 0.3.6 client's stock
+    /// is "off" (writing nothing) then a recovery, and the CLI's --recover is one. The service's own leave the trial alone:
+    /// after a driver reset (first try or retry) the "crashed" step records its crash, and at start the leftovers' recovery
+    /// may come before the hang's reset is in the System log, so a trial waits for the idle-gated daily profile.</summary>
+    [Fact]
+    public void A_client_s_recovery_takes_the_trial_off_the_record_and_the_service_s_own_do_not()
+    {
+        var d = TrialAt450(() => null);
+        Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off")).Ok);
+        Assert.NotNull(TrialNow());
+        Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpRecover)).Ok);
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Survived], Outcomes());
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 575 → 450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);           // the leftovers at start
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverResetAgain, Value: "nvlddmkm 153")).Ok);
+        Assert.NotNull(TrialNow());
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A new session does not begin over a trial that did not all go back for a reason waiting does not cure (as
+    /// in 0.3.6): the record lets it go, and the log says the card may still hold part of it.</summary>
+    [Fact]
+    public void A_new_session_does_not_begin_over_a_put_back_that_failed()
+    {
+        var d = TrialAt450(() => null);
+        _journal.Claim(new OwnedItem("nosuchkind", "x", "1", _host.Now));     // held, and no write path can give it back
+        var r = d.Dispatch(Exp("begin", """{"game":"B"}"""));
+        Assert.False(r.Ok);
+        Assert.Contains("the new session did not begin", r.Error);
+        Assert.Null(TrialNow());
+        Assert.Equal("A", Experiment.Load(Experiment.PathBeside(_journal.Path))!.Game);
+        Assert.Contains("Trial off the record, not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>621.01: a put-back that leaves only MSVDD's group at stock is back through end_session (as through mark_crash
+    /// and a new session) just as through back_to_daily: the trial leaves the record and nothing says the card may still
+    /// hold it. Before, those three looked for "partial" in the wrong place and logged that it might.</summary>
+    [Fact]
+    public void A_partial_put_back_on_621_01_is_back_through_end_session_too()
+    {
+        var d = CurveAndDroppedRails();
+        const string daily = "0*60,30000*67";
+        new DailyProfile([
+            new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Msvdd), "rel=0,alt=0,ov=0,vmin=0"),
+            new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, daily)], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*60,45000*67", change = "+15 MHz" }))).Ok);
+
+        var r = d.Dispatch(Exp("end"));
+        Assert.False(r.Ok);                                                  // the uncore stays at stock, and the answer says so
+        Assert.False(File.Exists(Experiment.PathBeside(_journal.Path)));    // the session ended: the card is off the trial
+        Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
+        Assert.Equal([Experiment.Survived], Outcomes());
+        Assert.DoesNotContain("not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
     /// <summary>S-4: no trial is written while the GPU looks hung; the trial before stays in force.</summary>
     [Fact]
     public void No_trial_is_written_while_the_GPU_looks_hung()
@@ -1629,6 +2036,38 @@ public class BrokerDispatcherTests : IDisposable
         var kept = DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!;
         Assert.True(kept.Suspended);        // "off" came last and stuck
         Assert.Equal("600000", Assert.Single(kept.Writes, w => w.Kind == PowerCap.Kind).Value);
+    }
+
+    /// <summary>"quiet", which a measurement asks once it holds judge.lock, is answered only once the operation in flight has
+    /// finished: a write that looked at the lock before it was taken can still be landing, and until 0.3.7 a run could
+    /// start in the middle of it. The answer is the experiment, for the trial the run measures.</summary>
+    [Fact]
+    public void Quiet_is_answered_once_the_write_in_flight_has_landed()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+        using var inWrite = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var inner = FakeDriver.RequestApplier!;
+        int calls = 0;
+        FakeDriver.RequestApplier = (state, req) =>
+        {
+            var s = inner(state, req);
+            if (Interlocked.Increment(ref calls) == 1) { inWrite.Set(); release.Wait(5000); }
+            return s;
+        };
+        BrokerResponse? trial = null, quiet = null;
+        var a = new Thread(() => trial = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 575 → 450 W", power_mw = 450_000u, keep_curve = true }))));
+        a.Start();
+        Assert.True(inWrite.Wait(5000));
+        var b = new Thread(() => quiet = d.Dispatch(Exp("quiet")));
+        b.Start();
+        Assert.False(b.Join(300));          // the trial's write is still landing
+        release.Set();
+        Assert.True(a.Join(10_000) && b.Join(10_000));
+        Assert.True(trial!.Ok, trial.Error);
+        Assert.True(quiet!.Ok, quiet.Error);
+        Assert.Equal("wall 575 → 450 W", quiet.Result!.Value.GetProperty("experiment").GetProperty("Trial").GetProperty("Change").GetString());
     }
 
     /// <summary>A measurement holds judge.lock: every other write waits, and the holder's own (its lease on the request,

@@ -467,7 +467,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "the curve's top). Combine with set_power_limit / set_current_limit to pin it lower down the curve. If it fails " +
         "(TDR, Xid, data error, crash, hang, or a driver reset in the System log during the run) while a trial is in force, " +
         "the trial is recorded as a crash (after a driver reset by the service itself, with the voltage it hung at) and the " +
-        "daily profile goes back on. The result goes into the tuning log. Blocks for the run's length.")]
+        "daily profile goes back on. It holds the card while it runs, as the lab does: no other write lands under it, and " +
+        "another run must finish first. The result goes into the tuning log. Blocks for the run's length.")]
     public string StressTest(
         [Description("0..100; 100 = continuous full load (default).")] int load = 100,
         [Description("Run length in seconds, 10..300 (default 60).")] int seconds = 60,
@@ -479,11 +480,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (maxC is < 50 or > StressMaxCeilingC) throw new ArgumentException($"maxTempC is 50..{StressMaxCeilingC}");
         if (seconds < 10 || seconds > MaxStressSeconds) throw new ArgumentException($"seconds is 10..{MaxStressSeconds} (CLOCKTAIL_MCP_MAX_STRESS_S)");
         string exe = Nvgwls.Find() ?? throw new InvalidOperationException("nvgwls.exe was not found beside the loaded driver");
-        var before = card.Read();
         var samples = new List<Card.Sample>();
-        var started = DateTime.UtcNow;
-        // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
-        residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
         int? code;
         bool tooHot = false;
         int hotRun = 0;
@@ -502,8 +499,20 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         }
         // A hang must be called only after the driver has had its TdrDelay to reset (30 s on the reference machine).
         int grace = (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null)?.StressGraceS ?? 30;
-        try { code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot, grace); }
-        finally { residency.StressUntil(DateTimeOffset.MinValue); }
+        // The run holds the card (judge.lock): no write but its own lands under it, it starts once none is landing, and its
+        // result is the trial's in force then. Given back before anything is recorded: a crash puts the daily profile back.
+        var hold = HoldCard("stress_test", olderToo: false);
+        Card.Look before;
+        var started = DateTime.UtcNow;
+        try
+        {
+            before = card.Read();   // the card as the run finds it, once no write is landing
+            started = DateTime.UtcNow;
+            // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
+            residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
+            code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot, grace);
+        }
+        finally { residency.StressUntil(DateTimeOffset.MinValue); hold.Dispose(); }
         int? resets = tooHot ? Nvgwls.DriverResets(started, 0) : Nvgwls.DriverResets(started, code);
         double ranS = Math.Round((DateTime.UtcNow - started).TotalSeconds);
         string verdict = tooHot && resets is not > 0
@@ -547,23 +556,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         int? pointIndex = p50Mv is { } mv && Nearest(before.Curve, (uint)(mv * 1000)) is { } pt ? pt.Index : null;
         var shift = CurveShift(before.Curve, ReadCurveOrNull(), pointIndex, held);
 
-        bool trial = TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")) == true;
+        bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
             + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
-        bool crashRecorded = false;
-        if (failed && trial)
-        {
-            // A driver reset is the service's to record: it gives the cells back and records the trial as the crash, with
-            // the flight recorder's voltage, seconds after the event. Recording it here too wrote a second entry without the
-            // voltage, and the service's then blamed the daily profile. Only when it has not within the wait, or the run
-            // failed with no reset (a data error), is it recorded here.
-            if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
-                crashRecorded = true;
-            else
-                crashRecorded = card.Broker(BrokerRequest.OpExperiment, "crash", $"nvgwls -l {load} {seconds} s: {verdict}").Ok;
-        }
+        bool crashRecorded = failed && RecordCrash(hold, resets, $"nvgwls -l {load} {seconds} s: {verdict}");
         return Out(new
         {
             passed = code == 0 && !failed,
@@ -687,6 +685,60 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         }
     }
 
+    /// <summary>The fields of a trial that say nothing about what the card runs: when and why it was written, how it ended,
+    /// the operating point at the write, and what a hand-back takes off it (a fixed fan duty, current limits).</summary>
+    private static readonly HashSet<string> NotSettings = ["At", "Change", "Marked", "Ending", "AtUv", "AtMhz", "FanPct", "NvvddMa", "MsvddMa", "Writes"];
+
+    /// <summary>
+    /// The settings the trial in force runs, from a "show" or "quiet" answer: every field but when and why it was written
+    /// and what a hand-back of trial-only cells takes off it, and its writes but the trial-only ones (a clock floor or lock,
+    /// the F8 request). A run's crash goes to the trial in force at its end only when these are the ones it measured: the
+    /// fan guard handing the fans back mid-run writes the trial again (a new "At") with the same settings. Null when no trial
+    /// is in force or the answer cannot be read.
+    /// </summary>
+    public static string? TrialSettings(BrokerAnswer show)
+    {
+        if (!show.Ok || show.Result is not { } r || !r.TryGetProperty("experiment", out var e) || e.ValueKind != JsonValueKind.Object
+            || !e.TryGetProperty("Trial", out var t) || t.ValueKind != JsonValueKind.Object) return null;
+        var parts = t.EnumerateObject().Where(p => !NotSettings.Contains(p.Name)).OrderBy(p => p.Name, StringComparer.Ordinal)
+            .Select(p => $"{p.Name}={p.Value.GetRawText()}").ToList();
+        if (t.TryGetProperty("Writes", out var ws) && ws.ValueKind == JsonValueKind.Array)
+            parts.AddRange(ws.EnumerateArray()
+                .Where(w => !(Str(w, "Kind") is { } k && Str(w, "Key") is { } key && DailyProfile.TrialOnly(k, key)))
+                .Select(w => w.GetRawText()));
+        return string.Join("|", parts);
+    }
+
+    /// <summary>How many times a measurement asks the service to settle before it gives up (each ask waits up to the
+    /// service's own 30 s for the operation in flight).</summary>
+    public const int QuietTries = 4;
+
+    /// <summary>
+    /// A measurement's start, once it holds judge.lock: "quiet", which the service answers once no operation is in flight
+    /// (a write that looked at the lock before it was there may still be landing), asked again while the service is busy
+    /// (WindowBusy), at most <paramref name="tries"/> times. The answer is the service's "show": the trial the run measures.
+    /// A service from before 0.3.7 does not know "quiet" (BadRequest, <paramref name="older"/>), and its "show" stands in;
+    /// one that cannot be reached writes nothing, and its answer stands. Throws when the service stays busy or stops
+    /// answering: nothing is run.
+    /// </summary>
+    public static BrokerAnswer Quiet(Func<string, BrokerAnswer> experiment, int tries, Action<TimeSpan> sleep, out bool older)
+    {
+        older = false;
+        for (int ask = 1; ; ask++)
+        {
+            var q = experiment("quiet");
+            if (q.Ok || q.Code == BrokerCode.BrokerUnreachable) return q;
+            if (q.Code == BrokerCode.BadRequest)
+            {
+                older = true;
+                return experiment("show");
+            }
+            if (q.Code != BrokerCode.WindowBusy || ask >= tries)
+                throw new InvalidOperationException($"the service did not settle before the run ({q.Error ?? "no answer"}): nothing was run; try again");
+            sleep(TimeSpan.FromSeconds(1));
+        }
+    }
+
     [McpServerTool(Name = "mark_crash", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "The game crashed to the desktop (or froze) with no driver reset: record the trial in force as a crash, with what " +
         "the player saw, and put the daily profile back at once. A driver reset is recorded by the broker by itself; use " +
@@ -714,6 +766,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "or driver reset until load_daily. The trial in force (if any) ends as survived. Tell the person before calling this.")]
     public string Stock()
     {
+        // Since 0.3.7 "stock" suspends the profile and puts the card back in one operation, so its trial leaves the record
+        // only once that landed, and answers with the recovery; a service from before does not know it, and "off" then a
+        // recovery stand in.
+        var stock = card.Broker(BrokerRequest.OpProfile, "stock");
+        if (stock.Code != BrokerCode.BadRequest)
+            return Applied(stock.Result is { } res && res.TryGetProperty("recover", out var rec) && rec.ValueKind == JsonValueKind.Object ? stock with { Result = rec } : stock, null);
         var off = card.Broker(BrokerRequest.OpProfile, "off");
         return off.Ok ? Applied(card.Broker(BrokerRequest.OpRecover), null) : Applied(off, null);
     }

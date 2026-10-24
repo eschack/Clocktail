@@ -80,8 +80,9 @@ public sealed class DriverResetResponder(
         bool recorded = false;
         while (true)
         {
-            // Only the first attempt that reaches recovery records the crash; a retry is the same reset.
-            var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? null : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
+            // Only the first attempt that reaches recovery records the crash; a retry is the same reset, and says so: a plain
+            // recovery would take the trial off the record before "crashed" could record its crash.
+            var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? BrokerRequest.RecoverAfterDriverResetAgain : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
             recorded |= r.Result != null;
             if (r.Ok)
             {

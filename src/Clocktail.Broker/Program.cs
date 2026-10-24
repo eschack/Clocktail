@@ -103,13 +103,15 @@ static int Run()
     var host = new SystemHost();
     var hw = new NvClient(mgr.NvApi);                       // the default write whitelist: exactly what the CLI would use
     var judgePath = BrokerPaths.JudgeLockPath();
+    // The run holding judge.lock, if any; BrokerDispatcher.Judge lets through its own writes (its lease), the fan guard's
+    // (SafetyLease), and the rest of an operation the run waits for.
+    string trace = "";
+    var decide = BrokerDispatcher.Judge(() => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out trace));
     Func<string?> judge = () =>
     {
-        var live = JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out var trace);
-        // The holder's own writes carry its RunId as their lease: the lab writes its next candidate while it holds the card.
-        bool own = live?.RunId is { } run && run == BrokerDispatcher.CurrentLease.Value;
-        Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {(live == null ? "free" : own ? "held by this request's own lease" : "busy")}");   // one line per write op
-        return live == null || own ? null : JudgeLock.Reason(live);
+        var busy = decide();
+        Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {busy ?? "go ahead"}");   // one line per look
+        return busy;
     };
     var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
     var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
@@ -271,18 +273,26 @@ static int Status()
 }
 
 /// <summary>The card back to stock before an uninstall: the daily profile is suspended (so nothing puts it back) and
-/// everything the broker owes is given back through the ordinary recovery.</summary>
+/// everything the broker owes is given back through the ordinary recovery, in one operation ("stock", 0.3.7), so the
+/// trial in force leaves the record once that landed. A broker from before does not know "stock": "off" then a recovery.</summary>
 static int Stock()
 {
-    var off = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off"), connectMs: 800);
-    if (off == null)
+    var stock = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpProfile, Kind: "stock"), connectMs: 800);
+    if (stock == null)
     {
         Console.Error.WriteLine("broker: no broker answers on the pipe; nothing to put back");
         return 1;
     }
+    if (stock.Code != BrokerCode.BadRequest)
+    {
+        var recover = stock.Result is { } r && r.TryGetProperty("recover", out var rec) ? rec : (JsonElement?)null;
+        Console.WriteLine(JsonSerializer.Serialize(new { suspended = true, stock = stock.Ok, error = stock.Error, recover }, BrokerResponse.Json));
+        return stock.Ok ? 0 : 1;
+    }
+    var off = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off"), connectMs: 800);
     var back = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpRecover));
-    Console.WriteLine(JsonSerializer.Serialize(new { suspended = off.Ok, stock = back?.Ok ?? false, error = off.Error ?? back?.Error, recover = back?.Result }, BrokerResponse.Json));
-    return off.Ok && back?.Ok == true ? 0 : 1;
+    Console.WriteLine(JsonSerializer.Serialize(new { suspended = off?.Ok ?? false, stock = back?.Ok ?? false, error = off?.Error ?? back?.Error, recover = back?.Result }, BrokerResponse.Json));
+    return off?.Ok == true && back?.Ok == true ? 0 : 1;
 }
 
 static int NotWindows()

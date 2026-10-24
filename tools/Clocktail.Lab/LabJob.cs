@@ -76,7 +76,11 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// <summary>
     /// Holds the card for one measurement (a candidate written and measured, a comparison's four runs): judge.lock with this
     /// job's RunId, so every write but this job's own waits until it is given back. Waits for another run that holds it (a
-    /// lab_test, StabilityLab) up to <see cref="LeaseWaitMinutes"/>; null when it never came free or a stop was asked.
+    /// lab_test, StabilityLab) up to <see cref="LeaseWaitMinutes"/>; null when it never came free or a stop was asked. Then
+    /// the service is asked for "quiet", answered once no operation is in flight: a write that looked at judge.lock before
+    /// it was there may still be landing (until 0.3.7 a measurement could start in the middle of one). The lock says the job
+    /// waits so (<see cref="JudgeLock.Info.Waits"/>), so such an operation finishes rather than stop part-way. How each
+    /// answer is taken: <see cref="Quiet"/>.
     /// </summary>
     protected IDisposable? Hold(Action<string>? log)
     {
@@ -85,8 +89,20 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
         bool told = false;
         while (!StopAsked)
         {
-            if (JudgeLock.TryAcquire(path, new JudgeLock.Info(Environment.ProcessId, RunId, $"clocktail-lab {RunId}", DateTimeOffset.UtcNow), Host, local, out var heldBy))
-                return new Lease(path, RunId);
+            if (JudgeLock.TryAcquire(path, new JudgeLock.Info(Environment.ProcessId, RunId, $"clocktail-lab {RunId}", DateTimeOffset.UtcNow, Waits: true), Host, local, out var heldBy))
+            {
+                while (true)
+                {
+                    var settled = Quiet(() => BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpExperiment, stableId, Kind: "quiet", Lease: RunId)));
+                    if (settled == Settled.Go) return new Lease(path, RunId);
+                    if (settled == Settled.No || DateTime.UtcNow > until || StopAsked)
+                    {
+                        JudgeLock.Release(path, RunId);
+                        return null;
+                    }
+                    Thread.Sleep(1000);   // a busy service answers after its own 30 s; a broken exchange is asked again after a breath
+                }
+            }
             if (DateTime.UtcNow > until) return null;
             if (!told) { log?.Invoke($"another run holds the card ({heldBy}): waiting for it"); told = true; }
             for (int i = 0; i < 5 && !StopAsked; i++) Thread.Sleep(1000);
@@ -96,19 +112,39 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
 
     public const int LeaseWaitMinutes = 10;
 
+    /// <summary>What one ask of "quiet" means for a job about to measure (<see cref="Quiet"/>).</summary>
+    public enum Settled { Go, Again, No }
+
+    /// <summary>
+    /// One ask of "quiet" (<paramref name="ask"/>: the service's answer, null when it could not be reached). Go: nothing is
+    /// landing (it answered; a service from before 0.3.7 does not know "quiet"; one that cannot be reached writes nothing).
+    /// Again: it is busy, or the exchange broke after the request went out, which says nothing about what is landing (until
+    /// 0.3.7 the job took that as nothing to wait for). No: any other refusal.
+    /// </summary>
+    public static Settled Quiet(Func<BrokerResponse?> ask)
+    {
+        BrokerResponse? q;
+        try { q = ask(); }
+        catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException) { return Settled.Again; }
+        return q is null || q.Ok || q.Code == BrokerCode.BadRequest ? Settled.Go
+            : q.Code == BrokerCode.WindowBusy ? Settled.Again : Settled.No;
+    }
+
     private sealed class Lease(string path, string runId) : IDisposable
     {
         public void Dispose() => JudgeLock.Release(path, runId);
     }
 
-    /// <summary>When the trial in force was written (the service's record), or null when none is: taken right after this job's
-    /// write and again after its measurement, the two must match, or the result is not the setting's.</summary>
+    /// <summary>When the trial in force was written (the service's record), with how it ended when that is on record (the
+    /// card held while someone ended it: back_to_daily during the run), or null when none is: taken right after this job's
+    /// write and again after its measurement, the two must match, or the result is not the setting's. Since 0.3.7 a trial
+    /// someone ended stays in force until the card is free, so its write time alone would match.</summary>
     protected string? TrialAt()
     {
         var r = Broker("show");
         return r is { Ok: true, Result: { } res } && res.TryGetProperty("experiment", out var exp) && exp.ValueKind == JsonValueKind.Object
             && exp.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object && t.TryGetProperty("At", out var at)
-            ? at.ToString() : null;
+            ? at.ToString() + (t.TryGetProperty("Ending", out var end) && end.ValueKind == JsonValueKind.String ? $" ({end.GetString()})" : "") : null;
     }
 
     /// <summary>One measurement in a child lab process. The child is tied to this process (it never outlives the job) and is
