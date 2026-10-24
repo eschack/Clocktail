@@ -5,6 +5,11 @@ set -euo pipefail
 ver="${1:?version, e.g. 0.1.0}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/out"
+
+# The tests first, as CI runs them: a release is never built from a tree whose tests fail.
+dotnet test "$root/tests/Clocktail.Tests" -c Release -nologo -v quiet
+node --test "$root"/npm/test/*.test.js
+
 rm -rf "$out" && mkdir -p "$out/bin"
 for p in src/Clocktail.Broker tools/Clocktail.Mcp tools/Clocktail.Lab src/Clocktail.Cli; do
   dotnet publish "$root/$p" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \

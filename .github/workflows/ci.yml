@@ -1,0 +1,31 @@
+# Every push and pull request: the .NET tests (no GPU or driver: the hardware is faked) and the installer's tests, on
+# Windows, where Clocktail runs, and on Linux, where releases can be built.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: .NET tests
+        run: dotnet test tests/Clocktail.Tests -c Release -nologo
+      - name: Installer tests
+        # Quoted: node expands the pattern itself (Node 21 on), the same under PowerShell and bash; a directory
+        # argument is not searched for tests on every Node version.
+        run: node --test "npm/test/*.test.js"
