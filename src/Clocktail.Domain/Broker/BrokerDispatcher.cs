@@ -56,7 +56,7 @@ public interface IGpuTargets
 /// The operation set is the whitelist, and the write verb reaches only the <see cref="WriteRegistry"/>: there is
 /// no raw-slot or register verb to call.
 /// </summary>
-public sealed class BrokerDispatcher
+public sealed partial class BrokerDispatcher
 {
     private readonly NvClient _hw;
     private readonly IGpuTargets _gpus;
@@ -778,8 +778,7 @@ public sealed class BrokerDispatcher
                         if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key.ToLowerInvariant()}");
                         extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
                     }
-                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
-                    && memoryKhz == null && !extra.Any(w => w.Kind == ClockOffsets.Kind);
+                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True;
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
@@ -833,9 +832,18 @@ public sealed class BrokerDispatcher
                         queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
                     foreach (var w in extra)
                         queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key.ToLowerInvariant()}") }));
+                    var coupledBefore = queue.Any(q => q.Request.Kind == ClockOffsets.Kind) ? VfReader.Read(_hw, target.Session) : null;
+                    var p0Before = coupledBefore == null ? null : Pstates20Reader.Read(_hw, target.Session);
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
+                        if (request.Kind == ClockOffsets.Kind && keepCurve)
+                        {
+                            var p0 = Dispatch(request with { PreserveEffectiveCurve = true });
+                            written.Add(p0);
+                            if (p0.Ok && p0.Result is { } verified) curve = verified.GetProperty("curve").GetString()!;
+                            continue;
+                        }
                         // The trial writes its curve right after (unless it keeps the one on the card): a curve this broker does
                         // not hold (adopted, or another tool's the person tunes from) is set aside too, and comes back with it.
                         if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!, curveFollows: !keepCurve) is { } aside)
@@ -853,7 +861,7 @@ public sealed class BrokerDispatcher
                         // The items before the one that failed landed: they go back to what they were, last first (the
                         // order they went on in respects every write's constraint, so the reverse does too: a curve set
                         // aside for a memory write comes back after the memory offset), and the trial before stays in force.
-                        var undone = PutBackLanded(target, written);
+                        var undone = PutBackLanded(target, written, coupledBefore, p0Before);
                         bool clean = undone.All(x => x.Ok);
                         Log(target, $"Trial did not land · {exp.Game}", [$"Change: {change}", .. context, .. written.SelectMany(Writes),
                             undone.Count == 0 ? "The previous trial (if any) is still on the card"
@@ -1058,7 +1066,8 @@ public sealed class BrokerDispatcher
             var wp = WriteRegistry.Find(item.Kind) ?? throw new InvalidOperationException($"this version cannot keep '{item.Id}'");
             var cell = wp.Prepare(_hw, target.Session, item.Key, item.Original, WriteOptions.Recovery).Cell;
             var now = writer.Look(target.Session, cell) ?? throw new InvalidOperationException($"{cell.Id} could not be read; nothing kept");
-            if (now != item.Original) writes.Add(new ProfileWrite(item.Kind, item.Key, now));
+            if (now != item.Original || item.Kind == VfWrites.Kind && held.Any(i => i.Kind == ClockOffsets.Kind))
+                writes.Add(new ProfileWrite(item.Kind, item.Key, now));
         }
         // Adopt: what another tool left on the card and Clocktail neither holds nor keeps (the curve, the P0 and clock-domain
         // offsets, the voltage demands, the boost) is kept as it is now. Its wall, fixed fans and clock locks are not: the
@@ -1128,6 +1137,11 @@ public sealed class BrokerDispatcher
             if (r.Ok)
             {
                 target.Journal.Release(c.Kind, c.Key);
+                if (c.Kind == ClockOffsets.Kind)
+                {
+                    var curve = VfReader.Read(_hw, target.Session);
+                    new OwnedWriter(_hw, target.Journal, target.Sentinel, _host).ReleaseIfRestored(target.Session, VfWrites.Cell(curve));
+                }
                 cleared.Add($"{c.Name}: {c.Describe(c.Now)} → stock ({c.Describe(c.Stock)})");
                 continue;
             }
@@ -1323,19 +1337,51 @@ public sealed class BrokerDispatcher
     private static JsonElement[] AppliedOf(BrokerResponse r) =>
         r.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
 
-    /// <summary>Each write that landed, put back to the value it replaced, last first: a write that changed nothing is
-    /// skipped. Every put-back is an ordinary write, so the journal releases a cell that is back at its original.</summary>
-    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written)
+    /// <summary>Put landed cells back to their earliest before value. P0 restores precede the captured V/F curve,
+    /// since an inverse P0 write can itself wipe or mirror its controls. Other cells retain reverse write order.</summary>
+    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written,
+        VfCurveSnapshot? curveBefore = null, Pstates20Snapshot? p0Before = null)
     {
         var undone = new List<BrokerResponse>();
-        foreach (var w in written.Where(x => x.Ok).Reverse())
-            foreach (var item in AppliedOf(w).Reverse())
+        var cells = new Dictionary<(string Kind, string Key), string>();
+        foreach (var w in written.Where(x => x.Ok))
+            foreach (var item in AppliedOf(w))
             {
                 string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after"))
+                bool coupled = item.TryGetProperty("coupled", out var c) && c.ValueKind == JsonValueKind.True;
+                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after") && !coupled)
                     continue;
-                undone.Add(Dispatch(WriteOf(target, kind, key, before)));
+                cells.TryAdd((kind, key), before);
             }
+        var order = cells.Reverse().ToList();
+        if (cells.Keys.Any(k => k.Kind == ClockOffsets.Kind))
+            order = [.. order.Where(c => c.Key.Kind != VfWrites.Kind), .. order.Where(c => c.Key.Kind == VfWrites.Kind)];
+        foreach (var (cell, before) in order)
+        {
+            if (cell.Kind == ClockOffsets.Kind && CurveAside(target, cell.Key, before, curveFollows: true) is { } aside)
+            {
+                undone.Add(aside);
+                if (!aside.Ok) break;
+            }
+            undone.Add(Dispatch(WriteOf(target, cell.Kind, cell.Key, before)));
+        }
+        if (curveBefore != null && p0Before != null && cells.Count != 0)
+        {
+            try
+            {
+                var curveNow = VfReader.Read(_hw, target.Session);
+                if (!curveBefore.Offsets().SequenceEqual(curveNow.Offsets()) || VfEffectiveCurve.Mismatch(curveBefore, curveNow) != null
+                    || Transaction.FirstDifference(p0Before.Raw, Pstates20Reader.Read(_hw, target.Session).Raw, Pstates20Layout.StatusRanges) != null)
+                    throw new InvalidOperationException("the previous P0 controls and effective curve did not all return");
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException)
+            {
+                target.Sentinel.Begin("trial rollback unverified", takeOver: true, e.Message);
+                undone.Add(new BrokerResponse(false, e.Message + "; run recovery before tuning",
+                    Element(new { applied = new[] { new { kind = VfWrites.Kind, key = VfWrites.CoreKey,
+                        outcome = nameof(TxOutcome.Failed), restore = nameof(RestoreState.RestoreFailed), state_known = false } } }), BrokerCode.Failed));
+            }
+        }
         return undone;
     }
 
@@ -1707,6 +1753,7 @@ public sealed class BrokerDispatcher
     private BrokerResponse Write(IGpuTarget target, BrokerRequest req)
     {
         if (!_canWrite) return Fail(NeedsAdmin, BrokerCode.NeedsAdmin);
+        if (req.Kind == ClockOffsets.Kind && req.PreserveEffectiveCurve) return WriteP0WithCurve(target, req);
         var path = WriteRegistry.Find(req.Kind);
         if (path == null) return Fail($"'{req.Kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})", BrokerCode.NotAPath);
         if (req.Key == null || req.Value == null) return Fail("a write names a kind, a key and a value", BrokerCode.BadRequest);
@@ -1720,7 +1767,13 @@ public sealed class BrokerDispatcher
         var p = path.Prepare(hw, target.Session, req.Key, req.Value, new WriteOptions(req.AllowCreate, Original: original));
         if (p.Plan == null) return Fail(p.CannotWrite ?? $"{p.Cell.Id} cannot be written from '{req.Value}'", BrokerCode.CannotWrite);
 
-        var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value);
+        // Even zero point controls can change implicitly when P0 is written. Capture them before that setter,
+        // rather than letting the following explicit V/F write mistake a native side effect for the original.
+        var coupled = path.Kind == ClockOffsets.Kind && _hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) != 0
+            ? VfReader.Read(hw, target.Session) : null;
+        var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value,
+            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(VfWrites.Cell(coupled), coupled.Control));
+        if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(target.Session, VfWrites.Cell(coupled));
         return new BrokerResponse(r.Tx.Succeeded, Result: Element(new
         {
             success = r.Tx.Succeeded,

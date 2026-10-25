@@ -1924,8 +1924,11 @@ public class BrokerDispatcherTests : IDisposable
     [Fact]
     public void A_core_offset_trial_writes_the_curve_back_and_keep_takes_it_from_the_card()
     {
-        new FakeVf().Install();
+        var vf = new FakeVf();
+        vf.Install();
         int core = Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 0);
+        // Model the additive effective-frequency change as well as the raw P0 delta.
+        vf.Effective = (i, offset) => checked((uint)(vf.Base(i) + offset + BitConverter.ToInt32(FakeDriver.State[FakeVf.PstatesWord], core + 0xc)));
         var vfApplier = FakeDriver.RequestApplier!;
         FakeDriver.RequestApplier = (state, req) =>
         {

@@ -543,7 +543,7 @@ public sealed class VfWrites(NvClient hw, OwnershipJournal journal, ApplySentine
             foreach (var p in s0.Points)
                 if (BitConverter.ToUInt32(raw, VfLayout.Control(p.Index)) != 0) return null;
             return VfOffsets.Encode(VfParser.Offsets(raw, s0.EditableCount));
-        });
+        }, CoupledKinds: [ClockOffsets.Kind]);
 
     public static Func<ReadOnlyMemory<byte>, Mutation> Plan(VfCurveSnapshot s0, VfLimits limits, IReadOnlyList<int> target, bool enforceRange = true) =>
         raw => VfRules.Plan(s0, limits, target, raw.ToArray(), enforceRange);

@@ -48,7 +48,9 @@ public sealed record BrokerRequest(
     /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
-    DateTimeOffset? AnsweredAt = null)
+    DateTimeOffset? AnsweredAt = null,
+    /// <summary>For a P0 write: preserve the effective curve, shifting it by the change in the core target.</summary>
+    bool PreserveEffectiveCurve = false)
 {
     public const string OpPing = "ping";
     public const string OpOwnership = "ownership";

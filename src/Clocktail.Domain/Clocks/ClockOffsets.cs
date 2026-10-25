@@ -51,7 +51,7 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
     /// +358 MHz written 22 s after a curve cleared it during a stability run; reproduced by the V/F thread, while a
     /// power-limit write leaves the curve alone). So a P0 offset that would change is refused while any point offset is
     /// non-zero: the order is P0 offsets, then the power limit, then the curve, and the rule lives here so no caller
-    /// has to remember it. Recovery gives the curve back before the P0 offsets for the same reason.
+    /// has to remember it. Recovery restores P0 offsets before the captured curve, with CurveFollows set.
     /// </para>
     /// </summary>
     /// <param name="curve">The V/F point offsets read for this write (<see cref="Curve"/>), or null when the driver has
@@ -89,7 +89,11 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
 
     public ClockApplyResult Apply(GpuSession gpu, ClockDomain domain, int deltaKhz, bool takeOver = false)
     {
-        var r = new OwnedWriter(hw, journal, sentinel, host).Apply(gpu, Cell(domain), Plan(domain, deltaKhz, Curve(hw, gpu)), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture));
+        var writer = new OwnedWriter(hw, journal, sentinel, host);
+        var coupled = hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0 ? null : VfReader.Read(hw, gpu);
+        var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, Curve(hw, gpu)), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
+            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(VfWrites.Cell(coupled), coupled.Control));
+        if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(gpu, VfWrites.Cell(coupled));
         var before = Entry(r.Tx.Before, domain);
         // The readback describes the hardware unless the write failed and was verifiably restored (then: before).
         var after = r.Tx.Outcome == TxOutcome.Aborted || r.Tx.Restore == RestoreState.Restored ? before
