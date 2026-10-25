@@ -30,6 +30,9 @@ public sealed partial class BrokerDispatcher
             var entry = p0.P0(domain) ?? throw new InvalidDataException($"P0 has no {domain} clock entry");
             var initialPlan = Pstates20Rules.Plan(p0, domain, khz);
             if (initialPlan is Mutation.Abort abort) return Fail(abort.Reason, BrokerCode.CannotWrite);
+            var effectiveTarget = req.EffectiveCoreTargetKhz;
+            if (effectiveTarget != null && before.Mode != VfMode.Regional)
+                return Fail("this daily profile has a P0 core target without an explicit V/F curve; a legacy derived baseline cannot verify its uniform effective target: save an explicit verified curve", BrokerCode.CannotWrite);
             long delta = domain == ClockDomain.Core ? (long)khz - entry.DeltaKhz : 0;
             if (domain == ClockDomain.Core && VfBudget.Of(before)
                 .Check(VfLimits.From(p0), khz) is { } over)
@@ -60,21 +63,29 @@ public sealed partial class BrokerDispatcher
 
             void Verify(VfCurveSnapshot actual)
             {
-                if (VfEffectiveCurve.Mismatch(before, actual, delta) is { } mismatch)
-                    throw new InvalidOperationException(mismatch);
+                VfEffectiveCurve.RequireSameCurve(before, actual);
+                if (effectiveTarget is { } targetKhz)
+                {
+                    foreach (var point in actual.Points)
+                        if (Math.Abs(VfEffectiveCurve.Displacement(point) - targetKhz) >= 1_000)
+                            throw new InvalidOperationException($"point {point.Index}: the daily effective Core target {targetKhz} kHz did not verify");
+                }
+                else if (VfEffectiveCurve.Mismatch(before, actual, delta) is { } mismatch) throw new InvalidOperationException(mismatch);
                 if (Pstates20Reader.Read(hw, gpu).P0(domain)?.DeltaKhz != khz)
                     throw new InvalidOperationException("P0 target no longer matches its readback");
             }
 
             try
             {
-                if (entry.DeltaKhz != khz)
+                bool p0Changes = entry.DeltaKhz != khz;
+                bool curveNeedsRepair = effectiveTarget is { } targetKhz && before.Points.Any(p => Math.Abs(VfEffectiveCurve.Displacement(p) - targetKhz) >= 1_000);
+                if (p0Changes || curveNeedsRepair)
                 {
                     writer.ClaimOriginal(vfCell, before.Control);
                     // The ordinary P0 path refuses to wipe a nonzero curve. Set it aside through its own rules.
-                    if (before.Offsets().Any(o => o != 0))
+                    if (p0Changes && before.Offsets().Any(o => o != 0))
                         Set(VfWrites.Kind, VfWrites.CoreKey, VfOffsets.Encode(new int[before.EditableCount]), retain: true);
-                    Set(ClockOffsets.Kind, ClockOffsets.Key(domain), khz.ToString(CultureInfo.InvariantCulture));
+                    if (p0Changes) Set(ClockOffsets.Kind, ClockOffsets.Key(domain), khz.ToString(CultureInfo.InvariantCulture));
 
                     var native = VfReader.Read(hw, gpu);
                     VfEffectiveCurve.RequireSameCurve(before, native);
@@ -85,7 +96,8 @@ public sealed partial class BrokerDispatcher
                         // tuning. Never add the requested offset to both representations: use only the observed error.
                         repair = native.Points.Select((point, i) =>
                         {
-                            long error = VfEffectiveCurve.Displacement(before.Points[i]) + delta - VfEffectiveCurve.Displacement(point);
+                            long desired = effectiveTarget ?? VfEffectiveCurve.Displacement(before.Points[i]) + delta;
+                            long error = desired - VfEffectiveCurve.Displacement(point);
                             if (Math.Abs(error) < 1_000) return point.OffsetKhz;
                             long correction = checked((long)Math.Round(error / (double)VfShapes.StepKhz) * VfShapes.StepKhz);
                             if (Math.Abs(error - correction) >= 1_000)
@@ -120,7 +132,7 @@ public sealed partial class BrokerDispatcher
                         new { kind = ClockOffsets.Kind, key = ClockOffsets.Key(domain), before = entry.DeltaKhz.ToString(CultureInfo.InvariantCulture),
                             after = khz.ToString(CultureInfo.InvariantCulture), outcome = entry.DeltaKhz == khz ? "NoChange" : "Applied", coupled = true },
                         new { kind = VfWrites.Kind, key = VfWrites.CoreKey, before = VfOffsets.Encode(before.Offsets()),
-                            after = VfOffsets.Encode(after.Offsets()), outcome = entry.DeltaKhz == khz ? "NoChange" : "Applied", coupled = true },
+                            after = VfOffsets.Encode(after.Offsets()), outcome = p0Changes || !before.Offsets().SequenceEqual(after.Offsets()) ? "Applied" : "NoChange", coupled = true },
                     },
                 });
             }

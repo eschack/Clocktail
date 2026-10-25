@@ -34,14 +34,14 @@ Validation on 2026-10-25:
 
 ```
 dotnet test tests/Clocktail.Tests -c Release --no-restore --nologo
-# 993 passed, 0 failed, 0 skipped
+# 1013 passed, 0 failed, 0 skipped
 dotnet build Clocktail.slnx -c Release --nologo
 # 0 warnings, 0 errors
 ```
 
 ## Write and ownership behavior
 
-A preserving P0 trial holds one GPU lock and sentinel across original
+A preserving P0 write holds one GPU lock and sentinel across original
 capture, native write, any curve repair, verification and rollback. The V/F
 original is on disk before the first possible P0 side effect. An existing
 journal original always wins.
@@ -72,10 +72,68 @@ whole coupled result. Unverified rollback retains originals and the
 sentinel, and reports an unknown write outcome. Verified rollback reports
 that nothing remains written.
 
+## Startup evidence and daily restoration follow-up
+
+The supplied `tuning-log.md`, `profile.json` and `ownership.json` under
+`%LOCALAPPDATA%/Clocktail/pci-2c0210de-89de1043-00002c02-b01-s00/` were read
+without modifying them. At 2026-10-25 22:04:05 Europe/Copenhagen (21:04:05Z),
+the installed `0.4.0-fork.7a0bfd8-prompt1` build logged core 0 -> +240 MHz,
+then aborted memory before its setter because all 127 V/F offsets were
+nonzero. Power 450 W and XBAR +300 MHz applied. The saved daily contains
+core +240, memory +3000, power 450 W and XBAR +300, without `vf/core`.
+The startup journal holds power/core/XBAR originals and no V/F original.
+The supplied subsequent readback reports +240 on all V/F points and memory
+0, with no temporary trial or new recorded reset.
+
+This narrows this startup failure: a successful native memory write did not
+produce the nonzero controls that its guard refused. Core's native side
+effects are consistent with that state. It does not retrospectively isolate
+the original explicit-setter sequence or prove every native intermediate.
+The earlier successful save/readback and Speed Way result remain separate
+observations; no additional workload was performed here.
+
+The first fix, `9d96bd0`, still missed this path. Of the first ten new
+startup regressions, seven failed on it: the overlapping model could apply
+memory but lose effective core tuning, reapplication could give back the
+generated curve, and partial-reporting coverage was incomplete. Three
+further regressions exposed matching raw P0 values masking a lost curve or
+retaining a temporary point-curve trial during back-to-daily.
+
+Daily restoration now uses the coupled path for profiles without an
+explicit V/F entry. A saved P0 core target with no point curve means a
+uniform effective displacement from the independent regional base; it is
+verified and repaired even if raw P0 already matches. Memory then preserves
+that verified effective curve. A memory-only profile preserves the existing
+core shape. An explicit saved V/F entry remains authoritative and is written
+last. A derived legacy base cannot prove the implicit uniform target, so
+that core group fails actionably rather than guessing; an explicit verified
+curve is needed for that legacy profile.
+
+The generated V/F state remains an implicit daily dependency across startup,
+resume and after-reset application. This does not rewrite the saved profile
+during application. A later explicit keep captures its verified V/F entry.
+Dropping a failed explicit core/VF group still restores its true original;
+it is not reclassified as memory's implicit curve. Native-generated curves
+with a captured stock original are attributed to Clocktail. A pre-existing
+external curve retains its actual original and attribution.
+
+Partial responses retain `success=false`, identify omitted groups, and
+include requested/current values and readback availability. Logs say
+`Daily profile partly applied` for a completed degraded application and
+`Daily profile application incomplete` otherwise. They no longer assume an
+omitted setting's original was stock. An unverified coupled rollback stops
+later groups and reports an unknown outcome with the sentinel retained.
+
+`StartupP0Tests` adds twenty fake-driver cases covering the supplied profile,
+both control models, repeat application, a matching raw target with lost
+effective tuning, back-to-daily from a point-curve trial, partial and unknown
+outcomes, nonstock originals, attribution, explicit curves, legacy refusal,
+and software-only keep/recovery/reload.
+
 ## Native uncertainty and coordinated validation
 
-No hardware writes, native profile reloads, installation, service changes,
-resets, reboots or benchmarks were performed. The reported first full
+This software investigation performed no hardware writes, native profile
+reloads, installation, service changes, resets, reboots or benchmarks. The reported first full
 readback followed the complete sequence, so it cannot distinguish loss
 during core from loss during memory. Neither fake model is proven native
 behavior. In particular, the historical workaround reporting P0 +240 and
@@ -97,6 +155,9 @@ With fresh explicit user coordination, validation should:
    method and restoration plan.
 4. Coordinate any deployment, service restart, reset/reboot or benchmark
    separately. Software results do not establish performance or stability.
+   Include startup restoration of the existing P0-only saved daily, verify
+   memory +3000 and effective core +240 independently, and inspect generated
+   V/F ownership and partial-failure reporting. These checks remain pending.
 
 Historical journal entries with a wrongly captured original cannot be
 reconstructed from the current card alone; this fix preserves existing

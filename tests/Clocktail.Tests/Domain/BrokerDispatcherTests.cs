@@ -2131,9 +2131,9 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(res.GetProperty("partial").GetBoolean());
         var left = Assert.Single(res.GetProperty("not_applied").EnumerateArray());
         Assert.Equal("uncore", left.GetProperty("group").GetString());
-        Assert.StartsWith("the daily profile is on, but the uncore (rails/msvdd) stays at stock: rails/msvdd did not apply: readback differs", r.Error);
+        Assert.StartsWith("the daily profile was partly applied; the uncore (rails/msvdd) did not apply: rails/msvdd did not apply: readback differs", r.Error);
         Assert.StartsWith("partly applied, ", DriverResetResponder.ProfileSummary(r));
-        Assert.Contains("Failed: the daily profile is on, but the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+        Assert.Contains("Failed: the daily profile was partly applied; the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
     /// <summary>NVVDD's offsets go with the curve (a REL cut is part of it): when they do not go on, neither does the curve,

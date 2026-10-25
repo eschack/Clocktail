@@ -5,6 +5,7 @@ using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Ownership;
 using Clocktail.Domain.Profiles;
+using Clocktail.Domain.Power;
 using Clocktail.Domain.Vf;
 using Clocktail.Hw;
 
@@ -15,7 +16,7 @@ namespace Clocktail.Tests.Domain;
 [Collection("fake-driver")]
 public sealed class EffectiveP0Tests
 {
-    private sealed class Rig : IGpuTarget, IGpuTargets, IDisposable
+    internal sealed class Rig : IGpuTarget, IGpuTargets, IDisposable
     {
         private readonly string _dir = Path.Combine(Path.GetTempPath(), "clocktail-tests", Guid.NewGuid().ToString("N"));
         private readonly FakeHost _host = new();
@@ -37,15 +38,48 @@ public sealed class EffectiveP0Tests
         public bool RefuseRollback;
         public bool WrongEffective;
         public Action? BeforeP0;
+        public uint PowerMw = 400_000;
         public string ProfilePath => DailyProfile.PathBeside(Journal.Path);
 
-        public Rig(bool shared, bool legacy = false)
+        public Rig(bool shared, bool legacy = false, bool beginSession = true)
         {
             Directory.CreateDirectory(_dir);
             Journal = new(Path.Combine(_dir, "ownership.json"), _host, StableId);
             Sentinel = new(Path.Combine(_dir, "apply.lock"));
             if (legacy) { Vf.Mode = VfMode.Legacy; Vf.Editable = 80; Vf.MaskPoints = 84; }
             Vf.Install();
+            var powerInfo = NvClient.NewBuffer(Slot.ClientPwrPoliciesGetInfo);
+            W(powerInfo, 4, 1);
+            int powerAt = PowerRequestsLayout.InfoEntry(0);
+            W(powerInfo, powerAt, 1); W(powerInfo, powerAt + 8, 250_000); W(powerInfo, powerAt + 12, 400_000); W(powerInfo, powerAt + 16, 450_000);
+            FakeDriver.State[BitConverter.ToUInt32(powerInfo)] = powerInfo;
+            FakeDriver.Seed(Slot.ClientPwrPoliciesGetControl);
+            var domainInfo = ClockDomainsFixture.Topology();
+            var domainControl = ClockDomainsFixture.FullControl();
+            FakeDriver.State[BitConverter.ToUInt32(domainInfo)] = domainInfo;
+            FakeDriver.State[BitConverter.ToUInt32(domainControl)] = domainControl;
+            uint powerWord = Slots.Info(Slot.ClientPwrPoliciesGetControl).Shape!.Value.Word;
+            uint domainsWord = Slots.Info(Slot.ClockClkDomainsGetControl).Shape!.Value.Word;
+            var vfQuery = FakeDriver.QueryResponder!;
+            FakeDriver.QueryResponder = query =>
+            {
+                uint word = BitConverter.ToUInt32(query);
+                if (word == powerWord)
+                {
+                    var answer = (byte[])query.Clone();
+                    W(answer, PowerRequestsLayout.ControlEntry(0), PowerMw);
+                    return answer;
+                }
+                if (word != domainsWord) return vfQuery(query);
+                var control = FakeDriver.State[domainsWord];
+                var result = new byte[control.Length];
+                control.AsSpan(0, ClockDomainsLayout.ControlBase).CopyTo(result);
+                uint mask = BitConverter.ToUInt32(query, 8);
+                W(result, 8, mask);
+                for (int i = 0; i < 32; i++)
+                    if ((mask >> i & 1) != 0) control.AsSpan(ClockDomainsLayout.ControlAt(i), ClockDomainsLayout.ControlEntry).CopyTo(result.AsSpan(ClockDomainsLayout.ControlAt(i)));
+                return result;
+            };
             var p = FakeDriver.State[FakeVf.PstatesWord];
             W(p, 0xc, 2);
             int mem = Pstates20Layout.Clock(0, 1);
@@ -54,6 +88,16 @@ public sealed class EffectiveP0Tests
             var vfSet = FakeDriver.RequestApplier!;
             FakeDriver.RequestApplier = (state, req) =>
             {
+                uint word = BitConverter.ToUInt32(req);
+                if (word == powerWord) { PowerMw = BitConverter.ToUInt32(req, PowerRequestsLayout.ControlEntry(0)); return state; }
+                if (word == domainsWord)
+                {
+                    var result = (byte[])state.Clone();
+                    uint mask = BitConverter.ToUInt32(req, 8);
+                    for (int i = 0; i < 32; i++)
+                        if ((mask >> i & 1) != 0) req.AsSpan(ClockDomainsLayout.ControlAt(i), ClockDomainsLayout.ControlEntry).CopyTo(result.AsSpan(ClockDomainsLayout.ControlAt(i)));
+                    return result;
+                }
                 if (BitConverter.ToUInt32(req) == FakeVf.ControlWord)
                     return RefuseNonzeroCurve && Enumerable.Range(0, 127).Any(i => FakeVf.Off(req, i) != 0) ? state : vfSet(state, req);
                 if (BitConverter.ToUInt32(req) != FakeVf.PstatesWord) return state;
@@ -79,11 +123,12 @@ public sealed class EffectiveP0Tests
             };
             Hw = new(FakeDriver.ApiFor(
                 [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus,
-                 Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20],
-                [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20]),
+                 Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20, Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl,
+                 Slot.ClockClkDomainsGetInfo, Slot.ClockClkDomainsGetControl],
+                [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20, Slot.ClientPwrPoliciesSetControl, Slot.ClockClkDomainsSetControl]),
                 WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
             Broker = new(Hw, this, _host, true);
-            Assert.True(Broker.Dispatch(new(BrokerRequest.OpExperiment, Kind: "begin", Value: """{"game":"software regression"}""")).Ok);
+            if (beginSession) Assert.True(Broker.Dispatch(new(BrokerRequest.OpExperiment, Kind: "begin", Value: """{"game":"software regression"}""")).Ok);
         }
 
         private static void W(byte[] b, int at, uint v) => BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(at), v);

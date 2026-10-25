@@ -525,7 +525,7 @@ public sealed partial class BrokerDispatcher
                     var a = ApplyProfile(target, profile, path);
                     return (a, a);
                 }).Answer;
-                Log(target, "Daily profile applied",[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                Log(target, ProfileApplyTitle(r),[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "resume":
@@ -538,7 +538,7 @@ public sealed partial class BrokerDispatcher
                     return Ok(new { success = true, skipped = "a trial is in force: the agent running it decides", profile });
                 }
                 var r = ApplyProfile(target, profile, path);
-                Log(target, "Daily profile applied after waking up", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                Log(target, ProfileApplyTitle(r) + " after waking up", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "load":
@@ -552,7 +552,7 @@ public sealed partial class BrokerDispatcher
                     var a = ApplyProfile(target, profile, path);
                     return (a, a);
                 }).Answer;
-                Log(target, "Daily profile loaded", Writes(r));
+                Log(target, r.Ok ? "Daily profile loaded" : ProfileApplyTitle(r), Writes(r));
                 return r;
             }
             case "preset":
@@ -680,7 +680,7 @@ public sealed partial class BrokerDispatcher
                     return Ok(new { success = true, skipped = "a trial began after the crash: the agent running it decides", profile });
                 }
                 var r = profile == null ? Ok(new { success = true, path, profile, applied = Array.Empty<object>() }) : ApplyProfile(target, profile, path);
-                Log(target, "Daily profile put back after the crash", [
+                Log(target, r.Ok ? "Daily profile put back after the crash" : ProfileApplyTitle(r) + " after the crash", [
                     req.Value is { } why ? $"Reason: {why}" : null,
                     profile == null ? "No daily profile: the card stays at stock" : profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null,
                     .. Writes(r)]);
@@ -1385,9 +1385,12 @@ public sealed partial class BrokerDispatcher
         return undone;
     }
 
-    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)
+    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole, bool keepImplicitCurve = false)
     {
-        bool Written(OwnedItem i) => profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);
+        // Older P0-only profiles have no VF entry, but still depend on the effective curve generated/preserved by P0.
+        // A later application must not give that dependency back before deciding that the raw P0 is already set.
+        bool Written(OwnedItem i) => profile is { Suspended: false } p &&
+            (p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key) || keepImplicitCurve && i.Kind == VfWrites.Kind);
         // Only a record this broker may act on: one from before the boot (Settle drops it) or another GPU's is not a debt.
         var plan = target.Journal.Inspect();
         if (plan.Reason is not (RecoveryReason.OwnedByThisProcess or RecoveryReason.OwnerDied)) return [];
@@ -1621,6 +1624,9 @@ public sealed partial class BrokerDispatcher
     private static bool Partial(BrokerResponse r) =>
         r.Result is { ValueKind: JsonValueKind.Object } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
 
+    private static string ProfileApplyTitle(BrokerResponse r) => r.Ok ? "Daily profile applied"
+        : Partial(r) ? "Daily profile partly applied" : "Daily profile application incomplete";
+
     private static JsonElement Args(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return default;
@@ -1642,38 +1648,51 @@ public sealed partial class BrokerDispatcher
     /// through the ordinary write op. A write that does not go on (refused, vetoed, or dropped by the driver, as 621.01
     /// drops every rail write) takes the rest of its group with it (<see cref="DailyProfile.Group"/>): the profile goes on
     /// again without that group, which puts any cell of it this broker holds back to its original, and the other groups go
-    /// on as kept. The card is then never left with half of a run, the curve set aside for a memory write and never
-    /// written back. The answer fails, names each group left at stock and why (not_applied), and carries every write.
+    /// on as kept. The answer fails, names each omitted group and its final readback (not_applied), and carries every
+    /// write. An unknown coupled outcome stops application: no later group is written behind a blocked sentinel.
     /// <paramref name="trialStays"/>: under a trial that stays in force, nothing held is put back first.
     /// </summary>
     private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null, bool trialStays = false)
     {
-        var (r, failed) = ApplyOnce(target, profile, path, only, trialStays);
+        // Keep this intent across degraded retries: dropping an explicitly saved core/VF group must give that
+        // group's original curve back, rather than reclassifying it as the surviving memory's implicit curve.
+        bool implicitDependency = profile is { Suspended: false } && !profile.Writes.Any(w => w.Kind == VfWrites.Kind);
+        var (r, failed) = ApplyOnce(target, profile, path, only, trialStays, implicitDependency);
         if (failed == null || profile == null) return r;
         var runs = new List<BrokerResponse> { r };
-        var left = new List<(string Group, List<string> Cells, string Why)>();
+        var left = new List<(string Group, List<ProfileWrite> Writes, string Why)>();
         var writing = profile;
         while (failed != null)
         {
             string group = DailyProfile.Group(failed.Kind, failed.Key);
             bool In(ProfileWrite w) => DailyProfile.Group(w.Kind, w.Key) == group;
-            left.Add((group, [.. writing.Writes.Where(In).Select(w => $"{w.Kind}/{w.Key}")], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
+            left.Add((group, [.. writing.Writes.Where(In)], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
+            if (target.Sentinel.IsBlocked(out _)) break;
             writing = writing with { Writes = [.. writing.Writes.Where(w => !In(w))] };
-            (r, failed) = ApplyOnce(target, writing, path, only, trialStays);
+            (r, failed) = ApplyOnce(target, writing, path, only, trialStays, implicitDependency);
             runs.Add(r);
         }
         // The later runs write again what the first one already put on; only what they changed is worth a line.
         var applied = runs.Take(1).SelectMany(AppliedOf)
             .Concat(runs.Skip(1).SelectMany(AppliedOf).Where(a => !(a.TryGetProperty("outcome", out var o) && o.GetString() == nameof(TxOutcome.NoChange))))
             .ToArray();
-        string stays = string.Join("; ", left.Select(l => $"the {l.Group} ({string.Join(", ", l.Cells)}) stays at stock: {l.Why}"));
-        string error = r.Ok ? $"the daily profile is on, but {stays}" : $"{stays}; and the rest did not all go on: {r.Error}";
+        string stays = string.Join("; ", left.Select(l => $"the {l.Group} ({string.Join(", ", l.Writes.Select(w => $"{w.Kind}/{w.Key}"))}) did not apply: {l.Why}"));
+        string error = r.Ok ? $"the daily profile was partly applied; {stays}" : left.Count == 0 ? r.Error ?? "the daily profile application did not complete"
+            : $"{stays}; and the rest did not all go on: {r.Error}";
         string? skipped = r.Result is { } res && res.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.String ? sk.GetString() : null;
         string? wall = r.Result is { } res2 && res2.TryGetProperty("wall", out var wl) && wl.ValueKind == JsonValueKind.String ? wl.GetString() : null;
         return new BrokerResponse(false, error, Element(new
         {
             success = false, partial = r.Ok, path, profile, applied,
-            not_applied = left.Select(l => new { group = l.Group, cells = l.Cells, why = l.Why }),
+            not_applied = left.Select(l => new
+            {
+                group = l.Group, cells = l.Writes.Select(w => $"{w.Kind}/{w.Key}"), why = l.Why,
+                readback = l.Writes.Select(w =>
+                {
+                    var current = LookNow(target, w.Kind, w.Key, w.Value);
+                    return new { kind = w.Kind, key = w.Key, requested = w.Value, current, state_known = current != null };
+                }),
+            }),
             skipped, wall,
         }), r.Ok ? runs[0].Code : r.Code);
     }
@@ -1688,18 +1707,30 @@ public sealed partial class BrokerDispatcher
 
     /// <summary>One run of <see cref="ApplyProfile"/>: stops at the first write that fails, and names it when it is one of
     /// the profile's own (a held cell that did not go back is not: nothing to leave out, the run just stops).</summary>
-    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only, bool trialStays = false)
+    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only,
+        bool trialStays, bool implicitDependency)
     {
         var applied = new List<JsonElement>();
         // A profile kept on another VBIOS goes on only when someone loads or keeps one (which binds it to this VBIOS):
         // until then whatever puts it on puts the card back to stock instead, as a suspended profile does.
         string? skipped = profile?.OtherVbios(target.Vbios);
         var writing = skipped != null ? null : profile;
+        var selected = writing is { Suspended: false } ? writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)).ToList() : [];
+        bool curveFollows = selected.Any(w => w.Kind == VfWrites.Kind);
+        bool implicitCurve = !curveFollows && selected.Any(w => w.Kind == ClockOffsets.Kind);
+        bool keepImplicitCurve = implicitDependency && implicitCurve;
         // A trial's current limits and fixed fans are never part of a profile, nor anything else a trial set unless the
         // profile writes it too: whatever puts the whole profile on puts them back first (not under a trial that stays).
-        IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null);
+        IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null, keepImplicitCurve);
         foreach (var held in putBack.ToList())
         {
+            if (held.Kind == ClockOffsets.Kind && keepImplicitCurve)
+            {
+                var back = Dispatch(PutBack(target, held) with { PreserveEffectiveCurve = true });
+                applied.AddRange(AppliedOf(back));
+                if (!back.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back: {WhyNot(back)}", Element(new { success = false, path, profile, applied }), back.Code), null);
+                continue;
+            }
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {
                 applied.AddRange(AppliedOf(aside));
@@ -1709,11 +1740,24 @@ public sealed partial class BrokerDispatcher
             applied.AddRange(AppliedOf(r));
             if (!r.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), null);
         }
-        bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
         if (writing is { Suspended: false })
             // A lock a profile kept before locks were trial-only (0.2.5) stays off: CellsToPutBack released it above.
-            foreach (var w in writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)))
+            foreach (var w in selected)
             {
+                // A saved P0-only daily still requests a core shift and memory preservation. Use the same coupled,
+                // verified path as an explicit trial; an explicit VF entry remains authoritative and goes on last.
+                if (w.Kind == ClockOffsets.Kind && implicitCurve)
+                {
+                    var p0 = Dispatch(WriteOf(target, w.Kind, w.Key, w.Value) with
+                    {
+                        PreserveEffectiveCurve = true,
+                        EffectiveCoreTargetKhz = w.Key == ClockOffsets.Key(ClockDomain.Core)
+                            ? int.Parse(w.Value, System.Globalization.CultureInfo.InvariantCulture) : null,
+                    });
+                    applied.AddRange(AppliedOf(p0));
+                    if (!p0.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply: {WhyNot(p0)}", Element(new { success = false, path, profile, applied }), p0.Code), w);
+                    continue;
+                }
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {
                     applied.AddRange(AppliedOf(aside));
