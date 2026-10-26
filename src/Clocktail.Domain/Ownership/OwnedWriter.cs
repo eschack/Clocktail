@@ -104,7 +104,8 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
         return r.IsOk ? cell.StateIn(buf) : null;
     }
 
-    /// <summary>The journal half without the sentinel, for a caller that holds one window over several writes (recovery).</summary>
+    /// <summary>The journal half without the sentinel, for a caller that holds one window over several writes.
+    /// retainOriginal defers release until the caller verifies the entire coupled operation and calls ReleaseIfRestored.</summary>
     public OwnedWriteResult Write(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, bool retainOriginal = false) =>
         Run(gpu, cell, plan, AdoptedOriginal(cell), retainOriginal);
 

@@ -87,13 +87,30 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
     public static VfBudget? Curve(NvClient hw, GpuSession gpu) =>
         hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0 ? null : VfBudget.Read(hw, gpu);
 
+    /// <summary>One Info/Control read supplies both the budget and the coupled original. If unreadable, retain
+    /// the existing unknown-budget rule (for core, only a bounded move toward zero); never invent an original.</summary>
+    public static (VfBudget? Budget, VfControlSnapshot? Controls) CurveForWrite(NvClient hw, GpuSession gpu)
+    {
+        if (hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0) return (null, null);
+        try
+        {
+            var controls = VfReader.ReadControls(hw, gpu);
+            return (new VfBudget(controls.Points, null), controls);
+        }
+        catch (Exception e) when (e is InvalidDataException or InvalidOperationException)
+        {
+            return (new VfBudget(null, e.Message), null);
+        }
+    }
+
     public ClockApplyResult Apply(GpuSession gpu, ClockDomain domain, int deltaKhz, bool takeOver = false)
     {
         var writer = new OwnedWriter(hw, journal, sentinel, host);
-        var coupled = hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0 ? null : VfReader.Read(hw, gpu);
-        var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, Curve(hw, gpu)), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
-            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(VfWrites.Cell(coupled), coupled.Control));
-        if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(gpu, VfWrites.Cell(coupled));
+        var (budget, controls) = CurveForWrite(hw, gpu);
+        var coupled = controls == null ? null : VfWrites.ControlCell(controls);
+        var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, budget), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
+            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(coupled, controls!.Control));
+        if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(gpu, coupled);
         var before = Entry(r.Tx.Before, domain);
         // The readback describes the hardware unless the write failed and was verifiably restored (then: before).
         var after = r.Tx.Outcome == TxOutcome.Aborted || r.Tx.Restore == RestoreState.Restored ? before

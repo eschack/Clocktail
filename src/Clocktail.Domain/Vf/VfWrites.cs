@@ -545,6 +545,17 @@ public sealed class VfWrites(NvClient hw, OwnershipJournal journal, ApplySentine
             return VfOffsets.Encode(VfParser.Offsets(raw, s0.EditableCount));
         }, CoupledKinds: [ClockOffsets.Kind]);
 
+    /// <summary>Ownership/readback of point controls only, for capturing implicit P0 side effects. Writing a V/F
+    /// curve still requires Prepare/Cell with the full curve, firmware bounds and post-write structural proof.</summary>
+    public static OwnedCell ControlCell(VfControlSnapshot s) => new(
+        Kind, CoreKey, "kHz", $"Core V/F point offsets, kHz, points 0..{s.Points.Count - 1} ({s.Layout})", Spec(s.Mask),
+        raw =>
+        {
+            var points = VfParser.CoreOffsets(s.Info, raw);
+            return points.Count == s.Points.Count && points.Select(p => p.Index).SequenceEqual(s.Points.Select(p => p.Index))
+                ? VfOffsets.Encode(points.Select(p => p.OffsetKhz).ToArray()) : null;
+        }, CoupledKinds: [ClockOffsets.Kind]);
+
     public static Func<ReadOnlyMemory<byte>, Mutation> Plan(VfCurveSnapshot s0, VfLimits limits, IReadOnlyList<int> target, bool enforceRange = true) =>
         raw => VfRules.Plan(s0, limits, target, raw.ToArray(), enforceRange);
 

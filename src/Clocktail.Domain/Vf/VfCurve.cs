@@ -241,6 +241,11 @@ public static class VfParser
     }
 }
 
+/// <summary>Validated Core control topology and offsets, independent of effective-frequency Status.
+/// This snapshot can record an original for a P0 side effect; it cannot plan or verify a V/F write.</summary>
+public sealed record VfControlSnapshot(VfLayoutId Layout, byte[] Info, byte[] Control, byte[] Mask,
+    IReadOnlyList<(int Index, int OffsetKhz)> Points);
+
 /// <summary>
 /// The read order the driver requires: Info first (it answers with the point mask), then Status and Control,
 /// each asked about exactly that mask. Status and Control are queries: with a zero mask the driver answers with
@@ -263,6 +268,22 @@ public static class VfReader
         var info = Get(hw, gpu, Slot.ClockClientClkVfPointsGetInfo, null, "V/F point information read");
         var control = Get(hw, gpu, Slot.ClockClientClkVfPointsGetControl, VfLayout.ReadMask(info), "V/F point control read");
         return VfParser.CoreOffsets(info, control);
+    }
+
+    /// <summary>The ownership snapshot for ordinary P0 writes. No Status query: a bounded return to zero must
+    /// remain possible when a negative core offset has driven the lowest effective frequencies to zero.</summary>
+    public static VfControlSnapshot ReadControls(NvClient hw, GpuSession gpu)
+    {
+        var info = Get(hw, gpu, Slot.ClockClientClkVfPointsGetInfo, null, "V/F point information read");
+        var mask = VfLayout.ReadMask(info);
+        var control = Get(hw, gpu, Slot.ClockClientClkVfPointsGetControl, mask, "V/F point control read");
+        var points = VfParser.CoreOffsets(info, control);
+        // The supported masks identify distinct topologies without interpreting a derived frequency baseline.
+        var layout = VfLayout.Identify(VfMode.Regional, mask) ?? VfLayout.Identify(VfMode.Legacy, mask)
+            ?? throw new InvalidDataException("the V/F control mask does not describe a supported Core curve");
+        if (points.Count != layout.Editable || points.Where((p, i) => p.Index != i).Any())
+            throw new InvalidDataException("the editable V/F control point sequence is incomplete");
+        return new(layout.Id, info, control, mask, points);
     }
 
     private static byte[] Get(NvClient hw, GpuSession gpu, Slot slot, byte[]? mask, string what)

@@ -1718,7 +1718,9 @@ public sealed partial class BrokerDispatcher
         var selected = writing is { Suspended: false } ? writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)).ToList() : [];
         bool curveFollows = selected.Any(w => w.Kind == VfWrites.Kind);
         bool implicitCurve = !curveFollows && selected.Any(w => w.Kind == ClockOffsets.Kind);
-        bool keepImplicitCurve = implicitDependency && implicitCurve;
+        // Only a core target defines a generated daily curve. A memory-only daily must give an unkept point-curve
+        // trial back to the captured external/daily original, rather than preserve that newer trial as a dependency.
+        bool keepImplicitCurve = implicitDependency && implicitCurve && selected.Any(w => w.Kind == ClockOffsets.Kind && w.Key == ClockOffsets.Key(ClockDomain.Core));
         // A trial's current limits and fixed fans are never part of a profile, nor anything else a trial set unless the
         // profile writes it too: whatever puts the whole profile on puts them back first (not under a trial that stays).
         IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null, keepImplicitCurve);
@@ -1813,11 +1815,13 @@ public sealed partial class BrokerDispatcher
 
         // Even zero point controls can change implicitly when P0 is written. Capture them before that setter,
         // rather than letting the following explicit V/F write mistake a native side effect for the original.
-        var coupled = path.Kind == ClockOffsets.Kind && _hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) != 0
-            ? VfReader.Read(hw, target.Session) : null;
         var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value,
-            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(VfWrites.Cell(coupled), coupled.Control));
-        if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(target.Session, VfWrites.Cell(coupled));
+            beforeWrite: () =>
+            {
+                foreach (var coupled in p.CoupledOriginals) writer.ClaimOriginal(coupled.Cell, coupled.Snapshot);
+            });
+        if (r.StateKnown)
+            foreach (var coupled in p.CoupledOriginals) writer.ReleaseIfRestored(target.Session, coupled.Cell);
         return new BrokerResponse(r.Tx.Succeeded, Result: Element(new
         {
             success = r.Tx.Succeeded,

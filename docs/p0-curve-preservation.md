@@ -30,11 +30,11 @@ save/recovery/reapply entirely against fakes. MCP tests reject a broker's
 success when effective frequencies did not change, and accept matching
 effective results even when control bytes changed.
 
-Validation on 2026-10-25:
+Validation after the review fixes on 2026-10-26:
 
 ```
 dotnet test tests/Clocktail.Tests -c Release --no-restore --nologo
-# 1013 passed, 0 failed, 0 skipped
+# 1035 passed, 0 failed, 0 skipped
 dotnet build Clocktail.slnx -c Release --nologo
 # 0 warnings, 0 errors
 ```
@@ -103,8 +103,8 @@ Daily restoration now uses the coupled path for profiles without an
 explicit V/F entry. A saved P0 core target with no point curve means a
 uniform effective displacement from the independent regional base; it is
 verified and repaired even if raw P0 already matches. Memory then preserves
-that verified effective curve. A memory-only profile preserves the existing
-core shape. An explicit saved V/F entry remains authoritative and is written
+that verified effective curve. A memory-only profile preserves the captured
+original core shape, giving back any unkept point-curve trial. An explicit saved V/F entry remains authoritative and is written
 last. A derived legacy base cannot prove the implicit uniform target, so
 that core group fails actionably rather than guessing; an explicit verified
 curve is needed for that legacy profile.
@@ -129,6 +129,44 @@ both control models, repeat application, a matching raw target with lost
 effective tuning, back-to-daily from a point-curve trial, partial and unknown
 outcomes, nonstock originals, attribution, explicit curves, legacy refusal,
 and software-only keep/recovery/reload.
+
+## Review regressions addressed on 2026-10-26
+
+The review of `d62ac1e` supplied three additional fake-driver reproducers.
+All twelve initial in-repository variants failed on that tip. They exposed
+premature ownership release, a memory-only daily retaining a newer curve
+trial, and a full-status prerequisite blocking an ordinary return to zero.
+
+Coupled writes now retain both cells' originals through every intermediate
+write and rollback. Only after the complete effective/P0 proof succeeds are
+eligible originals released, P0 first and V/F second. Returning to zero and
+then failing the final proof therefore leaves the original records intact
+while rolling back to the previous tuning; a NoChange rollback setter cannot
+lose the V/F original. Subsequent recovery remains possible.
+
+Only an implicit **core** target protects a generated daily curve during
+profile restoration. A memory-only daily restores the captured original
+curve before preserving it for memory; it does not adopt a later temporary
+point curve. Tests cover both zero and nonzero originals under both models,
+including the trial leaving the record and recovery of the true original.
+
+Ordinary `ClockOffsets.Apply`, broker `OpClock`, and raw P0 `OpWrite` now
+capture the coupled original from validated Info/Control topology and
+offsets, without requiring effective Status. The same control snapshot
+supplies the firmware budget. Registry preparation carries readable coupled
+originals to the transaction's write-ahead callback. An existing original
+still wins; an unreadable control never becomes an invented original. The
+existing unknown-budget rule still bounds core to a move toward zero and
+retains existing debt. Adaptive P0 preservation still requires full curve
+readback, and V/F writes still require full validation and firmware bounds.
+
+`P0ReviewRegressionTests` adds twenty-two cases. Besides the initial twelve,
+they cover release only after a successful final proof, preservation and
+recovery of previously recorded nonzero originals, allowed zero returns and
+refused moves away from zero with unreadable controls, and continued refusal
+of V/F writes when full Status is invalid. All 1,035 software tests and the
+Release solution build passed. These findings and fixes remain software
+evidence; they do not establish native semantics or hardware stability.
 
 ## Native uncertainty and coordinated validation
 

@@ -48,12 +48,14 @@ public sealed partial class BrokerDispatcher
             var steps = new List<object>();
             bool touched = false;
 
-            OwnedWriteResult Set(string kind, string key, string value, bool retain = false)
+            OwnedWriteResult Set(string kind, string key, string value)
             {
                 var path = WriteRegistry.Find(kind)!;
                 var prepared = path.Prepare(hw, gpu, key, value, new WriteOptions(CurveFollows: kind == ClockOffsets.Kind));
                 if (prepared.Plan == null) throw new InvalidOperationException(prepared.CannotWrite);
-                var r = writer.Write(gpu, prepared.Cell, prepared.Plan, retain);
+                // An intermediate return to an original is not a committed give-back. The final coupled proof can
+                // still fail and roll back to a tuned state, including a NoChange VF setter after native mirroring.
+                var r = writer.Write(gpu, prepared.Cell, prepared.Plan, retainOriginal: true);
                 touched |= r.Tx.Outcome is TxOutcome.Applied or TxOutcome.Failed;
                 steps.Add(new { kind, key, requested = value, before = r.Before, after = r.After,
                     transaction_outcome = r.Tx.Outcome.ToString(), transaction_restore = r.Tx.Restore.ToString(), detail = r.Tx.Detail });
@@ -84,7 +86,7 @@ public sealed partial class BrokerDispatcher
                     writer.ClaimOriginal(vfCell, before.Control);
                     // The ordinary P0 path refuses to wipe a nonzero curve. Set it aside through its own rules.
                     if (p0Changes && before.Offsets().Any(o => o != 0))
-                        Set(VfWrites.Kind, VfWrites.CoreKey, VfOffsets.Encode(new int[before.EditableCount]), retain: true);
+                        Set(VfWrites.Kind, VfWrites.CoreKey, VfOffsets.Encode(new int[before.EditableCount]));
                     if (p0Changes) Set(ClockOffsets.Kind, ClockOffsets.Key(domain), khz.ToString(CultureInfo.InvariantCulture));
 
                     var native = VfReader.Read(hw, gpu);
@@ -121,6 +123,8 @@ public sealed partial class BrokerDispatcher
                 }
                 var after = VfReader.Read(hw, gpu);
                 Verify(after);
+                writer.ReleaseIfRestored(gpu, ClockOffsets.Cell(domain));
+                writer.ReleaseIfRestored(gpu, VfWrites.Cell(after));
                 scope.Complete();
                 return Ok(new
                 {
@@ -153,8 +157,10 @@ public sealed partial class BrokerDispatcher
                     var restored = VfReader.Read(hw, gpu);
                     if (!restored.Offsets().SequenceEqual(before.Offsets()) || VfEffectiveCurve.Mismatch(before, restored) != null)
                         throw new InvalidOperationException("the original effective curve did not return");
-                    // Settle any claim made before an aborted setter, without changing hardware.
-                    writer.Write(gpu, VfWrites.Cell(restored), VfWrites.Plan(restored, VfLimits.From(Pstates20Reader.Read(hw, gpu)), restored.Offsets()));
+                    // Settle only after the whole rollback proof. Originals remain on disk throughout every
+                    // intermediate return and native side effect; no post-effect snapshot replaces them.
+                    writer.ReleaseIfRestored(gpu, ClockOffsets.Cell(domain));
+                    writer.ReleaseIfRestored(gpu, VfWrites.Cell(restored));
                     scope.Complete();
                 }
                 catch (Exception restore) when (restore is InvalidOperationException or InvalidDataException or OverflowException or IOException or UnauthorizedAccessException)
