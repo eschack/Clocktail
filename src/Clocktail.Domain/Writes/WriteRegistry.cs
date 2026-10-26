@@ -111,7 +111,7 @@ public static class WriteRegistry
                 // write resets them. Recovery too: see ClockOffsets.Plan. Not when the curve is given back right after.
                 if (o.CurveFollows) return new Prepared(cell, ClockOffsets.Plan(domain, khz));
                 var (budget, controls) = ClockOffsets.CurveForWrite(hw, gpu);
-                return new Prepared(cell, ClockOffsets.Plan(domain, khz, budget))
+                return new Prepared(cell, ClockOffsets.Plan(domain, khz, budget, canRecordCurveOriginal: controls != null))
                 {
                     CoupledOriginals = controls == null ? [] : [new(VfWrites.ControlCell(controls), controls.Control)],
                 };

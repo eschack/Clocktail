@@ -56,13 +56,17 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
     /// </summary>
     /// <param name="curve">The V/F point offsets read for this write (<see cref="Curve"/>), or null when the driver has
     /// none: then nothing else spends the budget, nothing can be wiped, and the driver's range is the whole limit.</param>
-    public static Func<ReadOnlyMemory<byte>, Mutation> Plan(ClockDomain domain, int deltaKhz, VfBudget? curve = null) =>
+    /// <param name="canRecordCurveOriginal">Readable controls must have a recoverable ownership encoding before
+    /// changing P0. This is separate from the existing bounded-return rule when controls are genuinely unreadable.</param>
+    public static Func<ReadOnlyMemory<byte>, Mutation> Plan(ClockDomain domain, int deltaKhz, VfBudget? curve = null, bool canRecordCurveOriginal = true) =>
         raw =>
         {
             var snap = Pstates20Parser.Parse(raw.ToArray());
             var own = Pstates20Rules.Plan(snap, domain, deltaKhz);
             if (own is not Mutation.Request || curve == null) return own;
             if (WipeReason(curve) is { } wipe) return new Mutation.Abort(wipe);
+            if (curve.Offsets != null && !canRecordCurveOriginal)
+                return new Mutation.Abort("the readable V/F controls cannot be recorded as a recoverable original (unsupported ownership topology); no P0 write was made");
             if (domain != ClockDomain.Core) return own;
             return curve.Check(VfLimits.From(snap), deltaKhz) is { } over ? new Mutation.Abort(over) : own;
         };
@@ -87,15 +91,15 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
     public static VfBudget? Curve(NvClient hw, GpuSession gpu) =>
         hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0 ? null : VfBudget.Read(hw, gpu);
 
-    /// <summary>One Info/Control read supplies both the budget and the coupled original. If unreadable, retain
-    /// the existing unknown-budget rule (for core, only a bounded move toward zero); never invent an original.</summary>
+    /// <summary>One Info/Control read supplies the budget and an optional coupled original. A known budget is
+    /// retained even when its topology cannot encode an original. Only unreadable controls use the unknown-budget rule.</summary>
     public static (VfBudget? Budget, VfControlSnapshot? Controls) CurveForWrite(NvClient hw, GpuSession gpu)
     {
         if (hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0) return (null, null);
         try
         {
-            var controls = VfReader.ReadControls(hw, gpu);
-            return (new VfBudget(controls.Points, null), controls);
+            var (offsets, original) = VfReader.ReadControls(hw, gpu);
+            return (new VfBudget(offsets, null), original);
         }
         catch (Exception e) when (e is InvalidDataException or InvalidOperationException)
         {
@@ -108,7 +112,7 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
         var writer = new OwnedWriter(hw, journal, sentinel, host);
         var (budget, controls) = CurveForWrite(hw, gpu);
         var coupled = controls == null ? null : VfWrites.ControlCell(controls);
-        var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, budget), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
+        var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, budget, canRecordCurveOriginal: controls != null), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
             beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(coupled, controls!.Control));
         if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(gpu, coupled);
         var before = Entry(r.Tx.Before, domain);

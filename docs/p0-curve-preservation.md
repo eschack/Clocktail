@@ -34,7 +34,7 @@ Validation after the review fixes on 2026-10-26:
 
 ```
 dotnet test tests/Clocktail.Tests -c Release --no-restore --nologo
-# 1035 passed, 0 failed, 0 skipped
+# 1049 passed, 0 failed, 0 skipped
 dotnet build Clocktail.slnx -c Release --nologo
 # 0 warnings, 0 errors
 ```
@@ -167,6 +167,36 @@ refused moves away from zero with unreadable controls, and continued refusal
 of V/F writes when full Status is invalid. All 1,035 software tests and the
 Release solution build passed. These findings and fixes remain software
 evidence; they do not establish native semantics or hardware stability.
+
+## Second-review topology regression addressed on 2026-10-26
+
+The second review of `03de151` confirmed that the three preceding findings
+were fixed, but exposed another budget failure: matching Info/Control masks
+could expose readable nonzero Core offsets while using an unsupported
+ownership topology. The ownership reader rejected that topology after
+parsing the offsets, and its caller mistakenly downgraded the whole budget
+to unknown. A return-to-zero request could then bypass the nonzero-curve
+wipe guard and erase an external curve without a captured V/F original.
+
+Budget data and ownership capability now remain separate results of the
+same Info/Control read. Validated offsets stay known when the mask or Core
+sequence cannot encode a recoverable original. Nonzero offsets continue to
+trigger the existing wipe refusal. Even with zero offsets, a changed P0
+request is refused if those readable controls cannot be recorded for
+recovery. An equal-value request remains NoChange. Only controls that cannot
+be read/validated use the existing unknown-budget fallback; its bounded
+core return-to-zero behavior remains covered by the prior review tests.
+
+`P0TopologyRegressionTests` adds fourteen cases. Twelve changing-write cases
+failed on the reviewed tip. They exercise actual Apply/OpClock/OpWrite with
+unsupported masks and noncontiguous Core entries, each with zero and nonzero
+offsets. They now refuse before any fake setter runs, retain the exact
+control buffer, and preserve known budget offsets separately from the
+unavailable ownership snapshot. Two equal-value cases remain permitted
+without writes. All 1,049 software tests and the Release solution build
+passed. The new case is fake-driver evidence, not an observed native driver
+transition. No hardware operations, commits or pushes were performed for
+this second-review follow-up.
 
 ## Native uncertainty and coordinated validation
 
