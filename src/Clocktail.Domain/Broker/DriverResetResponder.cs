@@ -19,7 +19,8 @@ public sealed class DriverResetResponder(
     Func<DateTimeOffset> now,
     Action<TimeSpan> sleep,
     Func<string, bool>? idle = null,
-    Func<DateTime, int?>? resetsSince = null)
+    Func<DateTime, int?>? resetsSince = null,
+    BrokerStatusLifecycle? statusLifecycle = null)
 {
     /// <summary>
     /// The daily profile goes back on only once the GPU has been idle for this many looks in a row: two of three hangs
@@ -48,6 +49,7 @@ public sealed class DriverResetResponder(
     public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null,
         IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>? hung = null)
     {
+        statusLifecycle?.PendingRecovery(gpuIds, "Driver reset queued");
         Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
         _signal.Release();
     }
@@ -73,7 +75,13 @@ public sealed class DriverResetResponder(
         bool clean = true;
         foreach (var id in gpuIds)
         {
-            try { clean &= RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0, hung != null && hung.TryGetValue(id, out var h) ? h : null); }
+            try
+            {
+                using var status = statusLifecycle?.Begin(id, RestorationKind.DriverReset);
+                bool result = RespondFor(id, evidence, crashUv?.GetValueOrDefault(id) ?? 0, hung != null && hung.TryGetValue(id, out var h) ? h : null);
+                status?.Complete(result);
+                clean &= result;
+            }
             catch (Exception e) { log($"gpu {id}: driver reset ({evidence}): the answer failed: {e}"); clean = false; }
         }
         return clean;
@@ -119,6 +127,7 @@ public sealed class DriverResetResponder(
         foreach (var id in gpuIds)
         {
             bool down = crashed.Contains(id);
+            using var status = statusLifecycle?.Begin(id, RestorationKind.Startup);
             try
             {
                 if (!down && UnansweredReset(id) is { } reset)
@@ -126,18 +135,21 @@ public sealed class DriverResetResponder(
                     // The worker before this one died in the hang (inside NVML), or handed over when the driver went
                     // away, before it answered the reset: answered now, as it would have been.
                     log($"gpu {id}: at start: {reset}");
-                    RespondFor(id, reset, 0);
+                    bool answered = RespondFor(id, reset, 0);
+                    status?.Complete(answered);
                     continue;
                 }
                 if (!down)
                 {
-                    RecoverLeftovers(id);
-                    Profile(id, "apply", "the broker started", "at start");
+                    bool recovered = RecoverLeftovers(id);
+                    bool applied = Profile(id, "apply", "the broker started", "at start");
+                    status?.Complete(recovered && applied);
                     continue;
                 }
                 const string why = "the machine went down holding the profile";
                 Record(id, why, "at start");
-                Profile(id, "after-reset", why, "at start");
+                bool restored = Profile(id, "after-reset", why, "at start");
+                status?.Complete(restored);
             }
             catch (Exception e) { log($"gpu {id}: daily profile at start: failed: {e}"); }
         }
@@ -166,15 +178,16 @@ public sealed class DriverResetResponder(
     /// mid-write by a handover or an update) refuses every write, the start's daily profile included, and nothing else
     /// would clear it. Ordinary recovery runs first when the sentinel is up or the journal's owner has died.
     /// </summary>
-    private void RecoverLeftovers(string gpuId)
+    private bool RecoverLeftovers(string gpuId)
     {
         var own = perform(new BrokerRequest(BrokerRequest.OpOwnership, gpuId));
-        if (own.Result is not { } res) return;
+        if (own.Result is not { } res) return own.Ok;
         bool sentinel = res.TryGetProperty("sentinel", out var s) && s.ValueKind == System.Text.Json.JsonValueKind.String;
         bool died = res.TryGetProperty("reason", out var why) && why.GetString() == "OwnerDied";
-        if (!sentinel && !died) return;
+        if (!sentinel && !died) return true;
         var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId));
         log($"gpu {gpuId}: at start, {(sentinel ? "a write window was left open" : "the last worker's cells were still held")}: recovered: {Summary(r)}");
+        return r.Ok;
     }
 
     /// <summary>The crash recorded ("crashed"): the trial on the card when the GPU stopped answering (<paramref name="hung"/>;
@@ -196,10 +209,16 @@ public sealed class DriverResetResponder(
     /// </summary>
     public void AfterSleep(string evidence)
     {
+        statusLifecycle?.PendingRecovery(gpuIds, "Resume restoration pending");
         sleep(SettleFor);
         foreach (var id in gpuIds)
         {
-            try { Profile(id, "resume", evidence, "after waking up"); }
+            try
+            {
+                using var status = statusLifecycle?.Begin(id, RestorationKind.Resume);
+                bool restored = Profile(id, "resume", evidence, "after waking up");
+                status?.Complete(restored);
+            }
             catch (Exception e) { log($"gpu {id}: daily profile after waking up: failed: {e}"); }
         }
     }

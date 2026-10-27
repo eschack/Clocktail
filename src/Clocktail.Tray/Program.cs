@@ -11,7 +11,7 @@ internal static class Program
         NativeTheme.FollowSystem();
         if (args.Contains("--help"))
         {
-            MessageBox.Show("Clocktail.Tray [--demo matched|trial|stale|unavailable|suspended|different|quiet] [--render DIRECTORY]\n\nLaunch is read-only. No installation or autostart registration is performed.", "Clocktail Tray");
+            MessageBox.Show($"Clocktail.Tray [--demo {string.Join('|', DemoSource.States)}] [--render DIRECTORY]\n\nLaunch is read-only. No installation or autostart registration is performed.", "Clocktail Tray");
             return;
         }
         string? demo = Option(args, "--demo");

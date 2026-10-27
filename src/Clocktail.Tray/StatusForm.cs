@@ -156,7 +156,7 @@ internal sealed class StatusForm : Form
         band.BackColor = matched ? _palette.AccentSurface : _palette.Secondary;
         band.Padding = new Padding(12);
         band.Margin = new Padding(0, 16, 0, 14);
-        var title = Label(_hover ? state == TrayState.DailyMatched ? "Daily  ·  Applied" : description.Title : description.Title, _hover ? 18 : 13, false);
+        var title = Label(_hover ? state == TrayState.DailyMatched ? "Daily  ·  Controls match" : description.Title : description.Title, _hover ? 18 : 13, false);
         if (matched) title.ForeColor = _palette.Accent;
         var statusLine = Row();
         statusLine.Controls.Add(new GlyphView(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted, 20));
@@ -224,7 +224,8 @@ internal sealed class StatusForm : Form
             session.Controls.Add(new GlyphView(d?.ExperimentKnown == true && d.TrialChange == null ? Glyph.CircleCheck : Glyph.Attention, _palette.Muted, 16));
             session.Controls.Add(Label(d?.ExperimentKnown != true ? "Trial status unavailable" : d.TrialChange != null ? $"Temporary trial: {d.TrialChange}" : "No temporary trial recorded", 11, true));
             Add(session);
-            Add(Label(d?.SavedDailyKnown != true ? "Daily restoration status unavailable" : d.SavedDaily == null ? "No saved daily profile" : d.SavedDaily.Suspended ? "Daily restoration suspended" : "Daily restoration configured · outcome unconfirmed", 11, true, 4));
+            Add(Label(d?.SavedDailyKnown != true ? "Daily restoration status unavailable" : d.SavedDaily == null ? "No saved daily profile" : d.SavedDaily.Suspended ? "Daily restoration suspended"
+                : d.Refresh is { } restoration ? $"Startup restoration: {restoration.Restoration.Startup} · Recovery: {restoration.Restoration.Recovery}" : "Daily restoration configured · outcome unconfirmed", 11, true, 4));
             var actions = Row(); actions.Margin = new Padding(0, 16, 0, 8);
             var check = Button(busy ? "Checking…" : "Check now", () => CheckRequested?.Invoke(), Glyph.Refresh);
             check.Name = "CheckNowButton";
@@ -242,8 +243,10 @@ internal sealed class StatusForm : Form
                 Add(DiagnosticsBlock(Diagnostics(cache, d)));
             }
         }
-        Add(Label(Presentation.Age(d?.Verification?.At, "Verified"), 11, true, 12));
-        Add(Label(quiet ? "Quiet · checks and hover paused until you leave quiet mode" : "Cached display · no background GPU polling", 11, true, 4));
+        Add(Label(Presentation.Age(d?.Refresh?.Controls?.At ?? (snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"), 11, true, 12));
+        Add(Label(Presentation.FullAge(d), 11, true, 4));
+        Add(Label(quiet ? "Quiet · all automatic requests paused" : cache.Snapshot?.Version == 2 ? "Automatic light refresh · 15 s · curve checked on changes" : "Manual refresh · older broker", 11, true, 4));
+        if (cache.CompatibilityNotice != null) Add(Label(cache.CompatibilityNotice, 11, true, 4));
         if (cache.Error != null) Add(Label(cache.Error, 11, true, 6));
         _content.ResumeLayout(true);
         ResumeLayout(true);
@@ -284,7 +287,7 @@ internal sealed class StatusForm : Form
     }
 
     public static string Diagnostics(TrayStatusCache cache, StatusDevice? d) =>
-        $"Tray: {Application.ProductVersion}\r\nBroker instance: {cache.Snapshot?.InstanceId ?? "unavailable"}\r\nStatus protocol: {cache.Snapshot?.Version}\r\nGPU: {d?.StableId}\r\nDriver: {d?.Driver ?? "unavailable"}\r\nVBIOS: {d?.Vbios ?? "unavailable"}\r\nPolicy: managed by the agent / unavailable\r\nRecovery outcome: unavailable\r\n{d?.Verification?.Error}\r\n{string.Join("\r\n", d?.Errors ?? [])}\r\n{cache.Error}";
+        $"Tray: {Application.ProductVersion}\r\nBroker instance: {cache.Snapshot?.InstanceId ?? "unavailable"}\r\nStatus protocol: {cache.Snapshot?.Version}\r\nGPU: {d?.StableId}\r\nDriver: {d?.Driver ?? "unavailable"}\r\nVBIOS: {d?.Vbios ?? "unavailable"}\r\nPolicy: managed by the agent / unavailable\r\nGeneration: {d?.Refresh?.Generation}; curve generation: {d?.Refresh?.VerifiedGeneration}\r\nStartup: {d?.Refresh?.Restoration.Startup}; recovery: {d?.Refresh?.Restoration.Recovery}\r\nCurrent controls: {d?.Refresh?.Controls?.At:O}\r\nLast full curve: {d?.Verification?.At:O}\r\nPending: {d?.Refresh?.FullRequiredReason}\r\nExternal V/F-only changes are not detected between full checks. Use Check now.\r\n{d?.Refresh?.Controls?.Error}\r\n{d?.Verification?.Error}\r\n{string.Join("\r\n", d?.Errors ?? [])}\r\n{cache.CompatibilityNotice}\r\n{cache.Error}";
 
     private Label Label(string text, float px, bool muted, int top = 0) => new()
     {

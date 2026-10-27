@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using Clocktail.Domain.Broker;
+using System.Text.Json;
 
 namespace Clocktail.Tray;
 
@@ -11,13 +12,18 @@ internal sealed class TrayContext : ApplicationContext
     private readonly StatusForm _details = new(false);
     private readonly System.Windows.Forms.Timer _hoverLeave = new() { Interval = 200 };
     private readonly System.Windows.Forms.Timer _ageDeadline = new();
-    private readonly CancellationTokenSource _lifetime = new();
-    private readonly TrayStatusCache _cache = new();
-    private readonly IStatusSource _source;
+    private readonly TrayStatusCache _cache;
+    private readonly ITrayStatusSource _source;
+    private readonly TrayRefreshController _refresh;
+    private readonly System.Windows.Forms.Timer _refreshTimer = new();
     private readonly bool _demo;
     private Rectangle _hoverAnchor;
-    private string? _gpuId;
-    private bool _quiet, _busy, _disposed, _locked;
+    private string? _gpuId => _refresh.GpuId ?? _cache.Snapshot?.Devices.FirstOrDefault()?.StableId;
+    private bool _quiet => _refresh.Quiet;
+    private bool _busy => _manualCheck;
+    private bool _locked => _refresh.Locked;
+    private bool _disposed, _sessionLocked, _suspended, _manualCheck;
+    private string? _lastPresentation;
     private readonly Control _ui = new();
     private Icon? _ownedIcon;
     private (TrayState, bool)? _iconState;
@@ -25,13 +31,14 @@ internal sealed class TrayContext : ApplicationContext
     public TrayContext(string? demo)
     {
         _demo = demo != null;
-        _quiet = demo == "quiet";
-        _source = demo == null ? new PipeStatusSource() : new DemoSource(demo);
+        _source = demo == null ? new BrokerTrayStatusSource() : new DemoSource(demo);
+        _refresh = new(_source);
+        _cache = _refresh.Cache;
+        _refresh.SetQuiet(demo == "quiet");
         if (demo != null)
         {
             if (((DemoSource)_source).Create() is { } sample) _cache.Accept(sample);
             else _cache.Disconnect("Synthetic disconnected preview");
-            _gpuId = Device?.StableId;
         }
         _ui.CreateControl();
         _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "Clocktail · status unverified", Visible = true, ContextMenuStrip = _menu };
@@ -46,7 +53,8 @@ internal sealed class TrayContext : ApplicationContext
         _menu.Opening += (_, _) =>
         {
             HideHover();
-            _menu.Items[1].Enabled = !_busy && !_quiet && !_locked;
+            _menu.Items[0].Enabled = !_quiet && !_locked;
+            _menu.Items[1].Enabled = !_busy && !_refresh.Busy && !_quiet && !_locked;
             ((ToolStripMenuItem)_menu.Items[2]).Checked = _quiet;
         };
         _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) OpenDetails(); };
@@ -72,59 +80,60 @@ internal sealed class TrayContext : ApplicationContext
         _details.VisibleChanged += (_, _) => { if (_details.Visible) ScheduleExpiry(); };
         _details.CheckRequested += () => _ = Fetch(true);
         _details.QuietRequested += ToggleQuiet;
-        _details.DeviceSelected += id => { _gpuId = id; Render(); };
+        _details.DeviceSelected += id => _refresh.Select(id);
+        _refresh.Changed += () => { if (!_disposed) { Render(); ScheduleRefresh(); } };
+        _refreshTimer.Tick += async (_, _) => { _refreshTimer.Stop(); await Fetch(false); };
         SystemEvents.SessionSwitch += SessionSwitch;
+        SystemEvents.PowerModeChanged += PowerModeChanged;
         Application.Idle += FirstIdle;
     }
 
     private StatusDevice? Device => _cache.Snapshot?.Devices.FirstOrDefault(d => d.StableId == _gpuId) ?? _cache.Snapshot?.Devices.FirstOrDefault();
-    private async void FirstIdle(object? sender, EventArgs e) { Application.Idle -= FirstIdle; if (!_quiet && !_demo) await Fetch(false); else Render(); }
+    private async void FirstIdle(object? sender, EventArgs e) { Application.Idle -= FirstIdle; await Fetch(false); Render(); }
     private void Menu(string title, Action action) => _menu.Items.Add(title, null, (_, _) => action());
 
     private async Task Fetch(bool verify)
     {
-        if (_disposed || _busy || _quiet || _locked) return;
-        _busy = true;
-        Render();
-        try
-        {
-            // Startup/reconnect only reads files + the existing flight-recorder cache. Verification is an explicit click.
-            if (_cache.Snapshot == null || !_cache.Connected)
-            {
-                var initial = await _source.Fetch(false, null, _lifetime.Token);
-                if (_disposed) return;
-                if (initial == null) { _cache.Disconnect("The broker is not answering. Check now to reconnect."); return; }
-                _cache.Accept(initial);
-                _gpuId = _cache.Snapshot?.Devices.FirstOrDefault()?.StableId;
-            }
-            if (verify && _gpuId != null)
-            {
-                var snapshot = await _source.Fetch(true, _gpuId, _lifetime.Token);
-                if (_disposed) return;
-                if (snapshot == null) _cache.Disconnect("The broker is not answering.");
-                else
-                {
-                    _cache.Accept(snapshot);
-                    // Re-read the inventory from broker files/cache, rather than re-date other GPUs' old session state.
-                    var all = await _source.Fetch(false, null, _lifetime.Token);
-                    if (!_disposed && all != null) _cache.Accept(all);
-                }
-            }
-        }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception e) when (e is IOException or InvalidOperationException or TimeoutException or System.Text.Json.JsonException)
-        {
-            if (!_disposed) _cache.Disconnect(e.Message);
-        }
-        finally { _busy = false; if (!_disposed) Render(); }
+        if (_disposed) return;
+        _refreshTimer.Stop();
+        if (verify) { _refresh.CheckNow(); _manualCheck = true; Render(); }
+        try { await _refresh.Tick(); }
+        finally { if (verify) { _manualCheck = false; Render(); } }
+        if (!_disposed) ScheduleRefresh();
+    }
+    private void ScheduleRefresh()
+    {
+        _refreshTimer.Stop();
+        if (_disposed || _refresh.Delay is not { } delay) return;
+        _refreshTimer.Interval = Math.Clamp((int)Math.Ceiling(delay.TotalMilliseconds), 25, 60000);
+        _refreshTimer.Start();
     }
 
     private void Render()
     {
         if (_disposed) return;
-        if (_hover.Visible) _hover.Present(_cache, _gpuId, _quiet, _demo, _busy);
-        if (_details.Visible) _details.Present(_cache, _gpuId, _quiet, _demo, _busy);
         var state = TrayStatus.State(Device, _cache.Connected, _cache.Snapshot?.CapturedAt ?? DateTimeOffset.MinValue, DateTimeOffset.UtcNow);
+        if (_hover.Visible || _details.Visible)
+        {
+            var d = Device;
+            string signature = JsonSerializer.Serialize(new { state, _quiet, _busy, _cache.Error, _cache.CompatibilityNotice,
+                d?.StableId, d?.Name, d?.SavedDaily?.Writes, d?.SavedDaily?.Suspended, d?.TrialChange, d?.SessionGame, d?.Errors,
+                devices = _cache.Snapshot?.Devices.Select(g => new { g.StableId, g.Name }),
+                controls = d?.Refresh?.Controls is { } c ? new { c.Settings, c.Comparison, c.Error } : null,
+                lifecycle = d?.Refresh?.Restoration,
+                fullAge = Presentation.FullAge(d),
+                controlsAge = Presentation.Age(d?.Refresh?.Controls?.At ?? (_cache.Snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"),
+                telemetry = new { d?.Telemetry?.TempC, d?.Telemetry?.Watts, d?.Telemetry?.UtilPercent },
+                telemetryAge = _details.Visible ? Presentation.Age(d?.Telemetry?.At, "Telemetry sampled") : null,
+                curve = d?.Verification is { } v ? new { v.Settings, v.Curve, v.Comparison, v.Error } : null,
+                diagnostics = _details.Visible && _details.DiagnosticsExpanded ? StatusForm.Diagnostics(_cache, d) : null });
+            if (signature != _lastPresentation)
+            {
+                _lastPresentation = signature;
+                if (_hover.Visible) _hover.Present(_cache, _gpuId, _quiet, _demo, _busy);
+                if (_details.Visible) _details.Present(_cache, _gpuId, _quiet, _demo, _busy);
+            }
+        }
         _icon.Text = "Clocktail · " + (_quiet ? "Quiet" : state.ToString());
         if (_iconState != (state, _quiet))
         {
@@ -139,9 +148,10 @@ internal sealed class TrayContext : ApplicationContext
     private void ScheduleExpiry()
     {
         _ageDeadline.Stop();
-        if (_quiet || !_cache.Connected || _cache.Snapshot == null) return;
+        if (_quiet || _locked || !_cache.Connected || _cache.Snapshot == null) return;
         var deadline = _cache.Snapshot.CapturedAt + TrayStatus.FreshFor;
-        if (Device?.Verification is { } v && v.At + TrayStatus.FreshFor < deadline) deadline = v.At + TrayStatus.FreshFor;
+        var evidence = Device?.Refresh is { } fresh ? fresh.Controls?.At : Device?.Verification?.At;
+        if (evidence is { } at && at + TrayStatus.FreshFor < deadline) deadline = at + TrayStatus.FreshFor;
         var remaining = deadline - DateTimeOffset.UtcNow;
         if (remaining <= TimeSpan.Zero) return;
         _ageDeadline.Interval = Math.Clamp((int)Math.Ceiling(remaining.TotalMilliseconds) + 25, 50, 31000);
@@ -149,7 +159,7 @@ internal sealed class TrayContext : ApplicationContext
     }
     private void OpenDetails()
     {
-        if (_locked) return;
+        if (_locked || _quiet) return;
         HideHover();
         _details.Present(_cache, _gpuId, _quiet, _demo, _busy);
         Place(_details, Cursor.Position);
@@ -159,10 +169,10 @@ internal sealed class TrayContext : ApplicationContext
     private void HideHover() { _hover.Hide(); _hoverLeave.Stop(); }
     private void ToggleQuiet()
     {
-        _quiet = !_quiet;
+        bool quiet = !_quiet;
         HideHover();
-        if (_quiet) { _details.Hide(); _ageDeadline.Stop(); }
-        Render();
+        if (quiet) { _details.Hide(); _ageDeadline.Stop(); }
+        _refresh.SetQuiet(quiet);
     }
     private void SessionSwitch(object sender, SessionSwitchEventArgs e)
     {
@@ -170,8 +180,22 @@ internal sealed class TrayContext : ApplicationContext
         _ui.BeginInvoke(() =>
         {
             if (_disposed) return;
-            _locked = e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect;
+            if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.RemoteDisconnect or SessionSwitchReason.ConsoleDisconnect) _sessionLocked = true;
+            else if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.SessionLogon or SessionSwitchReason.RemoteConnect or SessionSwitchReason.ConsoleConnect) _sessionLocked = false;
+            _refresh.SetLocked(_sessionLocked || _suspended);
             if (_locked) { HideHover(); _details.Hide(); }
+        });
+    }
+    private void PowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (_disposed || !_ui.IsHandleCreated) return;
+        _ui.BeginInvoke(() =>
+        {
+            if (_disposed) return;
+            if (e.Mode == PowerModes.Suspend) { _suspended = true; HideHover(); _details.Hide(); }
+            else if (e.Mode == PowerModes.Resume) { _suspended = false; _refresh.Resume(); }
+            _refresh.SetLocked(_sessionLocked || _suspended);
+            ScheduleRefresh();
         });
     }
     internal static void Place(Form form, Point anchor)
@@ -197,7 +221,8 @@ internal sealed class TrayContext : ApplicationContext
             _disposed = true;
             Application.Idle -= FirstIdle;
             SystemEvents.SessionSwitch -= SessionSwitch;
-            _lifetime.Cancel();
+            SystemEvents.PowerModeChanged -= PowerModeChanged;
+            _refresh.Dispose(); _refreshTimer.Dispose();
             _icon.Visible = false;
             _icon.Dispose(); _menu.Dispose(); _hoverLeave.Dispose(); _ageDeadline.Dispose();
             _ownedIcon?.Dispose();

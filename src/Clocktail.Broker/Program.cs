@@ -115,6 +115,9 @@ static int Run()
     };
     var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
     var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
+    dispatcher.StatusLifecycle.InitializeStartup(targets.Ids);
+    dispatcher.StatusMeasurementReason = () => JudgeLock.Live(JudgeLock.Candidates(judgePath,
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _) is { } run ? JudgeLock.Reason(run) : null;
     var server = new BrokerServer(
         () => OperatingSystem.IsWindows() ? PipeFactory.Create(BrokerTransport.PipeName) : throw new PlatformNotSupportedException("the broker's pipe ACL is Windows-only"),
         dispatcher);
@@ -157,7 +160,7 @@ static int Run()
         try { return SystemLog.Count(SystemLog.DriverResetFilter, sinceUtc); }
         catch (InvalidOperationException) { return null; }
     }
-    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince);
+    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince, dispatcher.StatusLifecycle);
     KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
     // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
     // shutdown) is recorded first.
@@ -208,6 +211,7 @@ static int Run()
     {
         var seen = DateTimeOffset.Now;
         if (!bursts.Starts(seen)) return;
+        dispatcher.StatusLifecycle.PendingRecovery(targets.Ids, "Driver reset observed");
         var windows = sampler.Recorders.ToDictionary(r => r.Key, r => r.Value.Freeze());   // before the recovered driver adds its own looks
         Once("the crash trace", () =>
         {

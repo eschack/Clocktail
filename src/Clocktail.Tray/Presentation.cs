@@ -12,19 +12,22 @@ internal static class Presentation
 
     public static (string Title, string Detail) Describe(TrayState state) => state switch
     {
-        TrayState.DailyMatched => ("Daily profile is applied", "Verified settings match your saved daily targets."),
+        TrayState.DailyMatched => ("Daily controls match", "Current controls match; the curve has its own verification age below."),
+        TrayState.StartupPending => ("Startup restoration pending", "Waiting for the broker to finish restoring the daily profile."),
+        TrayState.Recovering => ("Broker recovery in progress", "Full verification will follow completed recovery."),
+        TrayState.VerificationPending => ("Full verification pending", "Waiting for settled changes and an available measurement window."),
         TrayState.TrialActive => ("Temporary trial is active", "The card may differ from your saved daily profile."),
         TrayState.DailySuspended => ("Daily restoration is suspended", "Saved targets are retained; applied settings are shown separately."),
         TrayState.SettingsDiffer => ("Settings differ from saved daily", "Check the comparison below before taking further action."),
         TrayState.Stale => ("Cached status is stale", "Use Check now for a fresh verification when you are ready."),
         TrayState.Applying => ("Broker operation in progress", "Prior verification has been invalidated. Check again afterward."),
-        TrayState.Failed => ("Status needs attention", "Some broker records could not be read. See Diagnostics."),
+        TrayState.Failed => ("Status needs attention", "A broker record or restoration could not be confirmed. See Diagnostics."),
         TrayState.Unavailable => ("Broker status unavailable", "Use Check now to reconnect. Cached readings are unconfirmed."),
         _ => ("Applied settings are unverified", "Saved targets do not establish what is currently on the GPU.")
     };
 
     public static string Applied(StatusDevice? d, string kind, string key) => Format(kind,
-        d?.Verification?.Settings.FirstOrDefault(s => s.Kind == kind && s.Key == key)?.Value);
+        (d?.Refresh?.Controls?.Settings ?? d?.Verification?.Settings)?.FirstOrDefault(s => s.Kind == kind && s.Key == key)?.Value);
     public static string Saved(StatusDevice? d, string kind, string key)
     {
         if (d == null || !d.SavedDailyKnown) return "Unknown";
@@ -50,6 +53,8 @@ internal static class Presentation
         if (age < TimeSpan.Zero) return $"{prefix}: clock mismatch";
         return $"{prefix} {Math.Floor(age.TotalSeconds):0} s ago";
     }
+    public static string FullAge(StatusDevice? device) => Age(device?.Verification?.At,
+        device?.Verification is { Error: not null } or { Curve.Count: 0 } ? "Full check attempted" : "Curve last verified");
 }
 
 internal sealed record Palette(Color Surface, Color Secondary, Color Ink, Color Muted, Color Rule, Color Accent, Color AccentSurface)

@@ -83,6 +83,7 @@ public sealed partial class BrokerDispatcher
         _canWrite = canWrite;
         _judgeBusyReason = judgeBusyReason ?? (() => null);
         _frames = frames;
+        StatusLifecycle.Invalidated += InvalidateStatus;
     }
 
     private readonly Fps.IFrameCapture? _frames;
@@ -177,20 +178,24 @@ public sealed partial class BrokerDispatcher
             if (Changes(req))
             {
                 top = !Monitor.IsEntered(_operation);   // not one of an operation's own requests, which come back through here
+                if (top) InvalidateStatus(); // including refused/aborted attempts which never acquire the operation window
                 if (!Monitor.TryEnter(_operation, WindowWait))
                     return Fail($"another operation has held the card for over {WindowWait.TotalSeconds:0} s; nothing was done, try again", BrokerCode.WindowBusy);
                 entered = true;
                 if (top)
                 {
                     Judged.Value = Verdict.Open;
-                    Interlocked.Increment(ref _statusEpoch); // old readback is no longer evidence after any mutation attempt
                 }
             }
             return DispatchOne(req, top);
         }
         finally
         {
-            if (entered) Monitor.Exit(_operation);
+            if (entered)
+            {
+                if (top) StatusMutationCompleted();
+                Monitor.Exit(_operation);
+            }
             CurrentLease.Value = prior;
             if (top) Judged.Value = judged;
         }

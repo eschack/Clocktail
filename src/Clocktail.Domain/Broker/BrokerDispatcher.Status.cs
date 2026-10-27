@@ -22,6 +22,7 @@ public sealed partial class BrokerDispatcher
 
     private BrokerResponse Status(BrokerRequest req)
     {
+        if (req.Value == "2") return StatusV2(req);
         if (req.Kind is not ("cached" or "verify")) return Fail("status kind must be cached or verify", BrokerCode.BadRequest);
         if (req.Value != null && req.Value != "1") return Fail("unsupported status version", BrokerCode.BadRequest);
         if (req.Kind == "verify" && req.GpuId == null) return Fail("verification needs a stable GPU id", BrokerCode.BadRequest);
@@ -33,7 +34,7 @@ public sealed partial class BrokerDispatcher
         {
             if (!entered && req.Kind == "verify") return Fail("the broker is busy; check again after the operation completes", BrokerCode.WindowBusy);
             if (req.Kind == "verify" && Volatile.Read(ref _closed)) return Fail(ClosedError, BrokerCode.WindowBusy);
-            if (req.Kind == "verify" && _judgeBusyReason() is { } busy) return Fail(JudgeBusy(busy), BrokerCode.JudgeBusy);
+            if (req.Kind == "verify" && (StatusMeasurementReason ?? _judgeBusyReason)() is { } busy) return Fail(JudgeBusy(busy), BrokerCode.JudgeBusy);
             foreach (var id in ids)
             {
                 var target = _gpus.Resolve(id);
@@ -43,7 +44,7 @@ public sealed partial class BrokerDispatcher
                     var prior = _statusDevices.GetValueOrDefault(id);
                     devices.Add(prior is null
                         ? new(id, target.Name, target.Driver, target.Vbios, null, false, false, null, null, true, null, null, [])
-                        : prior with { OperationInProgress = true, Verification = null });
+                        : prior with { OperationInProgress = true, Verification = null, Refresh = null });
                     continue;
                 }
                 var errors = new List<string>();
@@ -141,11 +142,13 @@ public sealed partial class BrokerDispatcher
             bool different = profile.Writes.Any(w => observed.TryGetValue((w.Kind, w.Key), out var s) && s.Value != null && s.Value != w.Value);
             // A matching P0/global offset is insufficient: the reported effective curve must agree as well.
             bool coreTarget = profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core" || w.Kind == "pstates20" && w.Key == "core");
+            bool explicitCurve = profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core");
+            bool explicitCore = profile.Writes.Any(w => w.Kind == "pstates20" && w.Key == "core");
             bool consistent = vf is { Mode: VfMode.Regional, Points.Count: > 0 }
                 && observed.TryGetValue(("pstates20", "core"), out var core) && int.TryParse(core.Value, out var global)
-                && vf.Points.All(p => (long)p.BaseKhz + global + p.OffsetKhz == p.EffectiveKhz)
-                && (profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core") || vf.Points.All(p => p.OffsetKhz == 0))
-                && (profile.Writes.Any(w => w.Kind == "pstates20" && w.Key == "core") || global == 0);
+                && (explicitCurve
+                    ? vf.Points.All(p => (long)p.BaseKhz + global + p.OffsetKhz == p.EffectiveKhz) && (explicitCore || global == 0)
+                    : explicitCore && vf.Points.All(p => Math.Abs((long)p.EffectiveKhz - p.BaseKhz - global) < 1000));
             if (different) comparison = DailyComparison.Different;
             else if (!missing && coreTarget && consistent) comparison = DailyComparison.Matched;
             else failures.Add("A complete saved-target and effective-curve match could not be established.");
