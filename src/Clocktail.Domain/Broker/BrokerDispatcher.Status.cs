@@ -141,11 +141,15 @@ public sealed partial class BrokerDispatcher
             bool different = profile.Writes.Any(w => observed.TryGetValue((w.Kind, w.Key), out var s) && s.Value != null && s.Value != w.Value);
             // A matching P0/global offset is insufficient: the reported effective curve must agree as well.
             bool coreTarget = profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core" || w.Kind == "pstates20" && w.Key == "core");
+            bool explicitCurve = profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core");
+            bool explicitCore = profile.Writes.Any(w => w.Kind == "pstates20" && w.Key == "core");
             bool consistent = vf is { Mode: VfMode.Regional, Points.Count: > 0 }
                 && observed.TryGetValue(("pstates20", "core"), out var core) && int.TryParse(core.Value, out var global)
-                && vf.Points.All(p => (long)p.BaseKhz + global + p.OffsetKhz == p.EffectiveKhz)
-                && (profile.Writes.Any(w => w.Kind == "vf" && w.Key == "core") || vf.Points.All(p => p.OffsetKhz == 0))
-                && (profile.Writes.Any(w => w.Kind == "pstates20" && w.Key == "core") || global == 0);
+                && (explicitCurve
+                    ? vf.Points.All(p => (long)p.BaseKhz + global + p.OffsetKhz == p.EffectiveKhz) && (explicitCore || global == 0)
+                    // An implicit P0 daily is an absolute effective displacement. P0 can mirror into point
+                    // controls, so adding those representations would count the same tuning twice.
+                    : explicitCore && vf.Points.All(p => Math.Abs(VfEffectiveCurve.Displacement(p) - global) < 1_000));
             if (different) comparison = DailyComparison.Different;
             else if (!missing && coreTarget && consistent) comparison = DailyComparison.Matched;
             else failures.Add("A complete saved-target and effective-curve match could not be established.");

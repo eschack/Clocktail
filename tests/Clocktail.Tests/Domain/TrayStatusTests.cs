@@ -95,6 +95,40 @@ public sealed class TrayStatusTests : IDisposable
         Assert.Null(Status(dispatcher).Devices[0].Verification);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Implicit_P0_daily_matches_the_effective_target_with_additive_or_overlapping_controls(bool overlapping)
+    {
+        var fake = new FakeVf { GlobalKhz = 240000 };
+        fake.Effective = (i, offset) => checked((uint)(fake.Base(i) + (overlapping ? offset : fake.GlobalKhz + offset)));
+        var dispatcher = Dispatcher(fake.Install());
+        if (overlapping)
+            for (int i = 0; i < 127; i++)
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(
+                    FakeDriver.State[FakeVf.ControlWord].AsSpan(Clocktail.Domain.Vf.VfLayout.OffsetField(i)), 240000);
+        SaveCore(240000);
+        var snapshot = Status(dispatcher, "verify");
+        Assert.Equal(DailyComparison.Matched, snapshot.Devices[0].Verification!.Comparison);
+        Assert.Equal(TrayState.DailyMatched, TrayStatus.State(snapshot.Devices[0], true, snapshot.CapturedAt, _host.Now));
+        Assert.All(snapshot.Devices[0].Verification!.Curve, point => Assert.Equal(240, point.EffectiveMhz - point.StockMhz));
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Implicit_P0_daily_does_not_match_double_tuning_or_an_unkept_shape(bool shaped)
+    {
+        var fake = new FakeVf { GlobalKhz = 240000 };
+        fake.Effective = (i, offset) => fake.Base(i) + (uint)(shaped && i == 126 ? 225000 : shaped ? 240000 : 480000);
+        var dispatcher = Dispatcher(fake.Install());
+        SaveCore(240000);
+        var verification = Status(dispatcher, "verify").Devices[0].Verification!;
+        Assert.Equal(DailyComparison.Unknown, verification.Comparison);
+        Assert.NotNull(verification.Error);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
     [Fact]
     public void P0_readback_matching_saved_offset_cannot_hide_the_known_effective_curve_disagreement()
     {
