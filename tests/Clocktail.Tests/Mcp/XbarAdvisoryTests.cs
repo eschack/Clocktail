@@ -244,7 +244,8 @@ public class XbarAdvisoryTests
             var hw = rig.Card.WithDriver((hw, _) => hw);
             var gpu = new GpuDevice { Identity = new GpuIdentity(0, "fake", "fake", 0, 0, 0, 0, 1, 0), NvapiHandle = 1 };
             Func<BrokerRequest, BrokerResponse?> exchange = req => { rig.Requests.Add(req); return rig.Answer; };
-            using var card = (IDisposable)cardType.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance).Single()
+            using var card = (IDisposable)cardType.GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null,
+                [typeof(NvClient), typeof(GpuDevice), typeof(Func<BrokerRequest, BrokerResponse?>)], null)!
                 .Invoke([hw, gpu, exchange]);
             var tools = Activator.CreateInstance(toolsType, card, null, null);
             Assert.Equal(275, toolsType.GetField(nameof(TuningTools.MaxXbarMhz))!.GetValue(null));
