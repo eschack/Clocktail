@@ -31,7 +31,7 @@ Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s
 ## The ratio: XBAR's ceiling
 - `set_clock_ratio` moves the 0.9: the driver's clock propagation ratio from the core (NVVDD) to XBAR (MSVDD). A higher ratio lets XBAR follow the core closer, about +29 MHz of XBAR per +0.01 at a 2900 MHz core, and asks MSVDD for the voltage that clock needs.
 - On the reference card at the 600 W wall: 0.92 ran XBAR 2595 MHz against a 2850 MHz core (0.911); stock ran 2535 / 2865 (0.885). MSVDD rose 980 → 1005 mV and the core gave 15 MHz back to the wall. Its gain in frames or Blender is not measured.
-- When: after MSVDD REL 0 and XBAR +250..+300 with its demand, if XBAR under load still sits at 0.9 x the core. 0.025 per call. The demand rules below apply to the clock XBAR then reaches; judge each step A B B A with a benchmark that uses memory.
+- When: after MSVDD REL 0 and XBAR +250..+300 with its demand, if XBAR under load still sits at 0.9 x the core. 0.025 at a time. The demand rules below apply to the clock XBAR then reaches; judge each step A B B A with a benchmark that uses memory.
 
 ## The cliff
 - With a large XBAR offset and no extra demand, memory-bound work lets MSVDD fall to its floor (825 mV). When it sits there, the **core is pinned near 1610 MHz and bandwidth drops 14-16 %** (1460 -> 1221-1259 GB/s). At demand 0: clean from +0 to +250, marginal at +300 (an occasional drop to 1687 MHz), the cliff at +350 and +400. No hysteresis: back down, back to normal.

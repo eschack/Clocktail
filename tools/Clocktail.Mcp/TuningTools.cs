@@ -19,20 +19,11 @@ namespace Clocktail.Mcp;
 [McpServerToolType]
 public sealed partial class TuningTools(Card card, Residency residency, LiveWatch live)
 {
-    /// <summary>The largest change one adjust_curve call may make to a point (CLOCKTAIL_MCP_STEP_MHZ).</summary>
-    public static readonly int StepMhz = Env("CLOCKTAIL_MCP_STEP_MHZ", 15);
-    /// <summary>How far above the daily profile any point may go (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ). The 2026-10-18
-    /// positive control hung at +105 on 900-1000 mV under 598 W; below 860 mV the daily curve is barely tuned (stock
-    /// under 800 mV), so the cap leaves room there (the user, 2026-10-19).</summary>
-    public static readonly int MaxAboveDailyMhz = Env("CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ", 200);
-    /// <summary>The highest wall set_power_limit may set (CLOCKTAIL_MCP_MAX_POWER_W): the daily profile's 600 W.</summary>
-    public static readonly int MaxPowerW = Env("CLOCKTAIL_MCP_MAX_POWER_W", 600);
-    /// <summary>The lowest wall set_power_limit may set (CLOCKTAIL_MCP_MIN_POWER_W): the driver refuses anything under 400 W on this card.</summary>
-    public static readonly int MinPowerW = Env("CLOCKTAIL_MCP_MIN_POWER_W", 400);
-    /// <summary>The lowest NVVDD / MSVDD current limit set_current_limit may set (CLOCKTAIL_MCP_MIN_NVVDD_A /
-    /// CLOCKTAIL_MCP_MIN_MSVDD_A); the driver's own range starts at 1 mA, so this floor is the tool's.</summary>
-    public static readonly int MinNvvddA = Env("CLOCKTAIL_MCP_MIN_NVVDD_A", 100);
-    public static readonly int MinMsvddA = Env("CLOCKTAIL_MCP_MIN_MSVDD_A", 90);
+    // What a write may set is the driver's and the firmware's range, no narrower (the user, 2026-10-27): until 0.4.1 the
+    // tools held their own caps on top (15 MHz per adjust_curve call, 200 MHz above the daily profile, nothing under
+    // 850 mV, steps per call for memory, XBAR, the boost and the ratio, a 100 A current floor), and refused a curve
+    // written while the GPU was busy. A curve one scan put 83 MHz under the measured edge was 800 MHz above the daily
+    // profile at 825 mV: no cap could tell that from a reckless one, and the person makes that call.
     /// <summary>The longest stress_test run (CLOCKTAIL_MCP_MAX_STRESS_S): the call blocks for the whole run.</summary>
     public static readonly int MaxStressSeconds = Env("CLOCKTAIL_MCP_MAX_STRESS_S", 300);
     /// <summary>stress_test stops the run at this temperature by default (CLOCKTAIL_MCP_STRESS_MAX_C): the agent cannot see
@@ -43,10 +34,31 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>The default window around the operating point: further below than above, because under a wall a raised
     /// curve moves the operating point down (the card runs the same clock a point lower).</summary>
     public const int WindowBelowMv = 20, WindowAboveMv = 10;
-    /// <summary>The lowest voltage adjust_curve touches (CLOCKTAIL_MCP_MIN_MV): points under it keep the daily profile's
-    /// offset. The user, 2026-10-19: below 850 mV the card is as good as idle, so tuning starts there; and a window that
-    /// stops at the floor keeps a walled card from sliding under it, so the floor point is tested at its own voltage.</summary>
-    public static readonly int MinMv = Env("CLOCKTAIL_MCP_MIN_MV", 850);
+    /// <summary>The lowest voltage adjust_curve and flatten_curve touch: NVVDD's VMIN as the driver reports it (800 mV on a
+    /// 5090), since the card runs no point under it; the curve's lowest point where it is unreadable. A window that stops at
+    /// the floor keeps a walled card from sliding under it, so the floor point is tested at its own voltage. It was 850 mV
+    /// (the user, 2026-10-19) until the edge was measured from 800 mV up (2026-10-27).</summary>
+    public static uint FloorUv(Card.Look look) => look.NvvddVminUv ?? look.Curve.Points.Min(p => p.VoltageUv);
+
+    /// <summary>A curve written above this GPU utilization says so in its answer: on 2026-10-18 two of three hangs began
+    /// with a curve written under full load. A warning, not a refusal (the user, 2026-10-27): the driver takes it.</summary>
+    public const uint BusyUtilPct = 15;
+
+    /// <summary>The warning for a curve written while the GPU is busy, or null.</summary>
+    public static string? Busy(Card.Look look) => look.Telemetry?.GpuUtilPercent is { } u && u > BusyUtilPct
+        ? $"written while the GPU was {u} % busy: on the reference card two of three hangs began with a curve written under full load; at idle is safer"
+        : null;
+
+    /// <summary>Why a board power limit is outside the range the driver reports for this board, or null.</summary>
+    private string? OutsideBoard(double watts)
+    {
+        var board = card.WithDriver(PowerRequestsReader.Read).Board;
+        double min = board.MinMw / 1000.0, max = board.MaxMw / 1000.0;
+        return watts < min || watts > max ? string.Create(CultureInfo.InvariantCulture, $"{min:0.#}..{max:0.#} W on this board (the driver's range)") : null;
+    }
+
+    /// <summary>Several warnings as one, or null when there are none.</summary>
+    private static string? Warnings(params string?[] w) => w.Where(x => x != null) is var all && all.Any() ? string.Join("; ", all) : null;
     /// <summary>The operating point is the median NVVDD under load over this long: a game's voltage moves with the scene.</summary>
     public static readonly TimeSpan OperatingSpan = TimeSpan.FromSeconds(3);
     /// <summary>adjust_curve on an idle card: the last load within this long (a stress run that just ended), its last 10 s.</summary>
@@ -164,59 +176,49 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +
-        "each point by at most the step (default 15 MHz) and never above the daily profile by more than the cap (default " +
-        "200 MHz); the firmware's own limits are held by the broker. The operating point is the median NVVDD under load " +
-        "over the last 3 s (or the last 10 s of a load that ended within 2 minutes, such as a stress run; an idle card needs " +
-        "fromMv/toMv); the default window is 20 mV below it to 10 mV above, and any point above the window that the " +
-        "raise would overtake is lifted just enough to keep the curve rising. Points under 850 mV (CLOCKTAIL_MCP_MIN_MV) are " +
-        "never touched. Under a power wall a raise shows as the same " +
+        "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Any step within " +
+        "the driver's and the firmware's own range, which the broker holds; the method's step is 15 MHz. The operating point " +
+        "is the median NVVDD under load over the last 3 s (or the last 10 s of a load that ended within 2 minutes, such as a " +
+        "stress run; an idle card needs fromMv/toMv); the default window is 20 mV below it to 10 mV above, and any point above " +
+        "the window that the raise would overtake is lifted just enough to keep the curve rising. Points under NVVDD's VMIN " +
+        "(800 mV on a 5090; the card runs none of them) are never touched. Under a power wall a raise shows as the same " +
         "clock at a lower voltage: the points the card then runs on are the ones tested (mark_stable records them). " +
         "The curve lands on a 7.5 MHz grid. Writing under full " +
-        "load is how 2 of 3 hangs on 2026-10-18 began: prefer one small step, then several minutes of play before the next, " +
-        "and call mark_stable or back_to_daily before moving on.")]
+        "load is how 2 of 3 hangs on 2026-10-18 began (the answer warns when the GPU was busy): prefer one small step, then " +
+        "several minutes of play before the next, and call mark_stable or back_to_daily before moving on.")]
     public string AdjustCurve(
         [Description("MHz to add to each point in the window (negative lowers).")] double deltaMhz,
         [Description("Lowest voltage of the window, mV; omit for the operating point minus 20 mV.")] double? fromMv = null,
         [Description("Highest voltage of the window, mV; omit for the operating point plus 10 mV.")] double? toMv = null) => Guard(() =>
     {
         if (deltaMhz == 0) throw new ArgumentException("deltaMhz is 0: nothing to try");
-        if (Math.Abs(deltaMhz) > StepMhz) throw new ArgumentException($"{deltaMhz} MHz is more than one step ({StepMhz} MHz); split it into several trials");
         var look = card.Read();
         var daily = DailyOffsets(out _);
         // Where the card ran under load: the last 3 s, else the last load within 2 minutes (a stress run that just ended). An
-        // idle card's NVVDD (~800-835 mV) is not an operating point: the window would sit under the 850 mV floor.
+        // idle card's NVVDD (~800-835 mV) is not an operating point.
         uint? at = residency.MedianUv(OperatingSpan) ?? residency.LastLoadMedianUv(LastLoadWithin, LastLoadSpan);
         const string Idle = "the card has not been under load in the last 2 minutes, so there is no operating point: give fromMv and toMv (e.g. around the last stress run's p50 nvvdd_mv, or the crash voltage in data_points)";
         uint lo = fromMv is { } f ? (uint)(f * 1000) : (at ?? throw new InvalidOperationException(Idle)) - WindowBelowMv * 1000;
         uint hi = toMv is { } h ? (uint)(h * 1000) : (at ?? throw new InvalidOperationException(Idle)) + WindowAboveMv * 1000;
         var pts = look.Curve.Points;
-        if (hi < MinMv * 1000) throw new ArgumentException($"the window ({lo / 1000.0}-{hi / 1000.0} mV) is all under the {MinMv} mV floor (CLOCKTAIL_MCP_MIN_MV): points there keep the daily offsets");
-        lo = Math.Max(lo, (uint)MinMv * 1000);
+        uint floor = FloorUv(look);
+        if (hi < floor) throw new ArgumentException($"the window ({lo / 1000.0}-{hi / 1000.0} mV) is all under NVVDD's VMIN ({floor / 1000.0} mV): the card runs no point there");
+        lo = Math.Max(lo, floor);
         var window = pts.Where(p => p.VoltageUv >= lo && p.VoltageUv <= hi).ToList();
         if (window.Count == 0) throw new ArgumentException($"no curve point between {lo / 1000.0} and {hi / 1000.0} mV");
 
         int delta = (int)Math.Round(deltaMhz * 1000);
         var next = look.Curve.Offsets();
-        foreach (var p in window)
-        {
-            next[p.Index] += delta;
-            int above = next[p.Index] - daily.ElementAtOrDefault(p.Index);
-            if (above > MaxAboveDailyMhz * 1000)
-                throw new ArgumentException($"point {p.Index} ({p.VoltageUv / 1000.0} mV) would be {above / 1000.0} MHz above the daily profile; the cap is {MaxAboveDailyMhz} MHz");
-        }
+        foreach (var p in window) next[p.Index] += delta;
         // A point raised past the one above it would cap the whole curve there: lift each point above the window that
         // would be overtaken just enough to match (onto the 7.5 MHz grid). That runs a clock already being tested at a
-        // higher voltage, so it adds no risk; the cap still holds.
+        // higher voltage, so it adds no risk.
         int top = window[^1].Index, lifted = 0;
         for (int k = top + 1; delta > 0 && k < pts.Count; k++)
         {
             long need = (long)pts[k - 1].BaseKhz + next[k - 1] - pts[k].BaseKhz;
             if (need <= next[k]) break;
             next[k] = (int)(Math.Ceiling(need / 7500.0) * 7500);
-            int above = next[k] - daily.ElementAtOrDefault(k);
-            if (above > MaxAboveDailyMhz * 1000)
-                throw new ArgumentException($"point {k} ({pts[k].VoltageUv / 1000.0} mV) would have to be lifted to {above / 1000.0} MHz above the daily profile to stay under point {k - 1}; the cap is {MaxAboveDailyMhz} MHz");
             lifted = k;
         }
         if (lifted > 0) top = lifted;
@@ -244,9 +246,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         });
     });
 
-    /// <summary>flatten_curve refuses to write above this GPU utilization: a curve written under load began 2 of 3 hangs.</summary>
-    public const uint FlattenMaxUtilPct = 15;
-
     /// <summary>
     /// The offsets a flat top at <paramref name="targetKhz"/> needs: every point from <paramref name="fromUv"/> up, and any
     /// point under it already above the target (so the curve never falls), lowered to run at most the target, onto the
@@ -271,25 +270,23 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Make the curve flat from a voltage up, as a new trial: every point from fromMv up runs at most the clock the point at " +
         "fromMv runs now (less marginMhz), or at most ceilingMhz. Only ever lowers, so it cannot push the card past what " +
         "it held; it is method step 4's 'flat where the chip stops scaling' in one call instead of many 15 MHz steps. Points " +
-        "under 850 mV are never touched. Refused while the GPU is busy (over 15 % utilization): write it at idle. back_to_daily " +
-        "undoes it; keep_as_daily keeps it.")]
+        "under NVVDD's VMIN are never touched. Write it at idle (the answer warns when the GPU was over 15 % busy). " +
+        "back_to_daily undoes it; keep_as_daily keeps it.")]
     public string FlattenCurve(
         [Description("Voltage the flat top starts at, mV.")] double fromMv,
         [Description("MHz under that point's clock to flatten to (default 0).")] double marginMhz = 0,
         [Description("Or flatten to this clock, MHz, instead of the point's.")] double? ceilingMhz = null,
         [Description("Why (where the chip stopped scaling).")] string? reason = null) => Guard(() =>
     {
-        if (fromMv < MinMv) throw new ArgumentException($"fromMv is at least {MinMv} mV (CLOCKTAIL_MCP_MIN_MV)");
         if (marginMhz < 0) throw new ArgumentException("marginMhz lowers the top: give it as a positive number");
         var look = card.Read();
-        if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
-            throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Flatten at idle");
         var pts = look.Curve.Points;
-        uint fromUv = (uint)Math.Round(fromMv * 1000);
+        uint fromUv = (uint)Math.Round(fromMv * 1000), floor = FloorUv(look);
+        if (fromUv < floor) throw new ArgumentException($"fromMv is at least NVVDD's VMIN, {floor / 1000.0} mV: the card runs no point under it");
         var at = pts.Where(p => p.VoltageUv >= fromUv).MinBy(p => p.VoltageUv) ?? throw new ArgumentException($"no curve point at or above {fromMv} mV");
         long target = ceilingMhz is { } c ? (long)Math.Round(c * 1000) : at.EffectiveKhz - (long)Math.Round(marginMhz * 1000);
         var before = look.Curve.Offsets();
-        var next = FlattenPlan(pts, before, fromUv, target, (uint)MinMv * 1000);
+        var next = FlattenPlan(pts, before, fromUv, target, floor);
         var moved = pts.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
         if (moved.Count == 0) throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"the curve is already at or under {target / 1000.0} MHz from {fromMv} mV: nothing to lower"));
         string change = string.Create(CultureInfo.InvariantCulture,
@@ -308,25 +305,16 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         {
             success = true, change, written = r.Written,
             landed = after?.Curve.Points.Where(p => p.Index >= moved[0].Index && p.Index <= moved[^1].Index).Select(p => Row(p, daily)),
-            warning = unread,
+            warning = Warnings(unread, Busy(look)),
         });
     });
-
-    /// <summary>shift_curve: the largest shift per call (CLOCKTAIL_MCP_SHIFT_STEP_MV). A 250 mV shift at 600 W bugchecked
-    /// the reference card (0x133, re/robustness.md).</summary>
-    public static readonly int ShiftStepMv = Env("CLOCKTAIL_MCP_SHIFT_STEP_MV", 25);
-
-    /// <summary>The first point a new curve would put more than the cap above the daily profile, or null.</summary>
-    public static int? OverDaily(int[] next, int[] daily, int capMhz) =>
-        Enumerable.Range(0, next.Length).Cast<int?>().FirstOrDefault(i => next[i!.Value] - daily.ElementAtOrDefault(i.Value) > capMhz * 1000);
 
     [McpServerTool(Name = "set_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Write a whole V/F curve as a new trial: every editable point's offset in kHz, in card_settings' encoding (runs as " +
         "offset*count, e.g. '0*60,30000*67'; '0*127' is the stock curve), as the CLI's --vf-offsets does. For loading a " +
-        "curve worked out elsewhere, or putting back one a data point recorded; a band is adjust_curve's. No point more than " +
-        "200 MHz above the daily profile's (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ); the write path holds the firmware's offset " +
-        "range and budget. Refused while the GPU is busy (over 15 % utilization): write it at idle. back_to_daily undoes it; " +
-        "keep_as_daily keeps it.")]
+        "curve worked out elsewhere, or putting back one a data point recorded; a band is adjust_curve's. Any curve within " +
+        "the driver's range: the write path holds the firmware's offset range and budget, nothing narrower. Write it at idle " +
+        "(the answer warns when the GPU was over 15 % busy). back_to_daily undoes it; keep_as_daily keeps it.")]
     public string SetCurve(
         [Description("Every editable point's offset, kHz, as runs offset*count.")] string curve,
         [Description("Why this curve (where it came from).")] string? reason = null) => Guard(() =>
@@ -343,15 +331,14 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "runs mv above it, never past what it runs at NVVDD's MAX; below the knee nothing moves. The same clocks at less " +
         "voltage, so on a power-limited load more clock under the same wall. This is not the CLI's --vf-undervolt, which " +
         "moves the stock curve (on the reference card that put 895 mV at 2407 MHz where the daily curve ran 2797). It is a " +
-        "raise at every voltage, so test it as a raise: stress_test across the loads, then games. At most 25 mV per call " +
-        "(CLOCKTAIL_MCP_SHIFT_STEP_MV; a 250 mV shift at 600 W bugchecked the reference card), no point more than 200 MHz " +
-        "above the daily profile's. Refused while the GPU is busy: write it at idle. back_to_daily undoes it; keep_as_daily keeps it.")]
+        "raise at every voltage, so test it as a raise: stress_test across the loads, then games. Any shift within the " +
+        "driver's range; small ones first (25 mV held on the reference card, and a 250 mV shift at 600 W bugchecked it). " +
+        "Write it at idle (the answer warns when the GPU was over 15 % busy). back_to_daily undoes it; keep_as_daily keeps it.")]
     public string ShiftCurve(
         [Description("mV to move the curve left by.")] double mv,
         [Description("Why (what the last pass showed).")] string? reason = null) => Guard(() =>
     {
         if (mv <= 0) throw new ArgumentException("mv moves the curve left: give it as a positive number (adjust_curve lowers)");
-        if (mv > ShiftStepMv) throw new ArgumentException($"a shift is at most {ShiftStepMv} mV per call (CLOCKTAIL_MCP_SHIFT_STEP_MV); split it into several trials");
         var look = card.Read();
         var limits = VfLimits.From(card.WithDriver(Clocktail.Domain.Clocks.Pstates20Reader.Read));
         var shape = VfShapes.ShiftCurrent(look.Curve, limits, (int)Math.Round(mv * 1000), look.NvvddMaxUv);
@@ -359,15 +346,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         return CurveTrial(look, shape.Offsets, string.Create(CultureInfo.InvariantCulture, $"curve shifted left {shape.AppliedUv / 1000.0} mV from {shape.FloorUv / 1000.0} mV"), reason);
     });
 
-    /// <summary>A whole new curve as a trial, at idle and under the daily-profile cap; the answer lists the points that moved.</summary>
+    /// <summary>A whole new curve as a trial; the answer lists the points that moved, and warns when the GPU was busy.</summary>
     private string CurveTrial(Card.Look look, int[] next, string change, string? reason)
     {
-        if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
-            throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Write it at idle");
         var daily = DailyOffsets(out _);
-        if (OverDaily(next, daily, MaxAboveDailyMhz) is { } bad)
-            throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
-                $"point {bad} ({look.Curve.Points[bad].VoltageUv / 1000.0} mV) would be {(next[bad] - daily.ElementAtOrDefault(bad)) / 1000.0} MHz above the daily profile; the cap is {MaxAboveDailyMhz} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)"));
         var before = look.Curve.Offsets();
         var moved = look.Curve.Points.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
         if (moved.Count == 0) throw new ArgumentException("that is the curve on the card already: nothing to try");
@@ -385,7 +367,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         {
             success = true, change, written = r.Written,
             landed = after?.Curve.Points.Where(p => p.Index >= moved[0].Index && p.Index <= moved[^1].Index).Select(p => Row(p, daily)),
-            warning = unread,
+            warning = Warnings(unread, Busy(look)),
         });
     }
 
@@ -394,14 +376,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +
         "the curve's slope bends). Later adjust_curve trials run under this wall until back_to_daily, end_session or a crash " +
         "puts the daily profile's wall back. This wall is never kept (keep_as_daily puts the daily wall back on); " +
-        "set_daily_power_limit changes the daily one. Allowed: 400-600 W (the driver refuses less on this card). For points lower down " +
-        "than 400 W reaches, cap the frame rate in the game instead: a lighter load runs lower on the curve.")]
+        "set_daily_power_limit changes the daily one. Allowed: the board's range as the driver reports it (400-600 W on a 5090). " +
+        "For points lower down than 400 W reaches, cap the frame rate in the game instead: a lighter load runs lower on the curve.")]
     public string SetPowerLimit(
         [Description("The board power limit, W.")] double watts,
         [Description("Why this wall (which part of the curve it is meant to reach).")] string? reason = null) => Guard(() =>
     {
-        if (watts > MaxPowerW) throw new ArgumentException($"{watts} W is above the cap ({MaxPowerW} W)");
-        if (watts < MinPowerW) throw new ArgumentException($"{watts} W is below {MinPowerW} W (CLOCKTAIL_MCP_MIN_POWER_W)");
+        if (OutsideBoard(watts) is { } outside) throw new ArgumentException($"{watts} W is outside {outside}");
         var look = card.Read();
         var t = look.Telemetry;
         uint mw = (uint)Math.Round(watts * 1000);
@@ -448,8 +429,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         uint ma = amps.Trim().Equals("default", StringComparison.OrdinalIgnoreCase) ? limit.DefaultMa
             : double.TryParse(amps, NumberStyles.Float, CultureInfo.InvariantCulture, out var a) && a > 0 ? (uint)Math.Round(a * 1000)
             : throw new ArgumentException($"'{amps}' is not a number of amps or 'default'");
-        int floor = r == Clocktail.Domain.Rails.Rail.Nvvdd ? MinNvvddA : MinMsvddA;
-        if (ma < floor * 1000) throw new ArgumentException($"{ma / 1000.0} A is below {floor} A for {rail} (CLOCKTAIL_MCP_MIN_{rail.ToUpperInvariant()}_A)");
+        if (ma < limit.MinMa) throw new ArgumentException($"{ma / 1000.0} A is below the driver's {rail} minimum of {limit.MinMa / 1000.0} A");
         if (ma > limit.MaxMa) throw new ArgumentException($"{ma / 1000.0} A is above the driver's {rail} maximum of {limit.MaxMa / 1000.0} A");
         var t = look.Telemetry;
         string change = string.Create(CultureInfo.InvariantCulture, $"{CurrentLimitWrites.Key(r).ToUpperInvariant()} current limit {limit.LimitMa / 1000.0} → {ma / 1000.0} A");
@@ -782,11 +762,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "setting another tool left (card_report's 'Not set by Clocktail': an MSI Afterburner curve, a memory offset, a power " +
         "limit, fixed fans, a clock lock) is written to NVIDIA's default (cleared lists them). The daily profile is suspended " +
         "(kept, not deleted), so nothing puts it back at the next start or driver reset until load_daily; what another tool set " +
-        "is not kept anywhere, and only that tool can put it back, so then Clocktail asks the person itself (a question in the " +
-        "agent, or a Windows dialog). The trial in force (if any) ends as survived. Another tool still running may write its " +
-        "settings back (card_report says), and NVIDIA App's automatic tuning comes back after every restart until it is turned " +
-        "off in NVIDIA App. Tell the person before calling this.")]
-    public async Task<string> Stock(McpServer server, CancellationToken cancellationToken = default)
+        "is not kept anywhere, and only that tool can put it back, so then Clocktail asks the person itself, in the chat: that " +
+        "first call changes nothing and answers with the question and a confirm code (code confirm_in_chat); put the question to " +
+        "the person word for word and only after their yes call again with confirm set to that code. The trial in force (if any) " +
+        "ends as survived. Another tool still running may write its settings back (card_report says), and NVIDIA App's " +
+        "automatic tuning comes back after every restart until it is turned off in NVIDIA App. Tell the person before calling this.")]
+    public async Task<string> Stock(McpServer server, [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
         // Another tool's settings cleared are gone for good (the broker lets go of them): the person says yes to that.
         IReadOnlyList<Clocktail.Domain.FactoryCell> others;
@@ -796,7 +777,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         return await Asked(server,
             $"Put your graphics card to NVIDIA's stock settings. This clears what another tool set ({string.Join(", ", others.Select(o => $"{o.Name} {o.Describe(o.Found)}"))}); " +
             "Clocktail keeps no copy of it, so only that tool can put it back. Your daily profile is kept and load_daily puts it back.",
-            cancellationToken, Stock);
+            confirm, cancellationToken, Stock);
     }
 
     private string Stock()
@@ -866,12 +847,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         McpServer server,
         [Description("Why this becomes the daily profile (games and minutes it survived).")] string note,
         [Description("Keep another tool's settings on the card too (show preview_daily adopt=true first).")] bool adopt = false,
+        [Description(ConfirmCode)] string? confirm = null,
         CancellationToken cancellationToken = default)
     {
         var preview = card.Broker(BrokerRequest.OpProfile, adopt ? "preview-adopt" : "preview");
         if (adopt && preview.Code == BrokerCode.BadRequest) return Older(preview);
         if (!preview.Ok) return Reply(preview);
-        return await Asked(server, $"Make what is on your graphics card now your daily profile ({Changes(preview)}). Clocktail puts it back after every start and driver reset.", cancellationToken, () =>
+        return await Asked(server, $"Make what is on your graphics card now your daily profile ({Changes(preview)}). Clocktail puts it back after every start and driver reset.", confirm, cancellationToken, () =>
         {
             var r = card.Broker(BrokerRequest.OpProfile, adopt ? "adopt" : "keep", note);
             if (!r.Ok || r.Result is not { } res) return Reply(r);
@@ -882,13 +864,17 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     /// <summary>For the description of each tool the person confirms (<see cref="Consent"/>).</summary>
-    private const string AsksItself = "Clocktail asks the person itself before it does this (a question in the agent, or a Windows dialog): " +
-        "say in chat what it will change first; when they do not confirm, nothing is changed.";
+    private const string AsksItself = "Clocktail asks the person itself before it does this, in the chat: the first call changes nothing " +
+        "and answers with the question and a confirm code (code confirm_in_chat); put the question to the person word for word, and only " +
+        "after their yes call again with the same arguments and confirm set to that code. When they do not confirm, nothing is changed.";
+
+    /// <summary>The <c>confirm</c> parameter of each tool the person confirms.</summary>
+    private const string ConfirmCode = "The code from this tool's first answer, given only after the person said yes to its question in chat; omit it to ask.";
 
     /// <summary>The person's yes (<see cref="Consent"/>) before <paramref name="then"/>; without it, why not, and nothing done.</summary>
-    private static async Task<string> Asked(McpServer server, string what, CancellationToken ct, Func<string> then) =>
-        await Consent.Ask(server, what, ct) is { } no
-            ? Out(new { success = false, error = no, code = "not_confirmed", written = WriteOutcome.None })
+    private static async Task<string> Asked(McpServer server, string what, string? confirm, CancellationToken ct, Func<string> then) =>
+        await Consent.Ask(server, what, confirm, ct) is { } no
+            ? Out(new { success = false, error = no.Error, code = no.Code, question = no.Question, confirm = no.ConfirmCode, written = WriteOutcome.None })
             : Guard(then);
 
     /// <summary>A profile preview's changes in a few words ("V/F curve, memory offset"), for the person's question.</summary>
@@ -947,8 +933,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     [McpServerTool(Name = "delete_profile", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. " + AsksItself)]
-    public Task<string> DeleteProfile(McpServer server, [Description("The saved profile's name, from list_presets.")] string name, CancellationToken cancellationToken = default) =>
-        Asked(server, $"Delete the profile saved as '{name}'. It cannot be undone; the settings on your graphics card do not change.", cancellationToken,
+    public Task<string> DeleteProfile(McpServer server, [Description("The saved profile's name, from list_presets.")] string name,
+        [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default) =>
+        Asked(server, $"Delete the profile saved as '{name}'. It cannot be undone; the settings on your graphics card do not change.", confirm, cancellationToken,
             () => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
 
     [McpServerTool(Name = "load_preset", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
@@ -957,13 +944,14 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
         "is still other silicon: after loading one, run stress_test before trusting it. Show preview_daily with the name " +
         "first. " + AsksItself)]
-    public async Task<string> LoadPreset(McpServer server, [Description("The preset's or saved profile's name, from list_presets.")] string name, CancellationToken cancellationToken = default)
+    public async Task<string> LoadPreset(McpServer server, [Description("The preset's or saved profile's name, from list_presets.")] string name,
+        [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
         // The preview refuses an unknown name and another model's preset: then nobody is asked about a load that cannot happen.
         var preview = card.Broker(BrokerRequest.OpProfile, "preview", name);
         if (!preview.Ok) return Reply(preview);
         return await Asked(server, $"Load '{name}' as your daily profile and put it on your graphics card now ({Changes(preview)}); Clocktail puts it back after every start.",
-            cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null));
+            confirm, cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null));
     }
 
     [McpServerTool(Name = "install_service", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
@@ -1231,17 +1219,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             return path;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return $"(not written: {e.Message})"; }
-    }
-
-    /// <summary>The value the daily profile keeps for one cell; null when it keeps none, is suspended or cannot be read.</summary>
-    private string? DailyWrite(string kind, string key)
-    {
-        var r = card.Broker(BrokerRequest.OpProfile, "show");
-        if (!r.Ok || r.Result is not { } res || res.GetProperty("profile") is not { ValueKind: JsonValueKind.Object } p || p.GetProperty("Suspended").GetBoolean()) return null;
-        foreach (var w in p.GetProperty("Writes").EnumerateArray())
-            if (w.GetProperty("Kind").GetString() == kind && w.GetProperty("Key").GetString() == key)
-                return w.GetProperty("Value").GetString();
-        return null;
     }
 
     /// <summary>The card after a write that landed: a read that cannot get to the driver must not turn the write's success

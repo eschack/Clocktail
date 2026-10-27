@@ -1,16 +1,17 @@
+using System.Reflection;
 using Clocktail.Mcp;
 
 namespace Clocktail.Tests.Mcp;
 
-/// <summary>set_curve and shift_curve stay under the daily-profile cap point by point.</summary>
+/// <summary>The tools hold the driver's and the firmware's limits and none of their own (the user, 2026-10-27).</summary>
 public class CurveToolsTests
 {
     [Fact]
-    public void The_first_point_past_the_cap_is_named()
+    public void No_cap_or_step_of_the_tools_own_is_left()
     {
-        int[] daily = [0, 30_000, 30_000];
-        Assert.Null(TuningTools.OverDaily([0, 230_000, 0], daily, 200));
-        Assert.Equal(1, TuningTools.OverDaily([0, 230_001, 300_000], daily, 200));
-        Assert.Equal(3, TuningTools.OverDaily([0, 0, 0, 200_001], daily, 200));   // a point the daily profile does not reach counts from 0
+        var names = typeof(TuningTools).GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static).Select(m => m.Name).ToHashSet();
+        foreach (var gone in new[] { "StepMhz", "MaxAboveDailyMhz", "OverDaily", "MinMv", "ShiftStepMv", "MemoryStepMhz", "XbarStepMhz",
+                                     "VdemandStepMv", "BoostStepPct", "RatioStep", "MaxPowerW", "MinPowerW", "MinNvvddA", "MinMsvddA", "FlattenMaxUtilPct" })
+            Assert.DoesNotContain(gone, names);
     }
 }

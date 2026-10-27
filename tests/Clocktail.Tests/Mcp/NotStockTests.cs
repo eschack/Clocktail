@@ -109,26 +109,62 @@ public class NotStockTests
     private static Func<CancellationToken, Task<bool?>> Form(bool? answer) => _ => Task.FromResult(answer);
 
     [Fact]
-    public async Task The_persons_yes_comes_from_the_agents_form_or_else_a_windows_dialog()
+    public void The_persons_yes_is_asked_in_the_chat_with_a_code_for_that_question()
+    {
+        const string what = "Make the card's settings your daily profile.";
+        var now = new DateTimeOffset(2026, 10, 27, 14, 0, 0, TimeSpan.Zero);
+
+        var first = Consent.Chat(what, null, now);                                             // no code: nothing done, the question
+        Assert.NotNull(first);
+        Assert.Equal("confirm_in_chat", first!.Code);
+        Assert.Equal(what, first.Question);
+        Assert.Contains(what, first.Error);
+        Assert.Matches("^[A-Z2-9]{6}$", first.ConfirmCode!);
+
+        Assert.NotNull(Consent.Chat("Delete the profile saved as 'quiet'.", first.ConfirmCode, now));   // another question's code
+        Assert.Null(Consent.Chat(what, first.ConfirmCode!.ToLowerInvariant(), now.AddMinutes(1)));     // the yes, any case
+        Assert.Contains("not this change's", Consent.Chat(what, first.ConfirmCode, now.AddMinutes(1))!.Error);   // once only
+
+        var late = Consent.Chat(what, null, now)!;
+        Assert.NotNull(Consent.Chat(what, late.ConfirmCode, now + Consent.CodeValid));         // expired
+        Assert.NotNull(Consent.Chat(what, "", now));                                           // an empty code asks
+    }
+
+    [Fact]
+    public async Task Outside_the_chat_the_yes_comes_from_the_agents_form_or_else_a_windows_dialog()
     {
         bool asked = false;
         bool? Dialog(bool? answer) { asked = true; return answer; }
         const string what = "Make the card's settings your daily profile.";
 
-        Assert.Null(await Consent.Ask("auto", Form(true), _ => Dialog(false), what, default));
+        Assert.Null(await Consent.Ask("form", Form(true), _ => Dialog(false), what, default));
         Assert.False(asked);                                                                   // the form answered
-        Assert.Contains("did not confirm", await Consent.Ask("auto", Form(false), _ => Dialog(true), what, default));
+        Assert.Contains("did not confirm", await Consent.Ask("form", Form(false), _ => Dialog(true), what, default));
         Assert.False(asked);                                                                   // a no in the form is final
 
-        Assert.Null(await Consent.Ask("auto", Form(null), _ => Dialog(true), what, default)); // no form shown: the dialog
+        Assert.Null(await Consent.Ask("form", Form(null), _ => Dialog(true), what, default)); // no form shown: the dialog
         Assert.True(asked);
-        Assert.Null(await Consent.Ask("auto", null, _ => true, what, default));                // no elicitation (Freebuff)
-        Assert.Contains("Windows dialog", await Consent.Ask("auto", null, _ => false, what, default));
-        Assert.Contains(Consent.Variable + "=off", await Consent.Ask("auto", null, _ => null, what, default));   // nobody to ask
+        Assert.Null(await Consent.Ask("form", null, _ => true, what, default));                // no elicitation (Freebuff)
+        Assert.Contains("Windows dialog", await Consent.Ask("form", null, _ => false, what, default));
+        Assert.Contains(Consent.Variable + "=chat", await Consent.Ask("form", null, _ => null, what, default));   // nobody to ask
 
         Assert.Contains("Windows dialog", await Consent.Ask("dialog", Form(true), _ => false, what, default));  // dialog only
         Assert.Null(await Consent.Ask("off", Form(false), _ => false, what, default));         // the person opted out
-        Assert.Contains("stopped waiting", await Consent.Ask("auto", null, _ => true, what, new CancellationToken(canceled: true)));
+        Assert.Contains("stopped waiting", await Consent.Ask("form", null, _ => true, what, new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public void Chat_is_the_default_and_auto_still_means_the_form()
+    {
+        string? old = Environment.GetEnvironmentVariable(Consent.Variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(Consent.Variable, null);
+            Assert.Equal("chat", Consent.Mode);
+            Environment.SetEnvironmentVariable(Consent.Variable, "auto");
+            Assert.Equal("form", Consent.Mode);
+        }
+        finally { Environment.SetEnvironmentVariable(Consent.Variable, old); }
     }
 
     [Fact]
@@ -141,6 +177,7 @@ public class NotStockTests
         foreach (var m in asking)
         {
             Assert.Contains(m.GetParameters(), p => p.ParameterType == typeof(McpServer));     // to put the question to the client
+            Assert.Contains(m.GetParameters(), p => p.Name == "confirm" && p.ParameterType == typeof(string) && p.HasDefaultValue);   // the chat's code
             Assert.Contains("asks the person itself", m.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description);
         }
     }
