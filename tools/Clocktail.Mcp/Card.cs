@@ -18,7 +18,7 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed class Card : IDisposable
 {
-    private readonly GpuManager _mgr;
+    private readonly GpuManager? _mgr;
     private readonly GpuDevice _gpu;
     private readonly NvClient _hw;
     private readonly GpuSession _session;
@@ -27,10 +27,10 @@ public sealed class Card : IDisposable
         int.TryParse(Environment.GetEnvironmentVariable("CLOCKTAIL_MCP_DRIVER_WAIT_S"), out var s) && s > 0 ? s : 5);
     private readonly DriverLane _lane = new(DriverWait);
     private uint? _railMask;
+    private readonly Func<BrokerRequest, BrokerResponse?> _brokerCall = req => BrokerClient.TryCall(req);
 
 
     private readonly Func<Look>? _readOverride;
-    private readonly Func<BrokerRequest, BrokerResponse>? _brokerOverride;
     private readonly string? _identityOverride;
     // Fake-driver test seam only; no native GPU or broker is opened by this constructor.
     internal Card(NvClient hw, GpuSession session, string identity, Func<Look> read,
@@ -43,7 +43,7 @@ public sealed class Card : IDisposable
         OtherGpus = [];
         _identityOverride = identity;
         _readOverride = read;
-        _brokerOverride = broker;
+        _brokerCall = request => broker(request);
     }
 
     public Card()
@@ -53,6 +53,16 @@ public sealed class Card : IDisposable
         OtherGpus = [.. _mgr.Gpus.Where(g => g != _gpu).Select(g => g.Identity.Name)];
         _hw = new NvClient(_mgr.NvApi);
         _session = new GpuSession(_gpu.NvapiHandle, _gpu.Identity.Name);
+    }
+
+    /// <summary>Software-only card: every driver call and broker exchange is supplied by the test.</summary>
+    internal Card(NvClient hw, GpuDevice gpu, Func<BrokerRequest, BrokerResponse?> brokerCall)
+    {
+        _hw = hw;
+        _gpu = gpu;
+        _session = new GpuSession(gpu.NvapiHandle, gpu.Identity.Name);
+        _brokerCall = brokerCall;
+        OtherGpus = [];
     }
 
     /// <summary>The card to talk to: the first RTX 50 series card (what every layout was measured on), else the first
@@ -76,7 +86,7 @@ public sealed class Card : IDisposable
     {
         using (_lane.Enter("the temperature thresholds"))
         {
-            if (_mgr.Nvml is not { } n || !_gpu.HasNvml) return (null, null, null);
+            if (_mgr?.Nvml is not { } n || !_gpu.HasNvml) return (null, null, null);
             var h = _gpu.NvmlHandle;
             return (n.TemperatureThresholdC(h, NvmlTemperatureThreshold.GpuMax), n.TemperatureThresholdC(h, NvmlTemperatureThreshold.Slowdown),
                 n.TemperatureThresholdC(h, NvmlTemperatureThreshold.Shutdown));
@@ -87,7 +97,7 @@ public sealed class Card : IDisposable
     public NvmlPcieLink? PcieLink()
     {
         using (_lane.Enter("the PCIe link"))
-            return _mgr.Nvml is { } n && _gpu.HasNvml ? n.PcieLink(_gpu.NvmlHandle) : null;
+            return _mgr?.Nvml is { } n && _gpu.HasNvml ? n.PcieLink(_gpu.NvmlHandle) : null;
     }
 
     /// <summary>NVAPI's GetPerfDecreaseInfo (public nvapi.h): the reasons the driver is holding performance down, as bits;
@@ -109,13 +119,13 @@ public sealed class Card : IDisposable
     ];
 
     /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
-    public string? DriverGone() => _brokerOverride == null ? DriverLoss.Why(_mgr.Nvml, [_session]) : _session.Faulted ? "fake driver lost" : null;
+    public string? DriverGone() => DriverLoss.Why(_mgr?.Nvml, [_session]);
     public string Name => _identityOverride ?? _gpu.Identity.Name;
     public string Vbios => _gpu.Identity.Vbios;
     /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
-    public uint DriverVersion => _mgr.Driver.Version;
+    public uint DriverVersion => _mgr?.Driver.Version ?? 0;
     /// <summary>NVAPI's driver branch ("r617_00").</summary>
-    public string DriverBranch => _mgr.Driver.Branch;
+    public string DriverBranch => _mgr?.Driver.Branch ?? "";
 
     /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and VMIN and the Core curve,
     /// and from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
@@ -129,7 +139,7 @@ public sealed class Card : IDisposable
         using (_lane.Enter("a full read of the card"))
         {
             TelemetrySnapshot? t = null;
-            if (_mgr.Nvml != null && _gpu.HasNvml)
+            if (_mgr?.Nvml != null && _gpu.HasNvml)
                 try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
             _railMask ??= RailsReader.Mask(_hw, _session);
             uint? nvvdd = null, msvdd = null, max = null, vmin = null;
@@ -189,7 +199,7 @@ public sealed class Card : IDisposable
         using (_lane.Enter("a sample"))
         {
             TelemetrySnapshot? t = null;
-            if (_mgr.Nvml != null && _gpu.HasNvml)
+            if (_mgr?.Nvml != null && _gpu.HasNvml)
                 try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
             _railMask ??= RailsReader.Mask(_hw, _session);
             uint? nvvdd = null, msvdd = null;
@@ -247,7 +257,7 @@ public sealed class Card : IDisposable
         do
         {
             using (_lane.Enter("an instantaneous power read"))
-                if (_mgr.Nvml != null && _gpu.HasNvml && _mgr.Nvml.FieldValues(_gpu.NvmlHandle, NvmlField.PowerInstantMw)?[0].Value is { } mw)
+                if (_mgr?.Nvml != null && _gpu.HasNvml && _mgr.Nvml.FieldValues(_gpu.NvmlHandle, NvmlField.PowerInstantMw)?[0].Value is { } mw)
                     peak = Math.Max(peak ?? 0, mw / 1000.0);
             Thread.Sleep(20);
         } while (DateTime.UtcNow < until);
@@ -260,7 +270,7 @@ public sealed class Card : IDisposable
         using (_lane.Enter("the once-a-second read"))
         {
             TelemetrySnapshot? t = null;
-            if (_mgr.Nvml != null && _gpu.HasNvml)
+            if (_mgr?.Nvml != null && _gpu.HasNvml)
                 try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
             _railMask ??= RailsReader.Mask(_hw, _session);
             uint? uv = _railMask is { } mask ? RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd) : null;
@@ -282,7 +292,7 @@ public sealed class Card : IDisposable
     {
         bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview" or "preview-adopt" or "alive" or "quiet";
         BrokerResponse? r;
-        try { var request = new BrokerRequest(op, StableId, Kind: kind, Value: value); r = _brokerOverride != null ? _brokerOverride(request) : BrokerClient.TryCall(request); }
+        try { r = _brokerCall(new BrokerRequest(op, StableId, Kind: kind, Value: value)); }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)
         {
             return new(false, null, $"the Clocktail service stopped answering after the request was sent ({e.Message}); {WriteOutcome.ReadFirst}",
