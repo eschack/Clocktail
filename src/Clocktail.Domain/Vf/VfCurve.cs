@@ -242,7 +242,7 @@ public static class VfParser
 }
 
 /// <summary>Validated Core control topology and offsets, independent of effective-frequency Status.
-/// This snapshot can record an original for a P0 side effect; it cannot plan or verify a V/F write.</summary>
+/// This snapshot can record and restore controls for a P0 failure; it cannot plan or verify a new V/F tune.</summary>
 public sealed record VfControlSnapshot(VfLayoutId Layout, byte[] Info, byte[] Control, byte[] Mask,
     IReadOnlyList<(int Index, int OffsetKhz)> Points);
 

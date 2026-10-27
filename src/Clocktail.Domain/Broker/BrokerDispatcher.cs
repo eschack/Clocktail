@@ -1815,12 +1815,15 @@ public sealed partial class BrokerDispatcher
 
         // Even zero point controls can change implicitly when P0 is written. Capture them before that setter,
         // rather than letting the following explicit V/F write mistake a native side effect for the original.
-        var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value,
-            beforeWrite: () =>
-            {
-                foreach (var coupled in p.CoupledOriginals) writer.ClaimOriginal(coupled.Cell, coupled.Snapshot);
-            });
-        if (r.StateKnown)
+        var r = path.Kind == ClockOffsets.Kind
+            ? new ClockOffsets(hw, target.Journal, target.Sentinel, _host).ApplyOwned(target.Session,
+                Enum.Parse<ClockDomain>(p.Cell.Key, true), int.Parse(req.Value, System.Globalization.CultureInfo.InvariantCulture), req.TakeOver)
+            : writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value,
+                beforeWrite: () =>
+                {
+                    foreach (var coupled in p.CoupledOriginals) writer.ClaimOriginal(coupled.Cell, coupled.Snapshot);
+                });
+        if (path.Kind != ClockOffsets.Kind && r.StateKnown)
             foreach (var coupled in p.CoupledOriginals) writer.ReleaseIfRestored(target.Session, coupled.Cell);
         return new BrokerResponse(r.Tx.Succeeded, Result: Element(new
         {

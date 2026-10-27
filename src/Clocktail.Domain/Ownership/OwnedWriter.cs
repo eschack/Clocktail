@@ -79,7 +79,9 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
     /// </summary>
     /// <param name="target">The value the cell is being set to, in its own encoding, for the sentinel: what was in
     /// flight if the machine goes down inside the window.</param>
-    public OwnedWriteResult Apply(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, bool takeOver = false, string? target = null, Action? beforeWrite = null)
+    /// <param name="settle">Optional coupled-state settlement, under the GPU lock before ownership is released
+    /// or the sentinel is cleared. It must report an unverified rollback as an unknown transaction outcome.</param>
+    public OwnedWriteResult Apply(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, bool takeOver = false, string? target = null, Action? beforeWrite = null, Func<TxResult, TxResult>? settle = null)
     {
         CrashLog.SettleReboot(journal, sentinel, host);   // a take-over must not overwrite the one record of a crash
         if (sentinel.IsBlocked(out var what) && !takeOver)
@@ -88,7 +90,7 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
 
         var scope = sentinel.Begin("manual", takeOver, $"{cell.Id} <- {target ?? "(planned)"} {cell.Unit}")
             ?? throw new InvalidOperationException("the apply sentinel could not be created");
-        var r = Run(gpu, cell, plan, original, beforeWrite: beforeWrite);
+        var r = Run(gpu, cell, plan, original, beforeWrite: beforeWrite, settle: settle);
         if (r.StateKnown) scope.Complete();
         return r with { SentinelCleared = r.StateKnown };
     }
@@ -146,52 +148,63 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
         return record.Items.FirstOrDefault(i => string.Equals(i.Kind, kind, StringComparison.OrdinalIgnoreCase) && string.Equals(i.Key, key, StringComparison.OrdinalIgnoreCase))?.Original;
     }
 
-    private OwnedWriteResult Run(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, string? original, bool retainOriginal = false, Action? beforeWrite = null)
+    private OwnedWriteResult Run(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, string? original, bool retainOriginal = false, Action? beforeWrite = null, Func<TxResult, TxResult>? settle = null)
     {
-        // Several writes in a row owe the driver the state before the first of them: an existing record wins.
-        var tx = new Transaction(hw).Run(gpu, cell.Spec, plan, writeAhead: snapshot =>
+        if (!gpu.TryEnter(cell.Spec.Timeout, out var gate))
+            return Describe(new TxResult(TxOutcome.Aborted, RestoreState.NotNeeded,
+                "another operation holds this GPU; nothing was written", [], null, null, []));
+        using (gate)
         {
-            beforeWrite?.Invoke();
-            if (original != null) return null;
-            var value = cell.StateIn(snapshot)
-                ?? throw new InvalidOperationException($"{cell.Id} cannot be read from the snapshot, so its original cannot be recorded");
-            journal.Claim(new OwnedItem(cell.Kind, cell.Key, value, host.Now, cell.Note));
-            original = value;
-            return $"journal: {cell.Id} claimed, original {value} {cell.Unit}";
-        });
+            // Several writes in a row owe the driver the state before the first of them: an existing record wins.
+            var tx = new Transaction(hw).Run(gpu, cell.Spec, plan, writeAhead: snapshot =>
+            {
+                beforeWrite?.Invoke();
+                if (original != null) return null;
+                var value = cell.StateIn(snapshot)
+                    ?? throw new InvalidOperationException($"{cell.Id} cannot be read from the snapshot, so its original cannot be recorded");
+                journal.Claim(new OwnedItem(cell.Kind, cell.Key, value, host.Now, cell.Note));
+                original = value;
+                return $"journal: {cell.Id} claimed, original {value} {cell.Unit}";
+            });
+            if (settle != null) tx = settle(tx);
+            return Describe(tx);
+        }
 
-        string? before = cell.StateIn(tx.Before);
-        // Aborted is total: nothing reached the driver, so the cell is what the snapshot said.
-        string? after = tx.After != null ? cell.StateIn(tx.After) : tx.Outcome == TxOutcome.Aborted ? before : null;
-        bool stateKnown = tx.Succeeded || tx.Outcome == TxOutcome.Aborted || tx.Restore is RestoreState.NotNeeded or RestoreState.Restored;
-        // A verified restore put the snapshot's value back; the readback in tx.After predates the restore.
-        string? now = tx.Restore == RestoreState.Restored ? before : after;
+        OwnedWriteResult Describe(TxResult tx)
+        {
+            string? before = cell.StateIn(tx.Before);
+            // Aborted is total: nothing reached the driver, so the cell is what the snapshot said.
+            string? after = tx.After != null ? cell.StateIn(tx.After) : tx.Outcome == TxOutcome.Aborted ? before : null;
+            bool stateKnown = tx.Succeeded || tx.Outcome == TxOutcome.Aborted || tx.Restore is RestoreState.NotNeeded or RestoreState.Restored;
+            // A verified restore put the snapshot's value back; the readback in tx.After predates the restore.
+            string? now = tx.Restore == RestoreState.Restored ? before : after;
 
-        Hold hold;
-        string ownership;
-        if (original == null)
-        {
-            hold = Hold.NotHeld;
-            ownership = tx.Outcome == TxOutcome.NoChange ? "nothing held: already at the requested value" : "nothing held: nothing was written";
+            Hold hold;
+            string ownership;
+            if (original == null)
+            {
+                hold = Hold.NotHeld;
+                ownership = tx.Outcome == TxOutcome.NoChange ? "nothing held: already at the requested value" : "nothing held: nothing was written";
+            }
+            else if (stateKnown && now == original && !retainOriginal && !CoupledHeld(cell))
+            {
+                journal.Release(cell.Kind, cell.Key);
+                hold = Hold.Released;
+                ownership = $"released: back at its original value ({original} {cell.Unit})";
+            }
+            else if (stateKnown && now != null)
+            {
+                hold = Hold.Held;
+                ownership = $"held: original {original} {cell.Unit}, now {now} {cell.Unit}";
+            }
+            else
+            {
+                hold = Hold.HeldUnknown;
+                ownership = stateKnown
+                    ? $"held: original {original} {cell.Unit}; current value not read"
+                    : $"held: original {original} {cell.Unit}; hardware state unknown";
+            }
+            return new OwnedWriteResult(tx, before, now, original, hold, ownership, stateKnown, SentinelCleared: false);
         }
-        else if (stateKnown && now == original && !retainOriginal && !CoupledHeld(cell))
-        {
-            journal.Release(cell.Kind, cell.Key);
-            hold = Hold.Released;
-            ownership = $"released: back at its original value ({original} {cell.Unit})";
-        }
-        else if (stateKnown && now != null)
-        {
-            hold = Hold.Held;
-            ownership = $"held: original {original} {cell.Unit}, now {now} {cell.Unit}";
-        }
-        else
-        {
-            hold = Hold.HeldUnknown;
-            ownership = stateKnown
-                ? $"held: original {original} {cell.Unit}; current value not read"
-                : $"held: original {original} {cell.Unit}; hardware state unknown";
-        }
-        return new OwnedWriteResult(tx, before, now, original, hold, ownership, stateKnown, SentinelCleared: false);
     }
 }

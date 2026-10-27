@@ -107,19 +107,76 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
         }
     }
 
-    public ClockApplyResult Apply(GpuSession gpu, ClockDomain domain, int deltaKhz, bool takeOver = false)
+    // The direct setter and default registry route share failure settlement. A readable control original is
+    // enough to restore native side effects; no effective-frequency Status read is required for this path.
+    internal OwnedWriteResult ApplyOwned(GpuSession gpu, ClockDomain domain, int deltaKhz, bool takeOver = false)
     {
         var writer = new OwnedWriter(hw, journal, sentinel, host);
         var (budget, controls) = CurveForWrite(hw, gpu);
         var coupled = controls == null ? null : VfWrites.ControlCell(controls);
         var r = writer.Apply(gpu, Cell(domain), Plan(domain, deltaKhz, budget, canRecordCurveOriginal: controls != null), takeOver, deltaKhz.ToString(CultureInfo.InvariantCulture),
-            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(coupled, controls!.Control));
+            beforeWrite: coupled == null ? null : () => writer.ClaimOriginal(coupled, controls!.Control),
+            settle: controls == null ? null : tx => SettleFailedControls(gpu, tx, controls));
         if (coupled != null && r.StateKnown) writer.ReleaseIfRestored(gpu, coupled);
+        return r;
+    }
+
+    public ClockApplyResult Apply(GpuSession gpu, ClockDomain domain, int deltaKhz, bool takeOver = false)
+    {
+        var r = ApplyOwned(gpu, domain, deltaKhz, takeOver);
         var before = Entry(r.Tx.Before, domain);
         // The readback describes the hardware unless the write failed and was verifiably restored (then: before).
         var after = r.Tx.Outcome == TxOutcome.Aborted || r.Tx.Restore == RestoreState.Restored ? before
             : r.Tx.After != null ? Entry(r.Tx.After, domain) : null;
         return new ClockApplyResult(domain, deltaKhz, before?.DeltaKhz, after?.DeltaKhz, before?.FreqKhz, after?.FreqKhz, r.Tx, r.Ownership, r.SentinelCleared);
+    }
+
+    private TxResult SettleFailedControls(GpuSession gpu, TxResult tx, VfControlSnapshot original)
+    {
+        // An abort / NoChange did not reach a setter. Successful ordinary writes may legitimately generate
+        // new controls; only a failed native write must return both controls to their pre-operation values.
+        if (tx.Outcome != TxOutcome.Failed) return tx;
+        var log = tx.Log.ToList();
+        try
+        {
+            if (tx.Restore is not (RestoreState.NotNeeded or RestoreState.Restored))
+                throw new InvalidOperationException("the P0 rollback is not known, so the coupled controls cannot be settled");
+
+            void VerifyP0()
+            {
+                if (Transaction.FirstDifference(tx.Before, Pstates20Reader.Read(hw, gpu).Raw, Pstates20Layout.StatusRanges) != null)
+                    throw new InvalidOperationException("the pre-operation P0 controls did not return");
+            }
+            void VerifyTopology()
+            {
+                var (_, current) = VfReader.ReadControls(hw, gpu);
+                if (current == null || current.Layout != original.Layout || !current.Mask.AsSpan().SequenceEqual(original.Mask)
+                    || !current.Points.Select(p => p.Index).SequenceEqual(original.Points.Select(p => p.Index)))
+                    throw new InvalidDataException("the V/F control topology changed during the P0 write");
+            }
+
+            VerifyP0();
+            VerifyTopology();
+            // This is rollback to the captured pre-write state, not a new curve request. Restore only changed
+            // Core offsets, selecting those points in the request mask; normal transaction readback proves it.
+            var restore = new Transaction(hw).Run(gpu,
+                VfWrites.Spec(original.Mask, (_, _) => { VerifyTopology(); return null; }),
+                raw => VfWrites.RestoreControls(original, raw));
+            log.AddRange(restore.Log.Select(line => "coupled V/F rollback: " + line));
+            if (!restore.Succeeded) throw new InvalidOperationException(restore.Detail);
+            VerifyP0();
+            return tx with
+            {
+                Restore = restore.Outcome == TxOutcome.Applied ? RestoreState.Restored : tx.Restore,
+                Detail = tx.Detail + "; pre-operation P0 and V/F controls verified restored", Log = log,
+            };
+        }
+        catch (Exception e) when (e is InvalidDataException or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException)
+        {
+            log.Add("coupled V/F rollback could not be verified: " + e.Message);
+            return tx with { Restore = RestoreState.RestoreFailed,
+                Detail = tx.Detail + "; coupled V/F rollback could not be verified: " + e.Message, Log = log };
+        }
     }
 
     private static ClockOffset? Entry(byte[]? raw, ClockDomain domain)

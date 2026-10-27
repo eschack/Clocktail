@@ -205,6 +205,49 @@ passed. The new case is fake-driver evidence, not an observed native driver
 transition. No hardware operations, commits or pushes were performed for
 this second-review follow-up.
 
+## Upstream-based review fixes on 2026-10-27
+
+The independent review of `3f8d920` found two missing combinations. Of the
+first 22 new regression cases, 14 failed before these corrections. Three
+additional cases then extended failure settlement coverage to memory.
+
+Ordinary `ClockOffsets.Apply`, broker `OpClock`, and default P0 `OpWrite`
+now share a failure-settlement path. Before releasing ownership or clearing
+the sentinel, it verifies the P0 rollback and the captured Info/Control
+layout, restores any changed Core point controls to their pre-operation
+values, and verifies P0 again. The same GPU lock remains held through the
+transaction, coupled rollback and ownership decision. This path uses no
+V/F effective Status reads, preserving the existing return-to-zero behavior
+when Status is invalid. Restoring a captured snapshot selects only changed
+Core offsets in the native request; full curve tuning retains its normal
+Status and firmware prerequisites.
+
+An unreadable or refused coupled rollback is reported as `RestoreFailed`,
+with `state_known=false` where exposed and an unknown write outcome. Both
+originals and the blocked sentinel remain available for recovery. A failed
+write whose P0 and curve controls returned verifiably reports nothing left
+written. Existing journal originals always take precedence over a later
+pre-operation snapshot.
+
+An implicit daily core target restores a uniform absolute displacement.
+Its preflight no longer adds that target to the old point controls that
+restoration will discard. The raw P0 target still passes the driver's rules;
+the actual replacement controls still pass individual and global-plus-point
+firmware checks. Relative shape-preserving requests retain the old-curve
+preflight. A valid +90 MHz daily therefore replaces an existing +240 MHz
+point curve under a +300 MHz limit, while an actually excessive replacement
+or relative request continues to fail.
+
+`P0FailureSettlementTests` adds 18 cases covering both control models,
+all three ordinary entry points, core and memory side effects, refused and
+unreadable control rollback, lock/sentinel/original retention, recovery,
+and preservation of existing nonstock originals. `P0DailyBudgetTests` adds
+seven cases for replacement budgets, repeated restoration, both models,
+negative targets and continued actual/relative budget refusal.
+
+The full .NET software suite passes 980 cases, with zero failures or skips.
+No hardware operations or GPU tests were performed for these review fixes.
+
 ## Coordinated native validation of the original branch
 
 With explicit user authorization, the original combined build at `078c8ab`

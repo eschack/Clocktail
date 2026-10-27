@@ -34,7 +34,9 @@ public sealed partial class BrokerDispatcher
             if (effectiveTarget != null && before.Mode != VfMode.Regional)
                 return Fail("this daily profile has a P0 core target without an explicit V/F curve; a legacy derived baseline cannot verify its uniform effective target: save an explicit verified curve", BrokerCode.CannotWrite);
             long delta = domain == ClockDomain.Core ? (long)khz - entry.DeltaKhz : 0;
-            if (domain == ClockDomain.Core && VfBudget.Of(before)
+            // An implicit daily target replaces the old shape. Its actual replacement is bounded below,
+            // after native P0 readback; only relative preservation spends the old point offsets here.
+            if (effectiveTarget == null && domain == ClockDomain.Core && VfBudget.Of(before)
                 .Check(VfLimits.From(p0), khz) is { } over)
                 return Fail(over, BrokerCode.CannotWrite);
 
