@@ -90,7 +90,8 @@ public class SoloTests
     public void The_share_is_fitted_under_the_wall()
     {
         Assert.Equal(1.0, SoloRules.Next(1.0, 500, 600));            // off the wall: as it is
-        Assert.Equal(0.65, SoloRules.Next(1.0, 700, 600));           // 1.0 x (510-150)/(700-150) = 0.654, on the 0.05 grid
+        Assert.Equal(0.8, SoloRules.Next(1.0, 580, 600));            // 1.0 x (510-150)/(580-150) = 0.837, on the 0.05 grid
+        Assert.Equal(0.7, SoloRules.Next(1.0, 600, 600));            // pinned: 1.0 x 360/450 = 0.8, one step more for the wall's censored reading
         Assert.Equal(0.65, SoloRules.Next(0.8, 580, 600));           // 0.8 x 360/430 = 0.67, on the grid
         Assert.Equal(0.3, SoloRules.Next(0.4, 571, 600));            // 0.4 x 360/421 = 0.34: at least one step lighter
         Assert.Equal(0.2, SoloRules.Next(0.3, 900, 600));            // never under the lightest share
@@ -171,6 +172,16 @@ public class SoloTests
         Assert.Equal(2750, p.EffMhz);
         Assert.Equal(600, p.LimitW);
         Assert.Equal(16000u, p.SoloUnits);                            // 120 ms of 7.5 us units
+    }
+
+    [Fact]
+    public void A_card_that_warms_onto_the_wall_is_cut_there_and_the_hold_starts_over()
+    {
+        var e = new FakeSolo();
+        var (verdict, _, p) = Run(e, b => 150 + (e.Launches < 150 ? 300 : 550) * b);   // off the wall at first, on it once warm
+        Assert.Equal(LabResult.Pass, verdict);
+        Assert.True(p.Held);
+        Assert.Equal(0.55, p.SoloBreadth);                            // 700 W: 360/550 = 0.65, pinned, one step more
     }
 
     [Fact]

@@ -327,15 +327,14 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
 
     /// <summary>The busy time a soloist chunk aims at: well under the WDDM watchdog, long enough that launches cost little.</summary>
     public const double SoloChunkMs = 120;
-    /// <summary>How long each window of the fit runs before its power is read, and how many windows it gets.</summary>
+    /// <summary>How long each window runs before its board power is read for the fit.</summary>
     public const double SoloFitSeconds = 3;
-    public const int SoloFitWindows = 6;
 
     /// <summary>
     /// The soloist: units calibrated to ~<see cref="SoloChunkMs"/> of busy time, then windows of <see cref="SoloFitSeconds"/> from
-    /// the whole chip down, each read for its board power and fitted (<see cref="SoloRules.Next"/>) until off the wall, then the
-    /// rest of the phase held at that share. Every chunk is judged, the fit's too: a wrong lane anywhere fails the phase. The
-    /// hold decides <see cref="PhaseResult.Held"/>.
+    /// the whole chip down, each read for its board power and fitted (<see cref="SoloRules.Next"/>): the share is cut while on
+    /// the wall and held once off it. Every chunk is judged, the fit's too: a wrong lane anywhere fails the phase. The stretch
+    /// since the last cut, the hold, decides <see cref="PhaseResult.Held"/>.
     /// </summary>
     private PhaseResult RunSolo(int index, double seconds, CancellationToken ct, PhaseResult pr, double t0)
     {
@@ -372,33 +371,45 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         }
         pr.SoloUnits = units;
 
-        // the fit: from the whole chip, a share lighter each window that sat on the wall
+        // Windows of SoloFitSeconds from the whole chip: one that sat on the wall cuts the share and starts the hold over, so
+        // the hold is the stretch since the last cut, at one share, off the wall; it alone says whether the point held. A card
+        // that warms onto the wall later in the phase is cut there too.
         double breadth = SoloRules.MaxBreadth;
-        for (int w = 0; w < SoloFitWindows && alive && !ct.IsCancellationRequested && _now() - t0 < seconds * 0.5; w++)
+        int holdFrom = SampleCount(), chunks = 0, fullChunks = 0;
+        var effs = new List<double>();
+        bool fitting = true;
+        while (alive && !ct.IsCancellationRequested && _now() - t0 < seconds)
         {
             int from = SampleCount();
             double ws = _now();
-            while (alive && !ct.IsCancellationRequested && _now() - ws < SoloFitSeconds) Play(breadth);
+            while (alive && !ct.IsCancellationRequested && _now() - ws < SoloFitSeconds && _now() - t0 < seconds)
+            {
+                var o = Play(breadth);
+                if (!alive) break;
+                chunks++;
+                if (o.Judgement!.Fill >= 1 - 1e-9) fullChunks++;
+                if (o.Judgement.EffMhz is { } e) effs.Add(e);
+            }
+            if (!alive || _now() - ws < SoloFitSeconds * 0.5) break;   // the phase's last scrap is too short to read
             var (watts, limit) = WindowPower(index, from);
-            log?.Invoke(Inv($"solo fit: {breadth:P0} of the SMs drew {watts:0} W of {limit:0}"));
-            if (watts == null || limit == null) break;
+            if (watts == null || limit == null) continue;
             var next = SoloRules.Next(breadth, watts.Value, limit.Value);
-            if (next == null) { log?.Invoke("solo fit: on the wall at the lightest share; held there"); break; }
-            if (Math.Abs(next.Value - breadth) < 1e-9) break;
+            if (next == null)
+            {
+                if (fitting) log?.Invoke("solo fit: on the wall at the lightest share; held there");
+                fitting = false;
+                continue;
+            }
+            if (Math.Abs(next.Value - breadth) < 1e-9)
+            {
+                if (fitting) log?.Invoke(Inv($"solo fit: {breadth:P0} of the SMs drew {watts:0} W of {limit:0}: held there"));
+                fitting = false;
+                continue;
+            }
+            log?.Invoke(Inv($"solo fit: {breadth:P0} of the SMs drew {watts:0} W of {limit:0}: {next:P0} next"));
             breadth = next.Value;
-        }
-
-        // the hold: the rest of the phase at that share; it alone says whether the point held
-        int holdFrom = SampleCount();
-        var effs = new List<double>();
-        int chunks = 0, fullChunks = 0;
-        while (alive && !ct.IsCancellationRequested && _now() - t0 < seconds)
-        {
-            var o = Play(breadth);
-            if (!alive) break;
-            chunks++;
-            if (o.Judgement!.Fill >= 1 - 1e-9) fullChunks++;
-            if (o.Judgement.EffMhz is { } e) effs.Add(e);
+            fitting = true;
+            holdFrom = SampleCount(); chunks = 0; fullChunks = 0; effs.Clear();
         }
         pr.SoloBreadth = breadth;
         pr.SoloSms = SoloRules.Players(sms, breadth);

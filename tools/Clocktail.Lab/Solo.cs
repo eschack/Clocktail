@@ -51,6 +51,8 @@ public static class SoloRules
     public const double WallFraction = 0.95;
     /// <summary>The part of the board power that does not scale with the SMs that play (memory, uncore, fans): a quarter of the limit.</summary>
     public const double BaseFraction = 0.25;
+    /// <summary>At or over this share of the limit the board is pinned to it, and its reading says nothing of what the load wants.</summary>
+    public const double PinnedFraction = 0.98;
     public const double MinBreadth = 0.2, MaxBreadth = 1.0, BreadthStep = 0.1, Grid = 0.05;
     /// <summary>The blocks' own clock against NVML's: under this the SMs worked under the clock NVML reports (Etude's EffClampRatio).</summary>
     public const double EffHeldRatio = 0.93;
@@ -121,7 +123,9 @@ public static class SoloRules
     /// The next share after a window at <paramref name="breadth"/> drew <paramref name="watts"/> against <paramref name="limitW"/>:
     /// unchanged off the wall; on it, the share that would draw <see cref="TargetFraction"/> of the limit if the power above the
     /// base scales with the SMs that play, at least one <see cref="BreadthStep"/> lighter, on the <see cref="Grid"/>, never under
-    /// <see cref="MinBreadth"/>. Null: on the wall at the lightest share already.
+    /// <see cref="MinBreadth"/>. Pinned to the limit (<see cref="PinnedFraction"/>), the reading is the wall's, not the load's
+    /// (the whole reference card would draw ~680 W and read 600): one step more.
+    /// Null: on the wall at the lightest share already.
     /// </summary>
     public static double? Next(double breadth, double watts, double limitW)
     {
@@ -129,6 +133,7 @@ public static class SoloRules
         if (breadth <= MinBreadth + 1e-9) return null;
         double baseW = limitW * BaseFraction, target = limitW * TargetFraction;
         double scaled = watts > baseW ? breadth * (target - baseW) / (watts - baseW) : breadth - BreadthStep;
+        if (watts >= limitW * PinnedFraction) scaled -= BreadthStep;
         double next = Math.Floor(Math.Min(scaled, breadth - BreadthStep) / Grid + 1e-9) * Grid;
         return Math.Round(Math.Max(MinBreadth, next), 2);
     }
