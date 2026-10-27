@@ -156,3 +156,44 @@ public static class SoloRules
 
     private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
+
+/// <summary>
+/// The leap (2026-10-27): the soloist on the whole chip, then on a quarter of it, over and over. The whole chip holds the board
+/// on its wall, the clock in the middle of the curve; the quarter lets go of it, and the driver lifts the clock to the curve's
+/// top within a quarter of a second, the voltage following. That jump is what hung the reference card in two games six times
+/// that evening (The Last of Us Part II, Gears of War) on a curve every steady test had passed: each time a heavy scene turned
+/// light, the clock went from ~2850 MHz at ~925 mV to the top in one 250 ms sample and the GPU froze within a second, whether
+/// the top was 3127, 3082, 3022 or 2947 MHz, and with XBAR at +560, +500 or +400. A steady soloist parks the clock on its point
+/// and never makes the move; the leap does nothing else. Judged per pipe like the soloist, and a hang is the leap's failure.
+/// </summary>
+public static class LeapRules
+{
+    /// <summary>The whole chip, long enough for the board to settle on its wall and the clock to come down the curve.</summary>
+    public const double HeavySeconds = 1.5;
+    /// <summary>The quarter, long enough for the clock to reach the top and stay there: the reference card froze within a second of it.</summary>
+    public const double LightSeconds = 1.5;
+    /// <summary>The share of the SMs that play when the load lets go: ~300 W at the top on the reference card, as the games drew in the jump.</summary>
+    public const double LightBreadth = 0.25;
+    /// <summary>A leap the clock made: the light half's highest reading at least this far over the heavy half's settled clock.</summary>
+    public const double MinJumpMhz = 90;
+    /// <summary>The share of the cycles whose clock must have leapt, and the fewest cycles, for a pass to be evidence.</summary>
+    public const double MinJumpedShare = 0.5;
+    public const int MinCycles = 3;
+
+    /// <summary>Whether the light half's peak leapt over the heavy half's settled clock.</summary>
+    public static bool Leapt(double? heavyMhz, double? peakMhz) => heavyMhz > 0 && peakMhz - heavyMhz >= MinJumpMhz;
+
+    /// <summary>
+    /// Whether the leap made its move often enough to count (null: it cannot be told). It does not when the heavy half did not
+    /// hold the clock under the top (the board under its wall at a low curve, a flat curve) or the light half never reached it.
+    /// </summary>
+    public static (bool? Held, string? Why) Held(int cycles, int leapt, double? heavyMhz, double? peakMhz)
+    {
+        if (cycles < MinCycles) return (null, Inv($"{cycles} cycle{(cycles == 1 ? "" : "s")}, fewer than {MinCycles}: give it 30 s or more"));
+        if (leapt < cycles * MinJumpedShare)
+            return (false, Inv($"the clock leapt in {leapt} of {cycles} cycles (the heavy half held {heavyMhz:0} MHz, the light half reached {peakMhz:0}): the load never made the move games make"));
+        return (true, null);
+    }
+
+    private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
+}

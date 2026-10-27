@@ -21,7 +21,7 @@ namespace Clocktail.Mcp;
 public sealed partial class TuningTools
 {
     public const int MaxLabSeconds = 600;
-    private static readonly string[] LabPhases = ["burn", "light", "pulse", "solo", "memory", "latency", "l2"];
+    private static readonly string[] LabPhases = ["burn", "light", "pulse", "solo", "leap", "memory", "latency", "l2"];
     private static readonly JsonSerializerOptions SnakeJson = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     /// <summary>The lab: CLOCKTAIL_LAB_EXE, or clocktail-lab.exe beside this server (setup installs them together).</summary>
@@ -97,14 +97,19 @@ public sealed partial class TuningTools
         "the share fitted to ~85 % of the power limit so the clock stays on the curve's point instead of the limiter's; its " +
         "blocks time their own clock, and unless it held the point (held: the SMs' clock within 7 % of NVML's, off the wall, " +
         "every SM meant to play running) the run is inconclusive, not a pass: the judge for the top of the curve; to test one " +
-        "point, pin it first with set_clock_lock). Any wrong bit, wrong lane, wrong chain end or dead " +
+        "point, pin it first with set_clock_lock), leap (the soloist on the whole chip for 1.5 s, then on a quarter of it for " +
+        "1.5 s, over and over: the whole chip holds the board on its wall and the clock in the middle of the curve, the quarter " +
+        "lets go and the driver lifts the clock to the curve's top within a quarter of a second, as when a game's heavy scene " +
+        "turns light; that jump hung the reference card six times in two games on a curve every steady test had passed; judged " +
+        "per pipe, a hang is its failure, and unless the clock leapt in half the cycles (held: the light half 90 MHz or more " +
+        "over the heavy half) it is inconclusive: the judge of the top for games, after solo). Any wrong bit, wrong lane, wrong chain end or dead " +
         "context fails it; while a trial is in force the failure is recorded as its crash and the daily profile goes back on. " +
         "Memory runs are kept per memory offset and compared with the last at the same offset and buffer: a drop is the " +
         "memory retrying (ST02). It says when other work shared the GPU (over 4 GiB of others' video memory, over half busy " +
         "before the load or over 10 % just after it, with the clocks still up: a local AI model, a game, a screen saver " +
         "drawing): then its speeds are not the card's alone. Blocks for the run's length.")]
     public string LabTest(
-        [Description("Phases, comma-separated: burn, light, pulse, solo (the top of the curve, judged per pipe; give it 60 s or more of its own), memory, latency, l2 (the crossbar: a 32 MiB region walked over and over). Default burn,pulse,light,memory,latency.")] string phases = "burn,pulse,light,memory,latency",
+        [Description("Phases, comma-separated: burn, light, pulse, solo (the top of the curve, judged per pipe; give it 60 s or more of its own), leap (the jump from the middle of the curve to its top that games make; 60 s or more of its own), memory, latency, l2 (the crossbar: a 32 MiB region walked over and over). Default burn,pulse,light,memory,latency.")] string phases = "burn,pulse,light,memory,latency",
         [Description("Run length in seconds, 10..600 (default 60), split evenly between the phases.")] int seconds = 60,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
@@ -247,6 +252,8 @@ public sealed partial class TuningTools
                 : runner ? "the run itself failed, not the card: nothing was recorded against the setting; run it again"
                 : lab is { } l9 && Phase(l9, "solo") is { } so && so.TryGetProperty("held", out var hd) && hd.ValueKind == JsonValueKind.False
                     ? "the soloist did not hold the point, so its pass is no evidence: close other GPU work, or lower the power the share draws (a lower point, or set_clock_lock lockMv on the point to test), and run it again"
+                : lab is { } l10 && Phase(l10, "leap") is { } lp && lp.TryGetProperty("held", out var lh) && lh.ValueKind == JsonValueKind.False
+                    ? "the clock did not leap, so the leap's pass is no evidence: the whole chip did not hold the clock under the curve's top (a flat curve from the wall's voltage, or a high wall); run it at the daily wall with nothing else on the GPU"
                 : null,
         });
     });
