@@ -473,7 +473,7 @@ public sealed partial class TuningTools
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), start,
             xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
             cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
-            ratio_max = 0.95, ratio_step = 0.025, boost_max_pct = (int)VoltBoost.MaxPercent, boost_step_pct = BoostStepPct,
+            ratio_max = 0.95, ratio_step = 0.025, boost_max_pct = (int)VoltBoost.MaxPercent, boost_step_pct = 25,
             seconds, warmup_seconds = 60, grace_seconds = 45, boost_key = path == BoostPath.Independent ? "independent" : "legacy", candidates = list,
         });
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,

@@ -20,16 +20,12 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed partial class TuningTools
 {
-    /// <summary>set_memory_offset: the largest change per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ).</summary>
-    public static readonly int MemoryStepMhz = Env("CLOCKTAIL_MCP_MEMORY_STEP_MHZ", 250);
-    /// <summary>adjust_xbar / adjust_clock_domain: the largest offset change per call (CLOCKTAIL_MCP_XBAR_STEP_MHZ). The
-    /// offset's range is the driver's (±1000 MHz on a 5090), unless CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured
-    /// 0..+400 on the 5090; an overclocker's +450 without more voltage gave a grey screen.</summary>
-    public static readonly int XbarStepMhz = Env("CLOCKTAIL_MCP_XBAR_STEP_MHZ", 50);
+    /// <summary>adjust_xbar / adjust_clock_domain: the offset's range is the driver's (±1000 MHz on a 5090), unless
+    /// CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured 0..+400 on the 5090; an overclocker's +450 without more voltage
+    /// gave a grey screen. No step per call (the user, 2026-10-27: the driver's limits, no others).</summary>
     public static readonly int MaxXbarMhz = Env("CLOCKTAIL_MCP_MAX_XBAR_MHZ", int.MaxValue);
-    /// <summary>adjust_xbar: the largest voltage demand change per call; the demand's own range is -25..+50 mV.</summary>
-    public static readonly int VdemandStepMv = Env("CLOCKTAIL_MCP_VDEMAND_STEP_MV", 10);
-    public const int MinVdemandMv = -25, MaxVdemandMv = 50;
+    /// <summary>The voltage demand's range: the driver's standard one (<see cref="ClockVdemand"/>).</summary>
+    public const int MinVdemandMv = ClockVdemand.MinUv / 1000, MaxVdemandMv = ClockVdemand.MaxUv / 1000;
     /// <summary>The MSVDD-floor cliff (2026-10-20): above +250 MHz with no demand, memory-bound work drops MSVDD to its
     /// 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand kept MSVDD off it.
     /// Above this offset the demand must be at least that.</summary>
@@ -124,8 +120,8 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "set_memory_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the memory (GDDR7) offset as a new trial: the P0 offset in MHz, which NVML shows doubled. A memory write zeroes " +
-        "the V/F curve's offsets, so the curve on the card is written again right after it, in the same trial. At most 250 MHz " +
-        "from where it is per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ), within the driver's range (-1000..+3000 on a 5090). On " +
+        "the V/F curve's offsets, so the curve on the card is written again right after it, in the same trial. Anywhere in " +
+        "the driver's range (-1000..+3000 on a 5090). On " +
         "the reference card +358 lowered latency 2.4 % and left bandwidth flat; nothing higher was measured. Memory past its " +
         "edge shows as artefacts, a data error in stress_test (exit code 6), a crash, or performance that stops rising and falls " +
         "(the memory retries errors instead of failing): judge each step by a repeatable benchmark as well as stress_test. " +
@@ -137,8 +133,6 @@ public sealed partial class TuningTools
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
         int khz = (int)Math.Round(mhz * 1000), now = p0.DeltaKhz;
         if (khz == now) throw new ArgumentException($"the memory offset is {now / 1000.0} MHz already: nothing to try");
-        if (Math.Abs(khz - now) > MemoryStepMhz * 1000)
-            throw new ArgumentException($"a step is at most {MemoryStepMhz} MHz (CLOCKTAIL_MCP_MEMORY_STEP_MHZ); it is {now / 1000.0} MHz now");
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"memory offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
@@ -148,9 +142,8 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "set_core_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the core's P0 clock offset as a new trial: MHz added to every point of the V/F curve at once (stock curve + N), " +
         "beside the point offsets adjust_curve moves. The two spend one firmware offset budget, and a P0 write zeroes the " +
-        "curve's point offsets, so the curve on the card is written again right after it in the same trial. At most 15 MHz " +
-        "from where it is per call (CLOCKTAIL_MCP_STEP_MHZ), at most 200 MHz above the daily profile's " +
-        "(CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ), within the driver's range. On the reference card +15 gave +15/+22/+15 MHz at " +
+        "curve's point offsets, so the curve on the card is written again right after it in the same trial. Anywhere in the " +
+        "driver's range. On the reference card +15 gave +15/+22/+15 MHz at " +
         "the same voltage. The edge differs by voltage, so a band is adjust_curve's; this shifts the whole curve. " +
         "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string SetCoreOffset(
@@ -160,13 +153,8 @@ public sealed partial class TuningTools
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Core) ?? throw new InvalidOperationException("the core offset is unreadable");
         int khz = (int)Math.Round(mhz * 1000), now = p0.DeltaKhz;
         if (khz == now) throw new ArgumentException($"the core offset is {now / 1000.0} MHz already: nothing to try");
-        if (Math.Abs(khz - now) > StepMhz * 1000)
-            throw new ArgumentException($"a step is at most {StepMhz} MHz (CLOCKTAIL_MCP_STEP_MHZ); it is {now / 1000.0} MHz now");
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
-        int daily = int.TryParse(DailyWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core)), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var d) ? d : 0;
-        if (khz > daily + MaxAboveDailyMhz * 1000)
-            throw new ArgumentException($"at most {MaxAboveDailyMhz} MHz above the daily profile's {daily / 1000.0:+0.#;-0.#;0} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"core offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
             reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } });
     });
@@ -186,8 +174,8 @@ public sealed partial class TuningTools
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
         "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
-        "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). At most 50 MHz and 10 mV per call; " +
-        "offset within the driver's range (±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
+        "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). Offset anywhere in the driver's range " +
+        "(±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
         "saw grey-screen artefacts at +450 with no voltage added. If anything is unstable with XBAR raised, step it down 50 " +
         "MHz before touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(
@@ -196,8 +184,6 @@ public sealed partial class TuningTools
         [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
     {
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
-        if (Math.Abs(offsetDeltaMhz) > XbarStepMhz) throw new ArgumentException($"an offset step is at most {XbarStepMhz} MHz (CLOCKTAIL_MCP_XBAR_STEP_MHZ)");
-        if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
         var (offNow, demandNow) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
         var (min, max) = OffsetRange(ClockDomainId.Xbar);
@@ -225,7 +211,7 @@ public sealed partial class TuningTools
         "phase, and SYS +150 back at XBAR +300 changed nothing in a Blender render); Video is the video engine (NVENC/NVDEC), " +
         "which games do not use. Neither was written on the reference card before: judge a step by its own clock in " +
         "gpu_status and by a benchmark that uses it. The demand goes to the rail the domain's topology names (MSVDD on a 5090). " +
-        "At most 50 MHz and 10 mV per call; offset within the driver's range, demand -25..+50 mV. keep_as_daily keeps it; " +
+        "Offset anywhere in the driver's range, demand -25..+50 mV. keep_as_daily keeps it; " +
         "back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustClockDomain(
         [Description("'sys', 'video', or 'core' (voltage demand only).")] string domain,
@@ -243,8 +229,6 @@ public sealed partial class TuningTools
         };
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
         if (d == ClockDomainId.Graphics && offsetDeltaMhz != 0) throw new ArgumentException("the core's clock offset is set_core_offset's (P0); here only its voltage demand moves");
-        if (Math.Abs(offsetDeltaMhz) > XbarStepMhz) throw new ArgumentException($"an offset step is at most {XbarStepMhz} MHz (CLOCKTAIL_MCP_XBAR_STEP_MHZ)");
-        if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
         var (offNow, demandNow) = SettingsTools.Domain(card, d);
         int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
         var (min, max) = OffsetRange(d);
@@ -275,9 +259,6 @@ public sealed partial class TuningTools
         return (t.MinOffsetMhz, t.MaxOffsetMhz);
     }
 
-    /// <summary>set_voltage_boost: the largest change per call, %.</summary>
-    public const int BoostStepPct = 25;
-
     [McpServerTool(Name = "set_voltage_boost", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the voltage boost percentage (0..100) as a new trial, on the path the card takes (legacy on a 5090, whose NVVDD " +
         "is kind 3). The legacy byte and the independent interface are one driver variable. It raises every rail's REL limit " +
@@ -285,9 +266,8 @@ public sealed partial class TuningTools
         "MSVDD 1045 → 1065 mV; 1 % and 10 % are under the first step and moved nothing). It still writes on 621.01, which drops " +
         "the rails' own offsets, so it is the one way to raise MSVDD's ceiling, XBAR's: at XBAR +400 / +50 mV, 100 % made the " +
         "lab's L2 test 1.0-1.3 % faster with the core unchanged. A curve cut flat under NVVDD's limit never reaches the higher " +
-        "one. Every rail's MAX must stay within the 1.15 V standard ceiling after the write, or it is put back. At most " +
-        "25 % from where it is per call. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily " +
-        "profile's back.")]
+        "one. Every rail's MAX must stay within the 1.15 V standard ceiling after the write, or it is put back. " +
+        "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string SetVoltageBoost(
         [Description("The boost to try, percent 0..100 (absolute, not a delta).")] int percent,
         [Description("Why this step.")] string? reason = null) => Guard(() =>
@@ -297,7 +277,6 @@ public sealed partial class TuningTools
         var path = o.DefaultRule(railsWritable: true) ?? throw new InvalidOperationException("this card has no boost path");
         uint now = path == BoostPath.Independent ? o.IndependentPercent ?? 0 : o.LegacyPercent;
         if (percent == now) throw new ArgumentException($"the boost is {now} % already: nothing to try");
-        if (Math.Abs(percent - (int)now) > BoostStepPct) throw new ArgumentException($"a step is at most {BoostStepPct} %; it is {now} % now");
         string key = path == BoostPath.Independent ? "independent" : "legacy";
         return Trial($"voltage boost ({key}) {now} → {percent} %", reason, new() { ["writes"] = new[] { TrialWrite(VoltBoost.Kind, key, percent) } });
     });
@@ -355,9 +334,6 @@ public sealed partial class TuningTools
             new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() });
     });
 
-    /// <summary>set_clock_ratio: the largest change per call, enough to go from the stock 0.8999 to 0.92 in one.</summary>
-    public const double RatioStep = 0.025;
-
     [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
         "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
@@ -368,7 +344,7 @@ public sealed partial class TuningTools
         "the core -3.5 %; on 621.01 with MSVDD at stock, 0.925 and 0.95 cost it 2.0 and 2.4 %); with MSVDD REL +50 and XBAR " +
         "+400 / +50 mV (617.42), 0.95 made the lab's crossbar test 5-6 % faster and the memory's bandwidth 7.8 % higher " +
         "(tune_uncore finds the mix). Its gain in frames is unmeasured: judge by a benchmark that uses " +
-        "memory. 0.5..1.0, at most 0.025 per call. keep_as_daily keeps it; back_to_daily, " +
+        "memory. 0.5..1.0. keep_as_daily keeps it; back_to_daily, " +
         "end_session and a crash put the daily profile's back.")]
     public string SetClockRatio(
         [Description("The ratio to try, 0.5..1.0 (absolute).")] double ratio,
@@ -378,7 +354,6 @@ public sealed partial class TuningTools
         var now = card.WithDriver(ClockRatio.Read);
         uint raw = (uint)Math.Round(ratio * 65536);
         if (raw == now.Raw) throw new ArgumentException($"the ratio is {ClockRatio.Words(now.Raw)} already: nothing to try");
-        if (Math.Abs(ratio - now.Ratio) > RatioStep + 1e-9) throw new ArgumentException($"a step is at most {RatioStep}; it is {ClockRatio.Words(now.Raw)} now");
         return Trial($"XBAR/core clock ratio {ClockRatio.Words(now.Raw)} → {ClockRatio.Words(raw)}", reason,
             new() { ["writes"] = new[] { TrialWrite(ClockRatio.Kind, ClockRatio.Key, raw) } });
     });
@@ -389,17 +364,19 @@ public sealed partial class TuningTools
         "no way to delete one: from then on it can only go back to the board's maximum (600 W), which is where back_to_daily, " +
         "end_session, a crash and the agent disconnecting put it, until the next boot. The lower of FE and F8 holds (on the " +
         "reference card F8 500 W under FE 600 W held the board at 500 W), so at the board's maximum it limits nothing; " +
-        "gpu_status's power limit shows a change a few seconds late. The board's range (400-600 W on a 5090). Never kept. " + AsksItself)]
+        "gpu_status's power limit shows a change a few seconds late. The board's range as the driver reports it (400-600 W on a " +
+        "5090). Never kept. " + AsksItself)]
     public async Task<string> SetPowerCap(
         McpServer server,
         [Description("The F8 request, W.")] double watts,
         [Description("Why (what it is meant to show).")] string? reason = null,
+        [Description(ConfirmCode)] string? confirm = null,
         CancellationToken cancellationToken = default)
     {
-        if (watts > MaxPowerW || watts < MinPowerW) return Out(new { success = false, error = $"the request is {MinPowerW}..{MaxPowerW} W" });
+        if (OutsideBoard(watts) is { } outside) return Out(new { success = false, error = $"the request is {outside}" });
         return await Asked(server, string.Create(CultureInfo.InvariantCulture,
             $"Set the second board power request (F8) to {watts:0.#} W for a test: ending the test puts it back to the board's maximum, but once made the request itself cannot be deleted until the next restart."),
-            cancellationToken, () =>
+            confirm, cancellationToken, () =>
         {
             uint mw = (uint)Math.Round(watts * 1000);
             var f8 = card.WithDriver(PowerRequestsReader.Read).Additional;
@@ -411,15 +388,17 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +
-        "(set_power_limit) is never kept, so this is how the daily one changes. 400-600 W on an RTX 5090 (575 W stock). Set it " +
+        "(set_power_limit) is never kept, so this is how the daily one changes. The board's range as the driver reports it " +
+        "(400-600 W on an RTX 5090, 575 W stock). Set it " +
         "before tuning the curve: the wall decides where on the curve heavy load runs. On the reference card the last 100 W " +
         "bought about 10 % frames (GTA V 78 → 86 fps from 500 to 600 W); 475-500 W is the efficient zone. While a trial runs " +
         "under its own wall, the daily one goes on when the trial ends. " + AsksItself)]
-    public async Task<string> SetDailyPowerLimit(McpServer server, [Description("The daily power limit, W.")] double watts, CancellationToken cancellationToken = default)
+    public async Task<string> SetDailyPowerLimit(McpServer server, [Description("The daily power limit, W.")] double watts,
+        [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
-        if (watts > MaxPowerW || watts < MinPowerW) return Out(new { success = false, error = $"the daily power limit is {MinPowerW}..{MaxPowerW} W" });
+        if (OutsideBoard(watts) is { } outside) return Out(new { success = false, error = $"the daily power limit is {outside}" });
         return await Asked(server, string.Create(CultureInfo.InvariantCulture, $"Set your graphics card's daily power limit to {watts:0.#} W, now and after every start."),
-            cancellationToken, () =>
+            confirm, cancellationToken, () =>
         {
             uint mw = (uint)Math.Round(watts * 1000);
             var r = card.Broker(BrokerRequest.OpProfile, "wall", mw.ToString(CultureInfo.InvariantCulture));

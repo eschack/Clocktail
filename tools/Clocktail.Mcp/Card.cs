@@ -99,11 +99,11 @@ public sealed class Card : IDisposable
     /// <summary>NVAPI's driver branch ("r617_00").</summary>
     public string DriverBranch => _mgr.Driver.Branch;
 
-    /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and the Core curve, and
-    /// from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
+    /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and VMIN and the Core curve,
+    /// and from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
     public sealed record Look(TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, uint? NvvddMaxUv, VfCurveSnapshot Curve,
         CurrentLimits? Limits = null, MonitorReading? NvvddOut = null, MonitorReading? MsvddOut = null, RailRecord? Msvdd = null,
-        BoardInput? Input = null);
+        BoardInput? Input = null, uint? NvvddVminUv = null);
 
     public Look Read()
     {
@@ -113,7 +113,7 @@ public sealed class Card : IDisposable
             if (_mgr.Nvml != null && _gpu.HasNvml)
                 try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
             _railMask ??= RailsReader.Mask(_hw, _session);
-            uint? nvvdd = null, msvdd = null, max = null;
+            uint? nvvdd = null, msvdd = null, max = null, vmin = null;
             if (_railMask is { } mask)
             {
                 nvvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd);
@@ -124,6 +124,7 @@ public sealed class Card : IDisposable
             {
                 var rails = RailsReader.Read(_hw, _session);
                 max = rails.Get(Rail.Nvvdd)?.Limits.MaxUv;
+                vmin = rails.Get(Rail.Nvvdd)?.Limits.VminUv is > 0 and var v ? v : null;
                 msvddRail = rails.Get(Rail.Msvdd);
             }
             catch (InvalidOperationException) { }
@@ -139,7 +140,7 @@ public sealed class Card : IDisposable
                 input = BoardInput.From(limits, readings);
             }
             catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
-            return new Look(t, nvvdd, msvdd, max, VfReader.Read(_hw, _session), limits, nvvddOut, msvddOut, msvddRail, input);
+            return new Look(t, nvvdd, msvdd, max, VfReader.Read(_hw, _session), limits, nvvddOut, msvddOut, msvddRail, input, vmin);
         }
     }
 

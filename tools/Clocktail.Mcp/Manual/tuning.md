@@ -4,7 +4,7 @@ How a session runs, how big a step is, how to test a part of the curve the game 
 ## The loop
 1. `begin_session` with the game, and `live_start` with it: the card is watched for the whole session, a line every 10 s under load. In Claude Code, follow its log with the Monitor tool and say what you see as lines arrive; otherwise `live_read` when the person talks.
 2. Where the card runs: the live lines (clock, voltage and the curve point, what held it), or `gpu_status` for one look (NVVDD and the curve point at that instant; `adjust_curve` centres its window on the median under load over the last 3 s, or over the last 2 minutes once the load has stopped).
-3. One change: usually `adjust_curve` (default window: 20 mV under the operating point to 10 mV above; at most 15 MHz per call; never more than 200 MHz above the daily profile; points under 850 mV are never touched).
+3. One change: usually `adjust_curve` (default window: 20 mV under the operating point to 10 mV above; 15 MHz is the method's step, though any step within the driver's range is taken; points under NVVDD's VMIN are never touched).
 4. Judge it: 5-10 minutes of play in a demanding scene (the live lines show the clock and voltage it held, and flag a suspected hang as it happens), or `stress_test`. Avoid writing under full load mid-fight: 2 of 3 hangs on the reference card began right after a write under load.
 5. Record it: `mark_stable` with what was played, or `mark_crash` with what was seen. A driver reset is recorded by the service by itself.
 6. Repeat from 3, or `back_to_daily` on any doubt (artefacts, stutter).
@@ -27,7 +27,7 @@ Under the wall, a game runs a narrow band of the curve. To test lower points:
 Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 850-885 mV (the knee is where an RTX 5090 gains most); then a straight line of about +2 MHz per mV from 2775 MHz at 885 mV to 3071 MHz at 1035 mV, flat above. Under the 600 W wall that is roughly +200 MHz over stock at the same power (+195 to +221 measured).
 
 ## Goals other than maximum clock
-- **Undervolt / same clock for less power**: lower the curve's top half (`adjust_curve` down, `flatten_curve`) or shift it left (`shift_curve`, 25 mV per call); at the same wall the saved power turns into clock. Shifting the curve left 25/50/75 mV from the knee gave +30/+60/+97 MHz under a 575 W wall. Do not shift the whole curve left by 250 mV: that once crashed the whole system (bug check 0x133).
+- **Undervolt / same clock for less power**: lower the curve's top half (`adjust_curve` down, `flatten_curve`) or shift it left (`shift_curve`, 25 mV at a time); at the same wall the saved power turns into clock. Shifting the curve left 25/50/75 mV from the knee gave +30/+60/+97 MHz under a 575 W wall. Do not shift the whole curve left by 250 mV: that once crashed the whole system (bug check 0x133).
 - **Efficiency**: board MHz/W peaks at 250-300 W (6.05 MHz/W) and is 4.74 at 600 W. Cutting the wall 600 -> 500 W cost GTA V only 9 % frames (86 -> 78 fps) for 17 % less power. Offer this when they care about heat or noise.
 - **MSVDD undervolt**: not offered since 0.3.5 (driver 621.01 drops the rails' offsets); on 617.42 it saved a few watts the wall gave back to the core, but slowed XBAR; see `manual xbar-msvdd`.
 
