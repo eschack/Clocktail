@@ -5,6 +5,7 @@
     <Project Path="src/Clocktail.Core/Clocktail.Core.csproj" />
     <Project Path="src/Clocktail.Domain/Clocktail.Domain.csproj" />
     <Project Path="src/Clocktail.Hw/Clocktail.Hw.csproj" />
+    <Project Path="src/Clocktail.Tray/Clocktail.Tray.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Clocktail.Tests/Clocktail.Tests.csproj" />

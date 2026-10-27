@@ -51,6 +51,8 @@ public sealed record BrokerRequest(
     DateTimeOffset? AnsweredAt = null)
 {
     public const string OpPing = "ping";
+    /// <summary>Versioned read-only tray status. Kind: "cached" (no driver calls) or "verify" (explicit readback).</summary>
+    public const string OpStatus = "status";
     public const string OpOwnership = "ownership";
     public const string OpRecover = "recover";
     /// <summary>

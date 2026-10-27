@@ -56,7 +56,7 @@ public interface IGpuTargets
 /// The operation set is the whitelist, and the write verb reaches only the <see cref="WriteRegistry"/>: there is
 /// no raw-slot or register verb to call.
 /// </summary>
-public sealed class BrokerDispatcher
+public sealed partial class BrokerDispatcher
 {
     private readonly NvClient _hw;
     private readonly IGpuTargets _gpus;
@@ -180,7 +180,11 @@ public sealed class BrokerDispatcher
                 if (!Monitor.TryEnter(_operation, WindowWait))
                     return Fail($"another operation has held the card for over {WindowWait.TotalSeconds:0} s; nothing was done, try again", BrokerCode.WindowBusy);
                 entered = true;
-                if (top) Judged.Value = Verdict.Open;
+                if (top)
+                {
+                    Judged.Value = Verdict.Open;
+                    Interlocked.Increment(ref _statusEpoch); // old readback is no longer evidence after any mutation attempt
+                }
             }
             return DispatchOne(req, top);
         }
@@ -220,6 +224,8 @@ public sealed class BrokerDispatcher
                     pong = true, pid = _host.Pid, can_write = _canWrite, gpus = _gpus.Ids,
                     paths = WriteRegistry.All.Select(p => new { kind = p.Kind, keys = p.Keys, values = p.Values, checks_after_write = p.AfterWrite, equal_value_proof = p.ProveEqual != null }),
                 });
+
+            if (req.Op == BrokerRequest.OpStatus) return Status(req);
 
             var target = _gpus.Resolve(req.GpuId);
             if (target == null)

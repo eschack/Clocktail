@@ -9,6 +9,33 @@ namespace Clocktail.Domain.Broker;
 /// </summary>
 public static class BrokerClient
 {
+    /// <summary>A cancellable, bounded exchange for interactive read-only clients. Cancellation closes the pipe.</summary>
+    public static async Task<BrokerResponse?> TryCallAsync(BrokerRequest request, CancellationToken cancellationToken,
+        string pipeName = BrokerTransport.PipeName, TimeSpan? timeout = null)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(8));
+        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        try
+        {
+            await pipe.ConnectAsync(1500, deadline.Token).ConfigureAwait(false);
+            using var cancel = deadline.Token.Register(() => pipe.Dispose());
+            return await Task.Run(() =>
+            {
+                deadline.Token.ThrowIfCancellationRequested();
+                BrokerTransport.WriteRequest(pipe, request);
+                return BrokerTransport.ReadResponse(pipe);
+            }, deadline.Token).ConfigureAwait(false);
+        }
+        catch (TimeoutException) { return null; }
+        catch (Exception e) when (deadline.IsCancellationRequested && e is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new TimeoutException("The broker status request timed out.", e);
+        }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
     /// <summary>
     /// How long an answer may take once the request is sent: a write waits up to the window's 30 s for another one, and a
     /// call stuck in a hung driver waits out its TDR delay (30 s on the reference machine) before it fails. Past this the
