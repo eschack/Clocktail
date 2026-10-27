@@ -164,6 +164,7 @@ static int Run()
     Once("the daily profile at start", () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
+    dispatcher.CachedTelemetry = id => sampler.Recorders.TryGetValue(id, out var recorder) ? recorder.Freeze().LastOrDefault() : null;
     KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
     dispatcher.HungReason = id => sampler.Recorders.TryGetValue(id, out var r) ? FlightRecorder.HungNow(r.Freeze(), DateTimeOffset.Now) : null;
     // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.

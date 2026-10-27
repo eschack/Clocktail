@@ -29,3 +29,6 @@ jobs:
         # Quoted: node expands the pattern itself (Node 21 on), the same under PowerShell and bash; a directory
         # argument is not searched for tests on every Node version.
         run: node --test "npm/test/*.test.js"
+      - name: Build optional tray
+        if: runner.os == 'Windows'
+        run: dotnet build src/Clocktail.Tray -c Release -nologo

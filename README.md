@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+An [optional Windows tray companion](docs/TRAY.md) is available as an initial read-only implementation with synthetic previews. It is built and distributed separately; normal setup stays headless.
+
 **Overclock your RTX 50 card by talking to an AI agent, over MCP.** You play. The agent tunes. NVIDIA's own stress tester settles the arguments.
 
 ![3DMark Speed Way result page: score 16 182, valid result, RTX 5090 with an Intel Core i9-14900K, and the similar systems chart with this score's bar to the right of the tallest one](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/speed-way-result.jpg)
