@@ -152,6 +152,7 @@ public sealed unsafe class CudaApi : IDisposable
     public (ulong Free, ulong Total) MemInfo() { nuint f, t; Check("cuMemGetInfo", _memGetInfo(&f, &t)); return (f, t); }
     public int MemcpyDtoHRaw(void* dst, ulong src, ulong bytes) => _memcpyDtoH(dst, src, (nuint)bytes);
     public void MemcpyHtoD(ulong dst, void* src, ulong bytes) => Check("cuMemcpyHtoD", _memcpyHtoD(dst, src, (nuint)bytes));
+    public int MemcpyHtoDRaw(ulong dst, void* src, ulong bytes) => _memcpyHtoD(dst, src, (nuint)bytes);
 
     public int LaunchRaw(nint fn, uint grid, uint block, void** args) => _launchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, args, null);
 

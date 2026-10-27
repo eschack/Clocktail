@@ -7,9 +7,11 @@ namespace Clocktail.Lab;
 /// one thread in LightDiv, so few SMs draw current and the card climbs to the top of its curve (64 SMs: 2887 MHz at 360 W
 /// on the reference card at stock). Pulse: one short full-grid launch per game-like frame at 30-120 fps (the load step at
 /// the top of the curve). Memory: fill and verify the buffer in the five access orders. Latency: the pointer chase. L2: fill
-/// and verify a 32 MiB region over and over, which stays in L2: the crossbar's bandwidth, the path XBAR clocks.
+/// and verify a 32 MiB region over and over, which stays in L2: the crossbar's bandwidth, the path XBAR clocks. Solo: the
+/// integer soloist judged per pipe, played divisi under the power wall so the clock stays on the curve's point
+/// (<see cref="SoloKernel"/>; 2026-10-27, from Etude): the core's most sensitive load, and the one that reaches the top.
 /// </summary>
-public enum LabPhase { Burn, Light, Pulse, Memory, Latency, L2 }
+public enum LabPhase { Burn, Light, Pulse, Memory, Latency, L2, Solo }
 
 /// <summary>What a run does. MaxTempC: the run stops when the GPU reaches it (two readings in a row), as stress_test does;
 /// TelemetryLostSeconds: it stops when NVML gives no temperature for that long, since a card nobody can watch is not
@@ -21,7 +23,7 @@ public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Ph
     public static IReadOnlyList<(LabPhase, double)> Parse(string list, double seconds)
     {
         var kinds = list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(s => Enum.TryParse<LabPhase>(s, true, out var k) ? k : throw new ArgumentException($"'{s}' is not a phase (burn, light, pulse, memory, latency, l2)"))
+            .Select(s => Enum.TryParse<LabPhase>(s, true, out var k) ? k : throw new ArgumentException($"'{s}' is not a phase (burn, light, pulse, solo, memory, latency, l2)"))
             .ToList();
         if (kinds.Count == 0) throw new ArgumentException("no phase given");
         return kinds.Select(k => (k, seconds / kinds.Count)).ToList();
@@ -58,7 +60,25 @@ public sealed class PhaseResult
     public string? PState { get; set; }
     public string? Error { get; set; }
     public bool Completed { get; set; }
+
+    // The soloist (Solo only): the share of SMs that played in the hold and how many, units per chunk, the SMs' own clock
+    // while they worked (median over SMs and chunks), the share of chunks in which every SM meant to play ran its full
+    // occupancy, the board's enforced limit, whether the point held (null: it could not be told) and why not; the wrong
+    // lanes by SM and pipe, and whether a lane lost its majority.
+    public double? SoloBreadth { get; set; }
+    public int? SoloSms { get; set; }
+    public uint? SoloUnits { get; set; }
+    public double? EffMhz { get; set; }
+    public double? Fill { get; set; }
+    public double? LimitW { get; set; }
+    public bool? Held { get; set; }
+    public string? HeldWhy { get; set; }
+    public List<LaneMismatch>? LaneMismatches { get; set; }
+    public bool? MajorityLost { get; set; }
 }
+
+/// <summary>Blocks of one SM that computed one pipe's lane wrong, over the phase.</summary>
+public sealed record LaneMismatch(int Sm, string Lane, int Blocks);
 
 public sealed record LabResult(string Device, string Pci, ulong BufferMib, int SmCount, DateTime StartedUtc, DateTime FinishedUtc,
     IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null, ulong? OthersVramMib = null,
@@ -188,6 +208,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         double t0 = _now();
         _phase = index;
         log?.Invoke($"phase {index + 1}/{cfg.Phases.Count} {kind} for {seconds:F0} s");
+        if (kind == LabPhase.Solo) return RunSolo(index, seconds, ct, pr, t0);
 
         bool Compute(int threads)
         {
@@ -304,6 +325,124 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         return pr;
     }
 
+    /// <summary>The busy time a soloist chunk aims at: well under the WDDM watchdog, long enough that launches cost little.</summary>
+    public const double SoloChunkMs = 120;
+    /// <summary>How long each window of the fit runs before its power is read, and how many windows it gets.</summary>
+    public const double SoloFitSeconds = 3;
+    public const int SoloFitWindows = 6;
+
+    /// <summary>
+    /// The soloist: units calibrated to ~<see cref="SoloChunkMs"/> of busy time, then windows of <see cref="SoloFitSeconds"/> from
+    /// the whole chip down, each read for its board power and fitted (<see cref="SoloRules.Next"/>) until off the wall, then the
+    /// rest of the phase held at that share. Every chunk is judged, the fit's too: a wrong lane anywhere fails the phase. The
+    /// hold decides <see cref="PhaseResult.Held"/>.
+    /// </summary>
+    private PhaseResult RunSolo(int index, double seconds, CancellationToken ct, PhaseResult pr, double t0)
+    {
+        bool alive = true;
+        // a card whose driver cannot compile the soloist: nothing ran, nothing failed (inconclusive, with the reason)
+        if (engine.SoloUnavailable is { } why) { pr.HeldWhy = why; return Finish(); }
+        int sms = engine.SmCount;
+        uint seed = cfg.Seed ^ ((uint)index * 0x9E3779B9u), units = 64;
+        long chunk = 0;
+        var wrong = new Dictionary<(int Sm, int Lane), int>();
+        bool lost = false;
+
+        SoloOutcome Play(double breadth)
+        {
+            int players = SoloRules.Players(sms, breadth);
+            var playing = SoloRules.Window(sms, players, chunk++);
+            var o = engine.RunSolo(units, seed++, SoloRules.Mask(playing), playing);
+            pr.Launches++;
+            if (o.Error != null) { pr.Error = o.Error; alive = false; return o; }
+            var j = o.Judgement!;
+            foreach (var (_, sm, lane) in j.Mismatches) wrong[(sm, lane)] = wrong.GetValueOrDefault((sm, lane)) + 1;
+            pr.ComputeMismatches += j.Mismatches.Count;
+            lost |= j.MajorityLost;
+            return o;
+        }
+
+        // calibration on the blocks' own busy time (the silent SMs' hold is not work): two refinements toward the target
+        for (int k = 0; k < 3 && alive && !ct.IsCancellationRequested; k++)
+        {
+            var o = Play(1.0);
+            if (!alive) break;
+            double perUnit = Math.Max(o.Judgement!.BusyMsMax, 0.001) / units;
+            units = (uint)Math.Clamp(SoloChunkMs / perUnit, 8, 1u << 22);
+        }
+        pr.SoloUnits = units;
+
+        // the fit: from the whole chip, a share lighter each window that sat on the wall
+        double breadth = SoloRules.MaxBreadth;
+        for (int w = 0; w < SoloFitWindows && alive && !ct.IsCancellationRequested && _now() - t0 < seconds * 0.5; w++)
+        {
+            int from = SampleCount();
+            double ws = _now();
+            while (alive && !ct.IsCancellationRequested && _now() - ws < SoloFitSeconds) Play(breadth);
+            var (watts, limit) = WindowPower(index, from);
+            log?.Invoke(Inv($"solo fit: {breadth:P0} of the SMs drew {watts:0} W of {limit:0}"));
+            if (watts == null || limit == null) break;
+            var next = SoloRules.Next(breadth, watts.Value, limit.Value);
+            if (next == null) { log?.Invoke("solo fit: on the wall at the lightest share; held there"); break; }
+            if (Math.Abs(next.Value - breadth) < 1e-9) break;
+            breadth = next.Value;
+        }
+
+        // the hold: the rest of the phase at that share; it alone says whether the point held
+        int holdFrom = SampleCount();
+        var effs = new List<double>();
+        int chunks = 0, fullChunks = 0;
+        while (alive && !ct.IsCancellationRequested && _now() - t0 < seconds)
+        {
+            var o = Play(breadth);
+            if (!alive) break;
+            chunks++;
+            if (o.Judgement!.Fill >= 1 - 1e-9) fullChunks++;
+            if (o.Judgement.EffMhz is { } e) effs.Add(e);
+        }
+        pr.SoloBreadth = breadth;
+        pr.SoloSms = SoloRules.Players(sms, breadth);
+        effs.Sort();
+        pr.EffMhz = effs.Count == 0 ? null : Math.Round(effs[effs.Count / 2], 1);
+        pr.Fill = chunks == 0 ? null : Math.Round((double)fullChunks / chunks, 3);
+        List<LabSample> hold;
+        lock (_lock) hold = _samples.Skip(holdFrom).Where(x => x.Phase == index).ToList();
+        double? smP50 = P50(hold.Select(x => (double?)x.SmMhz)), wattsP50 = P50(hold.Select(x => x.BoardW));
+        pr.LimitW = P50(hold.Select(x => x.LimitW));
+        if (chunks > 0) (pr.Held, pr.HeldWhy) = SoloRules.Held(pr.EffMhz, smP50, pr.Fill ?? 0, wattsP50, pr.LimitW);
+        pr.LaneMismatches = wrong.OrderBy(kv => kv.Key.Sm).ThenBy(kv => kv.Key.Lane)
+            .Select(kv => new LaneMismatch(kv.Key.Sm, SoloKernel.LaneNames[kv.Key.Lane], kv.Value)).ToList();
+        pr.MajorityLost = lost;
+        return Finish();
+
+        PhaseResult Finish()
+        {
+            pr.Seconds = Math.Round(_now() - t0, 1);
+            pr.Completed = alive && pr.Error == null && !ct.IsCancellationRequested;
+            _phase = -1;
+            List<LabSample> mine;
+            lock (_lock) mine = _samples.Where(x => x.Phase == index).ToList();
+            pr.SmMhzP50 = P50(mine.Select(x => (double?)x.SmMhz));
+            pr.MemMhzP50 = P50(mine.Select(x => (double?)x.MemMhz));
+            pr.WattsP50 = P50(mine.Select(x => x.BoardW));
+            pr.WattsMax = mine.Select(x => x.BoardW).Max();
+            pr.TempP50 = P50(mine.Select(x => (double?)x.TempC));
+            pr.TempMax = mine.Select(x => (double?)x.TempC).Max();
+            pr.PState = mine.Where(x => x.PState != null).GroupBy(x => x.PState).OrderByDescending(g => g.Count()).Select(g => $"P{g.Key}").FirstOrDefault();
+            return pr;
+        }
+    }
+
+    private int SampleCount() { lock (_lock) return _samples.Count; }
+
+    /// <summary>The board power and enforced limit over this phase's samples since <paramref name="from"/> (P50 each).</summary>
+    private (double? Watts, double? Limit) WindowPower(int index, int from)
+    {
+        List<LabSample> w;
+        lock (_lock) w = _samples.Skip(from).Where(x => x.Phase == index).ToList();
+        return (P50(w.Select(x => x.BoardW)), P50(w.Select(x => x.LimitW)));
+    }
+
     private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     public static double? P50(IEnumerable<double?> xs)
@@ -328,7 +467,11 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         var reasons = new List<string>();
         foreach (var p in phases)
         {
-            if (p.ComputeMismatches > 0) reasons.Add($"{p.Kind}: {p.ComputeMismatches} wrong floats (compute error)");
+            if (p.Kind == LabPhase.Solo && p.ComputeMismatches > 0)
+                reasons.Add($"{p.Kind}: {p.ComputeMismatches} wrong lane{(p.ComputeMismatches == 1 ? "" : "s")} (compute error): " +
+                    string.Join(", ", (p.LaneMismatches ?? []).Select(m => $"SM {m.Sm} {m.Lane} x{m.Blocks}")) +
+                    (p.MajorityLost == true ? "; a lane lost its majority" : ""));
+            else if (p.ComputeMismatches > 0) reasons.Add($"{p.Kind}: {p.ComputeMismatches} wrong floats (compute error)");
             if (p.MemoryErrors > 0) reasons.Add($"{p.Kind}: {p.MemoryErrors} bad words, first at word {p.FirstBadWord} (memory error)");
             if (p.ChainErrors > 0) reasons.Add($"{p.Kind}: {p.ChainErrors} chains ended on the wrong slot (memory error)");
             if (p.Error != null) reasons.Add($"{p.Kind}: {p.Error} (GPU fault)");
@@ -336,6 +479,12 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         if (reasons.Count > 0) return (LabResult.Fail, reasons);
         if (interrupted != null) return (LabResult.Inconclusive, [interrupted]);
         if (phases.Count < planned || phases.Any(p => !p.Completed)) return (LabResult.Inconclusive, ["the run stopped before every phase finished"]);
+        // a soloist whose clock never held its point passed nothing: the point did not run
+        var unheld = phases.Where(p => p.Kind == LabPhase.Solo && p.Held != true).ToList();
+        if (unheld.Count > 0)
+            return (LabResult.Inconclusive, unheld.Select(p => p.Held == false
+                ? $"{p.Kind}: the point did not hold ({p.HeldWhy}): no evidence"
+                : $"{p.Kind}: could not be judged ({p.HeldWhy ?? "no hold measured"})").ToList());
         if (phases.Sum(p => p.Seconds) < 10) return (LabResult.Inconclusive, ["under 10 s of load"]);
         return (LabResult.Pass, []);
     }

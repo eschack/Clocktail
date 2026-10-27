@@ -42,7 +42,7 @@ Three loads reach three regions of the curve:
 |---|---|---|
 | Knee, 850-900 mV | `set_power_limit` 450-550 W + `stress_test load=100` (or `set_current_limit` nvvdd 300-350 A for lower) | 2415 MHz at 855 mV, 2745 at 870-875 (stock ~2230 at 870) |
 | Middle, 900-950 mV | the daily wall + `stress_test load=100` | 2850 MHz at 900 mV, 2880 at 910 |
-| Top, 950-1035 mV | `stress_test load=30-50` (light load climbs to the top of the curve); `set_clock_lock` minMhz = maxMhz holds one clock there | 3015 at 955 mV, 3105 at 975-985 |
+| Top, 950-1035 mV | `lab_test phases=solo seconds=60` (the soloist runs the point the curve gives under the wall, and says whether it held); `set_clock_lock` minMhz = maxMhz holds one clock there; `stress_test load=30-50` for a light load's spikes | 3015 at 955 mV, 3105 at 975-985 |
 Per region:
 1. `begin_session` ("stress").
 2. Bring the card to temperature.
@@ -63,6 +63,7 @@ Note: nothing but the driver's range caps how far above the daily profile a tria
 - Smooth and rising. On the reference: stock to 800 mV; +30 MHz per point to the knee; +405..+510 at 850-885 mV; then a straight line of ~+2 MHz per mV (2775 MHz at 885 mV to 3071 at 1035 mV); flat above.
 - A flat top where the chip stops scaling: voltage there buys no clock, only power and heat. Under the wall it even costs clock, because the watts spent on voltage are taken from frequency. `flatten_curve fromMv` does it in one trial at idle (it only lowers): every point from that voltage up runs at most what the point there runs now, less `marginMhz`.
 - Leave points under ~800 mV stock: the card only runs there idle.
+- Before `keep_as_daily`: `lab_test phases=solo seconds=120` on the finished curve, its top judged per pipe at the point it really runs (`held`); a wrong lane names the SM and the pipe. On the reference card the daily's flat 3127 MHz top held at 3096 MHz (111 SMs, 491 W).
 - Write it in one trial at idle with `set_curve` (every point's offset, as `card_settings` shows them), or reach it with `adjust_curve` down in bands; then `flatten_curve` for the top. `shift_curve` moves the curve on the card left (the same clocks at less voltage): a raise everywhere, tested like one.
 Why the margin: games are stricter than the stressor. On the reference, "boundary -15" crashed a game and "boundary -30" held. Kingdom Come: Deliverance II crashed at least 37 MHz under an nvgwls pass at the same voltage, temperature and power.
 The margin depends on where the game runs: 15-30 MHz under the wall, 37 MHz or more at 970 mV in the middle band on the reference card. To measure this card's own: hold the game in one voltage band (the wall, or `set_power_limit` / `set_current_limit` for the middle), play it with `live_start`, and on each crash lower that band 15 MHz (`adjust_curve -15` with fromMv/toMv around the crash voltage); the total lowered until it holds is the margin there. Do it once at the wall and once in the middle band; the daily curve is then the boundary minus the larger margin, minus another 15.

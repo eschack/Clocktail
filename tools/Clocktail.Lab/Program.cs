@@ -8,7 +8,7 @@ using Clocktail.Lab;
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
     Console.WriteLine("""
-        clocktail-lab run --phases burn,light,pulse,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
+        clocktail-lab run --phases burn,light,pulse,solo,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
                           [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N] [--max-temp-c C]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
         clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
