@@ -165,6 +165,9 @@ public static class SoloRules
 /// light, the clock went from ~2850 MHz at ~925 mV to the top in one 250 ms sample and the GPU froze within a second, whether
 /// the top was 3127, 3082, 3022 or 2947 MHz, and with XBAR at +560, +500 or +400. A steady soloist parks the clock on its point
 /// and never makes the move; the leap does nothing else. Judged per pipe like the soloist, and a hang is the leap's failure.
+/// What it does not do: on that same curve it made the games' move 80 times (2835 MHz at 910 mV to 3120 at 1005, the clock ahead
+/// of the voltage, MSVDD and XBAR at the games' values) and neither hung nor computed a lane wrong. The games failed in work the
+/// soloist does not play (graphics, most likely), so a pass here is the soloist's pipes through the jump, not a game's.
 /// </summary>
 public static class LeapRules
 {

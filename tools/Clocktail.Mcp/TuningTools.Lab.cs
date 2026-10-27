@@ -100,9 +100,10 @@ public sealed partial class TuningTools
         "point, pin it first with set_clock_lock), leap (the soloist on the whole chip for 1.5 s, then on a quarter of it for " +
         "1.5 s, over and over: the whole chip holds the board on its wall and the clock in the middle of the curve, the quarter " +
         "lets go and the driver lifts the clock to the curve's top within a quarter of a second, as when a game's heavy scene " +
-        "turns light; that jump hung the reference card six times in two games on a curve every steady test had passed; judged " +
-        "per pipe, a hang is its failure, and unless the clock leapt in half the cycles (held: the light half 90 MHz or more " +
-        "over the heavy half) it is inconclusive: the judge of the top for games, after solo). Any wrong bit, wrong lane, wrong chain end or dead " +
+        "turns light; judged per pipe, a hang is its failure, and unless the clock leapt in half the cycles (held: the light half " +
+        "90 MHz or more over the heavy half) it is inconclusive. It judges the soloist's pipes through the jump, not a game: " +
+        "on the reference card a curve that hung two games six times in that jump passed it 80 jumps in a row, so the games " +
+        "failed in work the soloist does not play; games stay the top's last judge). Any wrong bit, wrong lane, wrong chain end or dead " +
         "context fails it; while a trial is in force the failure is recorded as its crash and the daily profile goes back on. " +
         "Memory runs are kept per memory offset and compared with the last at the same offset and buffer: a drop is the " +
         "memory retrying (ST02). It says when other work shared the GPU (over 4 GiB of others' video memory, over half busy " +

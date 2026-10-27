@@ -13,7 +13,7 @@ Tuning follows the method (manual 'method'), in this order, because each step ch
 0. Baseline at stock, at running temperature.
 1. Power limit (set_daily_power_limit): the wall decides where heavy load sits on the curve.
 2. Fans and temperature (set_fan_curve): the V/F curve shifts with temperature (steps near 57/62/72/82 C, ~2 MHz/C at 600 W), so test at the temperature the card will run at.
-3. Map the V/F boundary with stress_test: full load for the middle, a lower wall for the knee; the top with lab_test solo (its points) and leap (the jump onto them that games make, which steady tests never make). Above the wall's voltage, keep the curve near 2 MHz per mV unless leap and the games prove more.
+3. Map the V/F boundary with stress_test: full load for the middle, a lower wall for the knee; the top with lab_test solo (its points) and leap (the soloist through the jump onto them that games make, which steady tests never make; on the reference card it did not reproduce the games' hangs there, so it is necessary, not sufficient). Above the wall's voltage, keep the curve near 2 MHz per mV unless the games prove more.
 4. Daily curve = the boundary minus 30-60 MHz, flat where the chip stops scaling.
 5. Games, watched live: live_start when they start playing (in Claude Code, follow its log with the Monitor tool and comment as lines arrive; otherwise live_read when they talk), live_stop at the end. Each line carries the game's fps and lows: judge changes on frames, and ask the person only when it says there are none.
 6. The voltage boost, XBAR and the XBAR/core ratio (tune_uncore): before the memory, because the crossbar can hold the memory's bandwidth.
