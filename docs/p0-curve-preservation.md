@@ -1,9 +1,15 @@
 # P0 offsets and effective V/F preservation
 
-This fix starts at `38ef607f5d8e163fec42ae29d8f596e3243b4224` on
-`fix/p0-curve-preservation`. It is separate from device-limit consent. The
-consent checks, policy scopes, device ranges and global-plus-point firmware
-validator remain in force.
+This fix is based on upstream `0.4.1`, commit
+`e42d0e77f3a37b781bc562bb57163c2a9da71df5`. Upstream's driver-derived limits
+and chat confirmation behavior remain in force, alongside the existing
+global-plus-point firmware validator.
+
+The original implementation and native validation used
+`fix/p0-curve-preservation` at `078c8ab`, based on the now-abandoned
+consent-feature branch at `38ef607`. That branch remains a backup. This
+upstream-based version carries only the preservation changes and their test
+support; it has no dependency on that feature's policy modes or scope protocol.
 
 ## Software evidence
 
@@ -30,7 +36,8 @@ save/recovery/reapply entirely against fakes. MCP tests reject a broker's
 success when effective frequencies did not change, and accept matching
 effective results even when control bytes changed.
 
-Validation after the review fixes on 2026-10-26:
+Historical validation of the combined feature/fix branch after the review
+fixes on 2026-10-26 (not a test count for the upstream-based branch):
 
 ```
 dotnet test tests/Clocktail.Tests -c Release --no-restore --nologo
@@ -90,7 +97,7 @@ produce the nonzero controls that its guard refused. Core's native side
 effects are consistent with that state. It does not retrospectively isolate
 the original explicit-setter sequence or prove every native intermediate.
 The earlier successful save/readback and Speed Way result remain separate
-observations; no additional workload was performed here.
+observations. The later coordinated native validation is recorded below.
 
 The first fix, `9d96bd0`, still missed this path. Of the first ten new
 startup regressions, seven failed on it: the overlapping model could apply
@@ -198,34 +205,61 @@ passed. The new case is fake-driver evidence, not an observed native driver
 transition. No hardware operations, commits or pushes were performed for
 this second-review follow-up.
 
-## Native uncertainty and coordinated validation
+## Coordinated native validation of the original branch
 
-This software investigation performed no hardware writes, native profile
-reloads, installation, service changes, resets, reboots or benchmarks. The reported first full
-readback followed the complete sequence, so it cannot distinguish loss
-during core from loss during memory. Neither fake model is proven native
-behavior. In particular, the historical workaround reporting P0 +240 and
-V/F +240 with effective +240 is evidence against blindly assuming an
-additive model, but does not identify every intermediate native state.
+With explicit user authorization, the original combined build at `078c8ab`
+was validated on an ASUS ROG Astral RTX 5080 OC, driver 621.01 and VBIOS
+98.03.3b.c0.70 on 2026-10-26. The diagnostic derivative captured reads around
+native P0 writes; the normal installed build was `0.4.0-p0.078c8ab`.
 
-With fresh explicit user coordination, validation should:
+Sixteen idle states covered isolated core and memory changes, raising and
+lowering the core target, preservation of a nonuniform curve, restoration
+of the true originals, and the saved +240 core / +3000 memory / +300 XBAR /
+450 W daily. All 127 effective displacements and the ownership journal
+were checked. No manual +240 point-curve workaround was needed.
 
-1. Capture a known starting state and the current journal/profile. Read
-   raw P0, V/F status and controls immediately before core, immediately
-   after the native P0 setter, and after final preservation. Check all
-   effective points, voltages, bases, controls and ownership.
-2. Capture the same observations for an isolated memory write, and then
-   memory following core. Do not infer the core result from the combined
-   sequence. Check that memory preserves the verified effective core curve.
-3. Exercise an agreed existing curve and lower core target, then save and
-   reload an agreed profile. Verify that its explicit V/F dependency and
-   true original survive. A rollback drill needs its own agreed failure
-   method and restoration plan.
-4. Coordinate any deployment, service restart, reset/reboot or benchmark
-   separately. Software results do not establish performance or stability.
-   Include startup restoration of the existing P0-only saved daily, verify
-   memory +3000 and effective core +240 independently, and inspect generated
-   V/F ownership and partial-failure reporting. These checks remain pending.
+On this card, a core P0 write mirrored its target into the point controls.
+With the curve set aside, native core and memory P0 writes produced the
+uniform raw core target; preservation repaired a custom shape afterward.
+Raw core +240 and point controls +240 represented an effective +240,
+not +480. These observations do not establish every card's native semantics.
+
+The normal build then passed active-daily broker startup restoration and a
+user-managed cold boot. Both automatically restored memory +3000 and all
+127 effective core offsets +240 from the original four-entry daily without
+an explicit `vf/core` entry. Generated offsets had the captured stock V/F
+original and Clocktail ownership; no trial or blocked sentinel remained.
+
+One authorized Speed Way run completed at 10,890 points / 108.90 FPS.
+Settings and ownership were unchanged afterward, with no new recorded
+reset or crash. A single run does not establish broad stability or a
+performance gain. Native fault injection and failed-rollback drills were
+not performed; their coverage is software-only.
+
+## Validation after rebasing onto upstream 0.4.1
+
+The upstream assessment reproduced the exact startup memory refusal and
+the MCP effective-readback errors using fake drivers. The rebased branch
+retains the domain regression suites and moves the two MCP readback tests
+into `P0EffectiveReadbackTests`, independent of the abandoned policy tests.
+A small internal `Card` injection constructor keeps those tests entirely
+in memory without opening a GPU manager, native library or broker pipe.
+
+Validation on 2026-10-27 after the upstream rebase:
+
+- .NET regression suite: 955 passed, 0 failed, 0 skipped.
+- Release solution build: 0 warnings, 0 errors.
+- Installer unit tests: 11 passed, 0 failed.
+- `git diff --check`: passed.
+
+The test count excludes the abandoned feature's policy tests. The crash-log
+timestamp assertion now uses the same invariant format as the production
+log, so its seven theory cases also pass under Danish culture.
+
+The rebase itself performs software validation only. The preceding native
+results belong to the original combined build and do not validate a new
+installed upstream-based binary. Deployment and hardware revalidation
+require separate user authorization.
 
 Historical journal entries with a wrongly captured original cannot be
 reconstructed from the current card alone; this fix preserves existing
