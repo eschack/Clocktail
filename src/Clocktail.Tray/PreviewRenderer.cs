@@ -12,8 +12,22 @@ internal static class PreviewRenderer
     {
         Directory.CreateDirectory(directory);
         var cache = new TrayStatusCache();
-        if (new DemoSource(state).Create() is { } snapshot) cache.Accept(snapshot);
-        else cache.Disconnect("Synthetic disconnected preview");
+        var source = new DemoSource(state);
+        if (source.Create() is { } snapshot && !cache.Accept(snapshot)) throw new InvalidOperationException(cache.Error);
+        else if (cache.Snapshot == null) cache.Disconnect("Synthetic disconnected preview");
+        cache.CompatibilityNotice = source.CompatibilityNotice;
+        var expected = state switch
+        {
+            "startup" => TrayState.StartupPending, "recovery" => TrayState.Recovering,
+            "changed" or "different" => TrayState.SettingsDiffer, "trial" => TrayState.TrialActive,
+            "stale" => TrayState.Stale, "unavailable" => TrayState.Unavailable, "suspended" => TrayState.DailySuspended,
+            _ => TrayState.DailyMatched
+        };
+        var device = cache.Snapshot?.Devices.FirstOrDefault();
+        var actual = TrayStatus.State(device, cache.Connected, cache.Snapshot?.CapturedAt ?? DateTimeOffset.MinValue, DateTimeOffset.UtcNow);
+        if (actual != expected) throw new InvalidOperationException($"Synthetic {state}: expected {expected}, got {actual}.");
+        File.WriteAllText(Path.Combine(directory, $"{state}-state.json"), JsonSerializer.Serialize(new
+        { expected = expected.ToString(), actual = actual.ToString(), controls_at = device?.Refresh?.Controls?.At, full_at = device?.Verification?.At }));
         NativeTheme.Preview(dark: true);
         foreach (var view in new[] { "hover", "details", "curve", "diagnostics" })
         {

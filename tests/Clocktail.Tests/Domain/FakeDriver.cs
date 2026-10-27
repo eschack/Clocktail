@@ -32,6 +32,7 @@ internal static unsafe class FakeDriver
     public static int Field;
     public static int Neighbour = 0x54;
     public static int Gets, Sets;
+    public static readonly List<uint> GetWords = [];
     /// <summary>When > 0, that many upcoming Gets fail with -1 (counting down).</summary>
     public static int FailNextGets;
     /// <summary>When set, the first Set after it is armed also applies <see cref="Mode"/>; later Sets accept. Used for "restore works".</summary>
@@ -57,6 +58,7 @@ internal static unsafe class FakeDriver
         Field = 0;
         Neighbour = 0x54;
         Gets = Sets = 0;
+        GetWords.Clear();
         FailNextGets = 0;
         MisbehaveOnce = false;
         _misbehaved = false;
@@ -89,8 +91,9 @@ internal static unsafe class FakeDriver
     private static int Get(nint gpu, byte* p)
     {
         Gets++;
-        if (FailNextGets > 0) { FailNextGets--; return -1; }
         uint word = *(uint*)p;
+        GetWords.Add(word);
+        if (FailNextGets > 0) { FailNextGets--; return -1; }
         if (!State.TryGetValue(word, out var s)) return NvStatus.NotSupported;
         if (QueryResponder != null && QueryResponder(new ReadOnlySpan<byte>(p, s.Length).ToArray()) is { } answer) s = answer;
         s.AsSpan().CopyTo(new Span<byte>(p, s.Length));
