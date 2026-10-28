@@ -51,7 +51,7 @@ public sealed record BrokerRequest(
     DateTimeOffset? AnsweredAt = null)
 {
     public const string OpPing = "ping";
-    /// <summary>Versioned read-only tray status. Value is version 1 or 2. Kind: cached (no driver calls), light (v2 non-V/F getters), verify (full curve readback).</summary>
+    /// <summary>Read-only status versions 1/2/3. Cached is driver-free; light (2/3) excludes V/F; verify reads the full curve. Version 3 adds dynamic settings and driver-free rows pages (Key = opaque cursor).</summary>
     public const string OpStatus = "status";
     public const string OpOwnership = "ownership";
     public const string OpRecover = "recover";

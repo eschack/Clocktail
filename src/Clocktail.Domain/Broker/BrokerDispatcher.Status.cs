@@ -22,7 +22,8 @@ public sealed partial class BrokerDispatcher
 
     private BrokerResponse Status(BrokerRequest req)
     {
-        if (req.Value == "2") return StatusV2(req);
+        if (req.Kind == "rows") return AppliedPage(req);
+        if (req.Value is "2" or "3") return StatusV2(req);
         if (req.Kind is not ("cached" or "verify")) return Fail("status kind must be cached or verify", BrokerCode.BadRequest);
         if (req.Value != null && req.Value != "1") return Fail("unsupported status version", BrokerCode.BadRequest);
         if (req.Kind == "verify" && req.GpuId == null) return Fail("verification needs a stable GPU id", BrokerCode.BadRequest);
@@ -44,7 +45,7 @@ public sealed partial class BrokerDispatcher
                     var prior = _statusDevices.GetValueOrDefault(id);
                     devices.Add(prior is null
                         ? new(id, target.Name, target.Driver, target.Vbios, null, false, false, null, null, true, null, null, [])
-                        : prior with { OperationInProgress = true, Verification = null, Refresh = null });
+                        : prior with { OperationInProgress = true, Verification = null, Refresh = null, Applied = null });
                     continue;
                 }
                 var errors = new List<string>();
@@ -84,6 +85,10 @@ public sealed partial class BrokerDispatcher
             var result = System.Text.Json.JsonSerializer.Deserialize<T>(bytes) ?? throw new InvalidDataException("empty record");
             if (result is DailyProfile p && (p.Writes == null || p.Writes.Count > 64 || p.Writes.Any(w => w == null || string.IsNullOrWhiteSpace(w.Kind) || string.IsNullOrWhiteSpace(w.Key) || w.Value == null)))
                 throw new InvalidDataException("invalid or oversized saved targets");
+            if (result is DailyProfile adopted && adopted.Adopted is { } targets && (targets.Count > 64 || targets.Any(w => w == null || string.IsNullOrWhiteSpace(w.Kind) || string.IsNullOrWhiteSpace(w.Key) || w.Value == null)))
+                throw new InvalidDataException("invalid or oversized adopted targets");
+            if (result is Experiment trial && trial.Trial?.Writes is { } trialWrites && (trialWrites.Count > 128 || trialWrites.Any(w => w == null || string.IsNullOrWhiteSpace(w.Kind) || string.IsNullOrWhiteSpace(w.Key) || w.Value == null)))
+                throw new InvalidDataException("invalid or oversized trial targets");
             if (result is Experiment exp && (string.IsNullOrWhiteSpace(exp.Game) || exp.Trial is { Change: null }))
                 throw new InvalidDataException("invalid experiment record");
             return result;

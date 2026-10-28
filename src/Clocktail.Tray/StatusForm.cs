@@ -11,6 +11,7 @@ internal sealed class StatusForm : Form
     private readonly TableLayoutPanel _content = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Top, ColumnCount = 1 };
     private bool _pinned;
     private bool _building;
+    private bool _resizing;
     private Button? _pinButton;
     private Rectangle? _workArea;
     public event Action? CheckRequested;
@@ -21,6 +22,8 @@ internal sealed class StatusForm : Form
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public bool DiagnosticsExpanded { get; set; }
     private readonly Dictionary<float, Font> _fonts = new();
+    private AppliedSettingsGrid? _settingsGrid;
+    private Label? _controlsAge, _fullAge, _telemetryAge, _coverageAge;
 
     public StatusForm(bool hover, Palette? palette = null, bool offscreen = false)
     {
@@ -96,6 +99,9 @@ internal sealed class StatusForm : Form
 
     public void Present(TrayStatusCache cache, string? gpuId, bool quiet, bool demo, bool busy)
     {
+        var priorScroll = _scroll.AutoScrollPosition;
+        bool gridFocused = _settingsGrid?.ContainsFocus == true;
+        if (_settingsGrid?.Parent is { } parent) parent.Controls.Remove(_settingsGrid);
         using var redraw = new ScrollLayoutUpdate(_scroll);
         _building = true;
         SuspendLayout();
@@ -201,25 +207,56 @@ internal sealed class StatusForm : Form
                 var col = Stack(); col.Controls.Add(Label(names[i], 11, true)); col.Controls.Add(Label(values[i], 25, false, 5)); live.Controls.Add(col);
             }
             Add(live);
-            Add(Label(Presentation.Age(d?.Telemetry?.At, "Telemetry sampled"), 11, true, 3));
+            _telemetryAge = Label(Presentation.Age(d?.Telemetry?.At, "Telemetry sampled"), 11, true, 3); Add(_telemetryAge);
             var tabs = new QuietTabControl(_palette) { Dock = DockStyle.Top, Height = 264, AccessibleName = "Settings view", Margin = new Padding(0, 16, 0, 8) };
             var settings = new TabPage("Applied settings") { BackColor = _palette.Surface, ForeColor = _palette.Ink, Padding = new Padding(8), AutoScroll = false };
-            var table = Grid(3); table.Dock = DockStyle.Top;
-            foreach (var heading in new[] { "Control", "Applied (readback)", "Saved daily" }) table.Controls.Add(Label(heading, 11, true));
-            foreach (var control in Presentation.Rows)
+            if (d?.Applied is { } applied && snapshot?.Version == 3)
             {
-                table.Controls.Add(Label(control.Label, 11, true, 13));
-                table.Controls.Add(Label(Presentation.Applied(d, control.Kind, control.Key), 12, false, 13));
-                table.Controls.Add(Label(Presentation.Saved(d, control.Kind, control.Key), 11, true, 13));
+                _settingsGrid ??= new(_palette);
+                _settingsGrid.UpdateRows(applied, d.SavedDailyKnown); settings.Controls.Add(_settingsGrid);
+                tabs.Height = Math.Max(264, _settingsGrid.Height + settings.Padding.Vertical + 35);
+                EventHandler resizeGrid = (_, _) =>
+                {
+                    if (CurveSelected) return;
+                    tabs.Height = Math.Max(264, _settingsGrid.Height + settings.Padding.Vertical + 35);
+                    if (!_building && !_resizing && IsHandleCreated) { using var update = new ScrollLayoutUpdate(_scroll); ResizeToContent(update); }
+                };
+                _settingsGrid.SizeChanged += resizeGrid;
+                tabs.Disposed += (_, _) => _settingsGrid.SizeChanged -= resizeGrid;
+                if (applied.Rows.Count == 0) settings.Controls.Add(Label(applied.Complete ? "No saved or confirmed modified settings" : "Settings discovery is incomplete · see coverage below", 12, true, 12));
             }
-            settings.Controls.Add(table);
-            tabs.Height = Math.Max(264, table.GetPreferredSize(new Size(500, 0)).Height + settings.Padding.Vertical + 35);
+            else
+            {
+                var table = Grid(3); table.Dock = DockStyle.Top;
+                foreach (var heading in new[] { "Control", "Applied (readback)", "Saved daily" }) table.Controls.Add(Label(heading, 11, true));
+                foreach (var control in Presentation.Rows)
+                {
+                    table.Controls.Add(Label(control.Label, 11, true, 13));
+                    table.Controls.Add(Label(Presentation.Applied(d, control.Kind, control.Key), 12, false, 13));
+                    table.Controls.Add(Label(Presentation.Saved(d, control.Kind, control.Key), 11, true, 13));
+                }
+                settings.Controls.Add(table);
+                tabs.Height = Math.Max(264, table.GetPreferredSize(new Size(500, 0)).Height + settings.Padding.Vertical + 35);
+            }
             var plot = new TabPage("V/F curve") { BackColor = _palette.Surface, ForeColor = _palette.Ink };
             plot.Controls.Add(new CurvePanel(d?.Verification?.Curve ?? [], _palette) { Dock = DockStyle.Fill });
             tabs.TabPages.Add(settings); tabs.TabPages.Add(plot);
             tabs.SelectedIndex = CurveSelected ? 1 : 0;
-            tabs.SelectedIndexChanged += (_, _) => CurveSelected = tabs.SelectedIndex == 1;
+            if (CurveSelected && d?.Applied != null) tabs.Height = 280;
+            tabs.SelectedIndexChanged += (_, _) =>
+            {
+                CurveSelected = tabs.SelectedIndex == 1;
+                if (d?.Applied == null || _settingsGrid == null) return;
+                tabs.Height = CurveSelected ? 280 : Math.Max(264, _settingsGrid.Height + settings.Padding.Vertical + 35);
+                using var update = new ScrollLayoutUpdate(_scroll); ResizeToContent(update);
+            };
             Add(tabs);
+            if (d?.Applied is { } inventory)
+            {
+                _coverageAge = Label(Coverage(inventory), 11, true, 3); _coverageAge.AccessibleDescription = string.Join("\n", inventory.Coverage); Add(_coverageAge);
+                Add(Label("New external changes in unscanned controls are found at the next full check. Double-click a row for source and canonical details.", 11, true, 4));
+            }
+            else Add(Label("Fixed legacy table · full saved/modified settings coverage requires a newer broker.", 11, true, 3));
             var session = Row(); session.Margin = new Padding(0, 6, 0, 0);
             session.Controls.Add(new GlyphView(d?.ExperimentKnown == true && d.TrialChange == null ? Glyph.CircleCheck : Glyph.Attention, _palette.Muted, 16));
             session.Controls.Add(Label(d?.ExperimentKnown != true ? "Trial status unavailable" : d.TrialChange != null ? $"Temporary trial: {d.TrialChange}" : "No temporary trial recorded", 11, true));
@@ -243,15 +280,29 @@ internal sealed class StatusForm : Form
                 Add(DiagnosticsBlock(Diagnostics(cache, d)));
             }
         }
-        Add(Label(Presentation.Age(d?.Refresh?.Controls?.At ?? (snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"), 11, true, 12));
-        Add(Label(Presentation.FullAge(d), 11, true, 4));
-        Add(Label(quiet ? "Quiet · all automatic requests paused" : cache.Snapshot?.Version == 2 ? "Automatic light refresh · 15 s · curve checked on changes" : "Manual refresh · older broker", 11, true, 4));
+        _controlsAge = Label(Presentation.Age(d?.Refresh?.Controls?.At ?? (snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"), 11, true, 12); Add(_controlsAge);
+        _fullAge = Label(Presentation.FullAge(d), 11, true, 4); Add(_fullAge);
+        Add(Label(quiet ? "Quiet · all automatic requests paused" : cache.Snapshot?.Version >= 2 ? "Automatic light refresh · 15 s · curve checked on changes" : "Manual refresh · older broker", 11, true, 4));
         if (cache.CompatibilityNotice != null) Add(Label(cache.CompatibilityNotice, 11, true, 4));
         if (cache.Error != null) Add(Label(cache.Error, 11, true, 6));
         _content.ResumeLayout(true);
         ResumeLayout(true);
         ResizeToContent(redraw);
+        if (!_hover && _scroll.AutoScroll) _scroll.AutoScrollPosition = new Point(-priorScroll.X, -priorScroll.Y);
+        if (gridFocused && !_offscreen) _settingsGrid?.Focus();
         _building = false;
+    }
+    private static string Coverage(AppliedSettings a) => $"{(a.Complete ? "Supported inventory complete" : "Partial / unavailable coverage")} · {a.Rows.Count} rows · {Presentation.Age(a.InventoryAt, "Inventory checked")}";
+    public void UpdateAges(TrayStatusCache cache, string? gpuId)
+    {
+        var position = _scroll.AutoScrollPosition;
+        var d = cache.Snapshot?.Devices.FirstOrDefault(g => g.StableId == gpuId) ?? cache.Snapshot?.Devices.FirstOrDefault();
+        if (_controlsAge != null) _controlsAge.Text = Presentation.Age(d?.Refresh?.Controls?.At ?? (cache.Snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked");
+        if (_fullAge != null) _fullAge.Text = Presentation.FullAge(d);
+        if (_telemetryAge != null) _telemetryAge.Text = Presentation.Age(d?.Telemetry?.At, "Telemetry sampled");
+        if (_coverageAge != null && d?.Applied is { } a) _coverageAge.Text = Coverage(a);
+        if (_settingsGrid?.Parent != null && d?.Applied is { } applied) _settingsGrid.UpdateRows(applied, d.SavedDailyKnown);
+        if (_scroll.AutoScroll) _scroll.AutoScrollPosition = new Point(-position.X, -position.Y);
     }
 
     internal void FitToWorkArea(Rectangle area)
@@ -264,6 +315,10 @@ internal sealed class StatusForm : Form
 
     private void ResizeToContent(ScrollLayoutUpdate redraw)
     {
+        if (_resizing) return;
+        _resizing = true;
+        try
+        {
         int oldBottom = Bottom;
         var area = _workArea ?? Screen.FromControl(this).WorkingArea;
         int margin = Math.Max(8, 8 * DeviceDpi / 96);
@@ -284,9 +339,14 @@ internal sealed class StatusForm : Form
             Location = new Point(Math.Clamp(Left, area.Left + margin, Math.Max(area.Left + margin, area.Right - Width - margin)),
                 Math.Clamp(oldBottom - Height, area.Top + margin, Math.Max(area.Top + margin, area.Bottom - Height - margin)));
         }
+        }
+        finally { _resizing = false; }
     }
+    protected override void OnShown(EventArgs e) { base.OnShown(e); using var update = new ScrollLayoutUpdate(_scroll); ResizeToContent(update); }
 
-    public static string Diagnostics(TrayStatusCache cache, StatusDevice? d) =>
+    public static string Diagnostics(TrayStatusCache cache, StatusDevice? d) => CoreDiagnostics(cache, d) +
+        (d?.Applied is not { } a ? "\r\nDynamic settings unavailable; fixed legacy table." : $"\r\nSettings GPU: {a.GpuId}\r\nDiscovery: {a.InventoryAt:O}; rows {a.Rows.Count}; candidates {a.CandidateCount}; omitted {a.OmittedCount}\r\nComplete coverage: {a.Complete}\r\nBounds: {AppliedCatalog.MaxCells} cells / {AppliedCatalog.MaxRows} rows; coherent read-only pages\r\n{string.Join("\r\n", a.Coverage)}");
+    private static string CoreDiagnostics(TrayStatusCache cache, StatusDevice? d) =>
         $"Tray: {Application.ProductVersion}\r\nBroker instance: {cache.Snapshot?.InstanceId ?? "unavailable"}\r\nStatus protocol: {cache.Snapshot?.Version}\r\nGPU: {d?.StableId}\r\nDriver: {d?.Driver ?? "unavailable"}\r\nVBIOS: {d?.Vbios ?? "unavailable"}\r\nPolicy: managed by the agent / unavailable\r\nGeneration: {d?.Refresh?.Generation}; curve generation: {d?.Refresh?.VerifiedGeneration}\r\nStartup: {d?.Refresh?.Restoration.Startup}; recovery: {d?.Refresh?.Restoration.Recovery}\r\nCurrent controls: {d?.Refresh?.Controls?.At:O}\r\nLast full curve: {d?.Verification?.At:O}\r\nPending: {d?.Refresh?.FullRequiredReason}\r\nExternal V/F-only changes are not detected between full checks. Use Check now.\r\n{d?.Refresh?.Controls?.Error}\r\n{d?.Verification?.Error}\r\n{string.Join("\r\n", d?.Errors ?? [])}\r\n{cache.CompatibilityNotice}\r\n{cache.Error}";
 
     private Label Label(string text, float px, bool muted, int top = 0) => new()
@@ -357,7 +417,7 @@ internal sealed class StatusForm : Form
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) { foreach (var font in _fonts.Values) font.Dispose(); }
+        if (disposing) { _settingsGrid?.Dispose(); foreach (var font in _fonts.Values) font.Dispose(); }
     }
     private sealed record DeviceChoice(string Id, string Name) { public override string ToString() => Name; }
 }

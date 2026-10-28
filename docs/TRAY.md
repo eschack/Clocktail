@@ -14,7 +14,7 @@ dotnet build src/Clocktail.Tray -c Release
 .\src\Clocktail.Tray\bin\Release\net10.0-windows\Clocktail.Tray.exe --demo matched
 ```
 
-Other `--demo` states: `trial`, `stale`, `unavailable`, `suspended`, `different`, `quiet`, `startup`, `older-curve`, `changed`, `recovery`, `incompatible`. Close a running preview with **Exit tray** before choosing another state. One instance runs per Windows user/session. All demonstrations are explicitly labeled synthetic. The app does not launch a demonstration unless requested.
+Other `--demo` states: `trial`, `stale`, `unavailable`, `suspended`, `different`, `quiet`, `startup`, `older-curve`, `changed`, `recovery`, `incompatible`, `extra-controls`, `trial-controls`, `shaped-vf`, `long-fans`, `many-settings`, `empty`, `partial`, `unavailable-saved`, `unknown-profile`. Close a running preview with **Exit tray** before choosing another state. One instance runs per Windows user/session. All demonstrations are explicitly labeled synthetic. The app does not launch a demonstration unless requested.
 
 An offscreen native render writes PNGs without a tray icon or broker connection:
 
@@ -28,15 +28,16 @@ Create a separate portable download with `build/publish-tray.ps1 -Version <versi
 
 ## Status contract and read budget
 
-`status`, version `2`, uses the existing length-bounded authenticated local named pipe. Pipe ACLs and network exclusion are unchanged. Version 1 remains available with its original manual verification and 30-second proof freshness semantics.
+`status`, version `3`, adds the dynamic Applied settings contract over the existing length-bounded authenticated local named pipe. Pipe ACLs and network exclusion are unchanged. Version 2 remains available for automatic refresh with the fixed table; version 1 retains manual verification and its original 30-second proof freshness. The new tray negotiates 3 → 2 → 1 and explains limited coverage on an older broker.
 
 | Kind | Trigger | Reads |
 | --- | --- | --- |
 | `cached` | Discovery, inventory every 60 seconds, guarded retry | Bounded profile/session records, lifecycle/generation markers, existing FlightRecorder telemetry. Zero GPU calls. |
-| `light` | Every 15 seconds when permitted | Up to 64 distinct current saved/common non-V/F controls. Zero V/F getters and setters. |
-| `verify` | Completed startup/recovery, settled changes, continuity loss, Check now | Current controls plus three bulk V/F Info/Status/Control calls covering the full effective curve. Zero setters. |
+| `light` | Every 15 seconds when permitted | Required saved/common controls, visible modified rows and known-active cheap cells. Zero V/F getters and setters. |
+| `verify` | Completed startup/recovery, settled changes, continuity loss, Check now | Capability-bounded supported inventory plus three bulk V/F Info/Status/Control calls. Zero setters. |
+| `rows` | Serial collection of a larger version 3 response | Immutable, device/generation-bound memory pages. Zero driver reads or record writes. |
 
-Hardware requests require the selected stable GPU ID. The light path uses an explicit getter allowlist: Pstates20, clock-domain info/control, power-policy info/control, boost control, voltage-rail info/control/status, fan-policy control, clock-limit status, and clock-relationship info/control. Identical native requests are deduplicated within a check, including core/memory and XBAR offset/demand. It constructs cell read descriptors directly and never invokes generic write-plan preparation or resolves setters. Unsupported saved controls remain explicitly unavailable. Manual fan level and rail current-limit cells are trial-only (`DailyProfile.TrialOnly`), so they are outside this daily status reader.
+Hardware requests require the selected stable GPU ID. The getter allowlist covers Pstates20, clock domains, client power requests, boost, voltage rails, fan channels/policies, clock limits/relationships and regulator current limits. Discovery uses exported getter presence and validated topology/masks, without arbitrary IDs or bus access. Identical native table requests are deduplicated. Read descriptors are constructed directly; generic write-plan preparation, setter resolution, ownership settlement, recovery and transactions are never invoked.
 
 The five-second budget stops additional control getters between calls and prevents entering the full curve reader after that budget is exhausted; a native call already blocked in the driver cannot be interrupted. Full V/F uses the existing three-call bulk reader. The client closes its pipe on cancellation or an eight-second deadline. Cached status never settles crash records, recovers, runs transactions, starts PresentMon, or initiates telemetry sampling.
 
@@ -52,11 +53,31 @@ A failed/partial full request is labeled **Full check attempted**, with its erro
 
 **Limit:** an external tool changing only V/F points, while leaving all lightweight controls unchanged, is not detected between full checks. The curve remains last verified, not continuously verified. **Check now** requests new complete evidence. There is no periodic full V/F polling.
 
-Hidden windows are not reconstructed on timer ticks. Visible content is rebuilt only when displayed values, state or age text changes, with exact timestamps included when diagnostics is open. The icon changes once at freshness expiry. The hover dismissal timer runs only while visible. Details uses native accessible controls, Escape, Close, and Pin. Paint, hover, opening details and switching tabs read the UI cache only.
+Hidden windows are not reconstructed on timer ticks. Age-only updates change existing labels/cells without rebuilding native controls. Data updates preserve keyed grid rows, selection and scroll. Exact timestamp changes in open diagnostics may update its text. The icon changes once at freshness expiry. Details uses native accessible controls, Escape, Close and Pin. Paint, hover, opening details and switching tabs read the UI cache only.
 
 A full match requires every saved canonical target plus required common controls to be readable, and a consistent regional effective curve tied to explicit core targets. An implicit P0 daily compares actual effective-minus-regional-base displacement; mirrored point/P0 controls are not added twice. Explicit saved curves compare their point offsets and effective state. The plot uses the driver's effective frequency directly. Legacy curves and ambiguous/partial readback remain unconfirmed. Stock comparison is omitted when its source cannot be established.
 
 **Quiet for benchmark** is a manual local toggle with explicit release. It closes hover/details, stops all automatic requests/reconnects and expiry repainting, and disables Check now. It does not expire automatically, write a judge lease, suppress broker safety actions, start a benchmark, or imply a benchmark is in progress. A sent request can finish; quiet prevents follow-up calls. Leaving quiet performs one current refresh and a full check if needed. Session lock, disconnect, logoff and suspend pause scheduling; unlock/resume refreshes continuity. There is no extra telemetry sampler, event subscription or notification feed.
+
+## Dynamic Applied settings
+
+The complete table uses stable GPU/kind/key identities, grouped current readback beside explicit saved daily values. Every saved or adopted target remains visible, including zero targets, suspended profiles, unknown keys and failed readback. Supported unsaved cells appear when fresh readback differs from a reliable reference. A claimed dependency that freshly matches its reference hides; owning a cell alone is not proof that it is modified. Previously visible modified cells retain their last successful value/time when unreadable, and disappear only after fresh supported readback confirms a return to the applicable reference.
+
+If the saved record itself becomes unreadable, retained targets are **Unknown · last saved**; they do not become **Not saved**. Comparisons remain unconfirmed until the record and readback are available again.
+
+Reference sources are distinct: firmware/OEM values, documented neutral state for that supported control, current-boot validated captured originals, and configured adopted baselines. No generic zero or reference-card ratio/rail/fan defaults are assumed. Captured originals are never current readback. Foreign/dead-owner/old-boot records and future-dated originals cannot establish references; topology changes invalidate captured cell mappings conservatively. Unknown references yield unconfirmed rows or an explicit coverage limitation. None of these states attributes a change to another tool.
+
+Typed rows cover all 13 `WriteRegistry` families: core/memory offsets, a compact V/F summary, FE/F8 power requests, per-slot NVVDD/MSVDD rail adjustments, XBAR/SYS/video offsets, supported voltage demands with target rail, both boost paths, fan channels, editable fan curves/stop bands, frequency/voltage locks, U16.16 ratio and regulator current limits. Unknown/unsupported saved or valid ownership keys remain diagnostic rows. Fan controls report the canonical firmware level and its range/tach context; percentage or RPM units are not invented when that getter does not identify them. Trial-only fan/current/F8/floor/voltage controls say **Not saveable as daily · Trial only**. Absence, released locks, automatic mode and missing values are distinct. Partial rail/fan targets compare only explicitly specified fields.
+
+Use double-click, Control+Enter or the row context menu to inspect/copy canonical values, provenance, errors, sample/attempt times and generation. Long fan/shaped V/F values have concise table summaries; the full data remains in setting details, and the effective curve remains in its tab. Large lists use the single outer scroll region.
+
+Full checks discover candidates from saved/adopted targets, validated ownership, active trial overrides and supported topology. Light checks refresh saved, visible and known-active cheap controls. **New external changes in previously unchanged, unscanned cells are found at the next full discovery**, not necessarily the next 15-second tick. Discovery age is visible. Full-only V/F rows retain their actual sample time across light checks and become pending on generation changes. Exploratory coverage errors are separate from required saved-target proof; missing saved readback still prevents a complete daily match.
+
+Bounds are explicit: 1 MiB per record, 64 saved plus 64 adopted targets, 128 generic trial writes, 256 ownership cells, 512 candidate cells, 768 rows, 96 coverage notices and 4096 characters per canonical row value. Valid supported topology fits these limits. A bound reached by unsupported records is reported as incomplete coverage; oversized identities use stable diagnostic hashes, and oversized values are explicitly marked omitted/uninterpreted. Version 3 carries up to 144 required saved/common controls rather than silently cutting to 64. Legacy profile projection fields may be summarized; typed rows carry the bounded saved values.
+
+Larger row sets use byte-bounded pages (96 KiB per selected-device page) under the 1 MiB transport limit. A maximum of 64 immutable snapshots expire after 30 seconds. The tray collects at most 256 serial pages with an eight-second collection deadline, checking instance/device/generation and rejecting incomplete/duplicate/stale data before accepting it. Quiet, session pause, selection change and disposal stop subsequent pages. A metadata-only response that cannot fit its explicit limit fails with an explanation rather than claiming full coverage.
+
+Software evidence and remaining live acceptance: [dynamic settings validation](validation/tray-dynamic-applied-settings-20261028.md).
 
 ## Scope and validation limits
 

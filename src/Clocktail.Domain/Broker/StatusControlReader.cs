@@ -13,7 +13,7 @@ using Clocktail.Hw;
 namespace Clocktail.Domain.Broker;
 
 /// <summary>Explicit getter-only allowlist. Never constructs a write plan, calls VfReader or resolves a setter.</summary>
-internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvider clock)
+internal sealed partial class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvider clock)
 {
     private readonly long _started = clock.GetTimestamp();
     public void CheckBudget()
@@ -21,6 +21,8 @@ internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvi
         if (clock.GetElapsedTime(_started) > TimeSpan.FromSeconds(5)) throw new InvalidOperationException("status read budget exceeded");
     }
     private readonly Dictionary<string, (byte[]? Value, string? Error)> _tables = new();
+    public Dictionary<string, StatusSetting> Observed { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, string> Topologies { get; } = new(StringComparer.Ordinal);
     private IReadOnlyList<ClockTopologyEntry>? _topology;
     private BoardPowerInfo? _board;
     private RailsSnapshot? _rails;
@@ -28,10 +30,13 @@ internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvi
     [Slot.GetPstates20, Slot.ClockClkDomainsGetInfo, Slot.ClockClkDomainsGetControl,
      Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl, Slot.ClientVoltRailsGetControl,
      Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus,
-     Slot.FanPolicyGetControl, Slot.PerfClientLimitsGetStatus, Slot.ClockClkPropTopRelsGetInfo, Slot.ClockClkPropTopRelsGetControl];
+     Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.ClientFanCoolersGetInfo, Slot.ClientFanCoolersGetStatus, Slot.ClientFanCoolersGetControl,
+     Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo,
+     Slot.PerfClientLimitsGetStatus, Slot.ClockClkPropTopRelsGetInfo, Slot.ClockClkPropTopRelsGetControl];
     private byte[] Read(Slot slot, Action<byte[]>? prepare = null)
     {
         if (!Allowed.Contains(slot)) throw new InvalidOperationException("not an allowlisted status getter");
+        if (!Exposes(slot)) throw new NotSupportedException($"{slot}: getter interface unavailable");
         var buffer = NvClient.NewBuffer(slot); prepare?.Invoke(buffer);
         string key = $"{slot}:{Convert.ToHexString(SHA256.HashData(buffer))}";
         if (!_tables.TryGetValue(key, out var result))
@@ -49,25 +54,33 @@ internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvi
         var info = Read(Slot.VoltVoltRailsGetInfo);
         uint mask = BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(4));
         void Query(byte[] b) => BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), mask);
-        return _rails = RailsParser.Parse(info, Read(Slot.VoltVoltRailsGetControl, Query), Read(Slot.VoltVoltRailsGetStatus, Query), null, false);
+        _rails = RailsParser.Parse(info, Read(Slot.VoltVoltRailsGetControl, Query), Read(Slot.VoltVoltRailsGetStatus, Query), null, false);
+        Topologies["rails"] = string.Join(",", _rails.Rails.Select(r => $"{r.Rail}/{r.Kind}/{r.Type}/{r.DomainIndex}"));
+        return _rails;
     }
     private ClockTopologyEntry Topology(string key)
     {
         _topology ??= ClockDomainsParser.ParseTopology(Read(Slot.ClockClkDomainsGetInfo));
         if (!Enum.TryParse<ClockDomainId>(key, true, out var domain) || !Enum.IsDefined(domain)) throw new InvalidDataException("unknown clock domain");
-        return ClockDomainsParser.Find(_topology, (uint)domain);
+        var found = ClockDomainsParser.Find(_topology, (uint)domain);
+        Topologies["clock/" + key] = found.Identity;
+        return found;
     }
     public StatusSetting Setting(ProfileWrite w)
     {
         try
         {
+            if (!AppliedCatalog.KeyKnown(w.Kind, w.Key)) throw new NotSupportedException("Unknown or unsupported canonical control key");
             var cell = Cell(w.Kind, w.Key);
-            var value = cell.StateIn(Read(cell.Spec.Get, cell.Spec.PrepareRead));
-            return new(w.Kind, w.Key, cell.Unit, value, value == null ? "control is unreadable" : null);
+            var raw = Read(cell.Spec.Get, cell.Spec.PrepareRead);
+            if (w.Kind == "power" && w.Key == "fe" && !Board().DirectlyReadable && PowerRequestsParser.ParseControl(raw, Board().Board, PowerRequestKind.Ordinary).Mw == null)
+                throw new NotSupportedException("An absent ordinary request on this board requires an unavailable policy cross-check");
+            var value = w.Kind == "power" ? PowerCap.Encode(PowerRequestsParser.ParseControl(raw, Board().Board, w.Key == "fe" ? PowerRequestKind.Ordinary : PowerRequestKind.Additional).Mw) : cell.StateIn(raw);
+            return Observed[w.Kind + "/" + w.Key] = new(w.Kind, w.Key, cell.Unit, value, value == null ? "control is unreadable" : null);
         }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException or NotSupportedException or NvApiException
             or ArgumentException or FormatException or OverflowException)
-        { return new(w.Kind, w.Key, "", null, e.Message); }
+        { return Observed[w.Kind + "/" + w.Key] = new(w.Kind, w.Key, "", null, e.Message); }
     }
     private OwnedCell Cell(string kind, string key)
     {
@@ -92,12 +105,19 @@ internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvi
             case RailWrites.Kind:
                 if (!Enum.TryParse<Rail>(key, true, out var rail) || !Enum.IsDefined(rail)) throw new InvalidDataException("unknown rail");
                 return RailWrites.Cell(rail, Rails().Mask);
-            case FanPolicyWrites.Kind: return FanPolicyWrites.Cell(FanPolicyWrites.ParseKey(key));
-            case FanStopWrites.Kind: return FanStopWrites.Cell(FanPolicyWrites.ParseKey(key));
+            case FanPolicyWrites.Kind: Policy(key); return FanPolicyWrites.Cell(FanPolicyWrites.ParseKey(key));
+            case FanStopWrites.Kind: Policy(key); return FanStopWrites.Cell(FanPolicyWrites.ParseKey(key));
+            case FanControl.Kind:
+                uint id = uint.Parse(key, CultureInfo.InvariantCulture);
+                if (!Fans().Any(f => f.Id == id)) throw new NotSupportedException("Fan channel is not present in validated topology");
+                return FanControl.Cell(id, []);
+            case CurrentLimitWrites.Kind:
+                var railId = CurrentLimitWrites.ParseKey(key);
+                return CurrentLimitWrites.Cell(railId, CurrentRecord(railId).Index);
             case ClockLimitWrites.Kind: return ClockLimitWrites.Cell(key);
             case ClockRatio.Kind when key == ClockRatio.Key:
                 uint relations = BinaryPrimitives.ReadUInt32LittleEndian(Read(Slot.ClockClkPropTopRelsGetInfo).AsSpan(ClockRatio.InfoRelations));
-                if (relations == 0) throw new InvalidDataException("no clock relationships");
+                if ((relations & 1) == 0) throw new InvalidDataException("validated clock relationship 0 is absent");
                 return ClockRatio.Cell(relations);
             default: throw new NotSupportedException($"{kind}/{key} has no allowlisted status reader");
         }
@@ -106,14 +126,15 @@ internal sealed class StatusControlReader(NvClient hw, GpuSession gpu, TimeProvi
         new("clockdomain", "xbar", "0"), new("power", "fe", "0"), new("boost", "legacy", "0"), new("vdemand", "xbar", "0")];
     public static DailyComparison Compare(DailyProfile? profile, IReadOnlyList<StatusSetting> settings)
     {
-        var targets = profile?.Writes.Where(w => w.Kind != "vf").ToArray() ?? [];
+        var targets = profile == null ? [] : profile.Writes.Concat(profile.Adopted ?? []).DistinctBy(w => (w.Kind, w.Key)).Where(w => w.Kind != "vf").ToArray();
         if (profile == null || profile.Writes.Count == 0) return DailyComparison.Unknown;
         bool missing = settings.Any(s => s.Value == null);
         foreach (var target in targets)
         {
             var observed = settings.FirstOrDefault(s => s.Kind == target.Kind && s.Key == target.Key);
             if (observed?.Value == null) missing = true;
-            else if (observed.Value != target.Value) return DailyComparison.Different;
+            else if (AppliedCatalog.Equal(target.Kind, target.Key, observed.Value, target.Value) is not { } equal) missing = true;
+            else if (!equal) return DailyComparison.Different;
         }
         return missing ? DailyComparison.Unknown : DailyComparison.Matched;
     }

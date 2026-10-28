@@ -19,7 +19,9 @@ internal static class PreviewRenderer
         var expected = state switch
         {
             "startup" => TrayState.StartupPending, "recovery" => TrayState.Recovering,
-            "changed" or "different" => TrayState.SettingsDiffer, "trial" => TrayState.TrialActive,
+            "changed" or "different" => TrayState.SettingsDiffer, "trial" or "trial-controls" or "many-settings" => TrayState.TrialActive,
+            "empty" or "partial" or "unavailable-saved" => TrayState.Unknown,
+            "unknown-profile" => TrayState.Failed,
             "stale" => TrayState.Stale, "unavailable" => TrayState.Unavailable, "suspended" => TrayState.DailySuspended,
             _ => TrayState.DailyMatched
         };
@@ -37,6 +39,8 @@ internal static class PreviewRenderer
             form.Present(cache, "demo-gpu", state == "quiet", true, false);
             form.Show();
             form.PerformLayout();
+            Application.DoEvents(); // complete native grid handle/row sizing before interaction invariants are measured
+            form.PerformLayout();
             using var bitmap = new Bitmap(form.ClientSize.Width, form.ClientSize.Height);
             form.DrawToBitmap(bitmap, form.ClientRectangle);
             bitmap.Save(Path.Combine(directory, $"{state}-{view}.png"), ImageFormat.Png);
@@ -50,6 +54,7 @@ internal static class PreviewRenderer
                 { labels_enabled = true, nonactivating_style = true, mouse_hit_transparent = true }));
             }
             if (view == "details") VerifyPinToggle(form, directory, state);
+            if (view == "details" && device?.Applied is { Rows.Count: > 0 }) VerifyDynamicUpdate((StatusForm)form, cache, directory, state);
             if (view == "diagnostics") VerifyDiagnostics(form, directory, state, state == "quiet");
             bool unchanged = foreground == GetForegroundWindow();
             File.WriteAllText(Path.Combine(directory, $"{state}-{view}-focus.json"), JsonSerializer.Serialize(new { foreground_unchanged = unchanged }));
@@ -71,6 +76,37 @@ internal static class PreviewRenderer
         light.DrawToBitmap(lightDiagnostics, light.ClientRectangle);
         lightDiagnostics.Save(Path.Combine(directory, $"{state}-light-diagnostics.png"), ImageFormat.Png);
         light.Hide();
+        var contrast = new Palette(Color.Black, Color.Black, Color.White, Color.White, Color.White, Color.Yellow, Color.FromArgb(0, 0, 96));
+        using var highContrast = new StatusForm(false, contrast, offscreen: true) { Location = new Point(-32000, -32000) };
+        highContrast.FitToWorkArea(new Rectangle(0, 0, 1920, 1200)); highContrast.Present(cache, "demo-gpu", state == "quiet", true, false);
+        highContrast.Show(); Application.DoEvents(); highContrast.PerformLayout();
+        using var contrastBitmap = new Bitmap(highContrast.ClientSize.Width, highContrast.ClientSize.Height);
+        highContrast.DrawToBitmap(contrastBitmap, highContrast.ClientRectangle); contrastBitmap.Save(Path.Combine(directory, $"{state}-high-contrast.png"), ImageFormat.Png);
+        highContrast.Hide();
+    }
+    private static void VerifyDynamicUpdate(StatusForm form, TrayStatusCache cache, string directory, string state)
+    {
+        var grid = form.Controls.Find("AppliedSettingsGrid", true).OfType<DataGridView>().Single();
+        grid.CurrentCell = grid.Rows[^1].Cells[1];
+        var selected = grid.CurrentCell; var rowObjects = grid.Rows.Cast<DataGridViewRow>().ToArray();
+        var controls = Descendants(form).ToArray();
+        var handles = controls.Where(c => c.IsHandleCreated).ToDictionary(c => c, c => c.Handle);
+        var scroll = (Panel)form.Controls.Find("DetailsScroll", true).Single();
+        if (scroll.AutoScroll) scroll.AutoScrollPosition = new Point(0, scroll.DisplayRectangle.Height);
+        var position = scroll.AutoScrollPosition;
+        var snapshot = cache.Snapshot!; var device = snapshot.Devices[0];
+        var next = device with { Applied = device.Applied! with { Rows = device.Applied.Rows.Select(r => r.ReadClass == AppliedReadClass.Light ? r with { SampledAt = DateTimeOffset.UtcNow.AddSeconds(-2), AttemptAt = DateTimeOffset.UtcNow.AddSeconds(-2) } : r).ToArray() } };
+        if (!cache.Accept(snapshot with { Revision = snapshot.Revision + 1, Devices = [next] })) throw new InvalidOperationException("Age fixture rejected");
+        form.UpdateAges(cache, "demo-gpu"); Application.DoEvents();
+        if (!controls.SequenceEqual(Descendants(form)) || handles.Any(p => p.Key.IsDisposed || p.Key.Handle != p.Value)
+            || grid.CurrentCell != selected || !rowObjects.SequenceEqual(grid.Rows.Cast<DataGridViewRow>()) || scroll.AutoScrollPosition != position)
+            throw new InvalidOperationException("Age-only update changed native controls, row identity, selection or scroll.");
+        form.Present(cache, "demo-gpu", state == "quiet", true, false); Application.DoEvents();
+        if (!ReferenceEquals(grid, form.Controls.Find("AppliedSettingsGrid", true).Single()) || !rowObjects.SequenceEqual(grid.Rows.Cast<DataGridViewRow>())
+            || grid.CurrentCell != selected || scroll.AutoScrollPosition != position)
+            throw new InvalidOperationException("Data refresh discarded stable grid rows, selection or scroll.");
+        File.WriteAllText(Path.Combine(directory, $"{state}-dynamic-update.json"), JsonSerializer.Serialize(new
+        { age_only_tree_and_handles_preserved = true, stable_native_rows = true, selection_preserved = true, scroll_preserved = true, rows = grid.RowCount }));
     }
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
@@ -110,7 +146,8 @@ internal static class PreviewRenderer
     {
         static IEnumerable<Control> Descendants(Control parent) => parent.Controls.Cast<Control>().SelectMany(c => new[] { c }.Concat(Descendants(c)));
         var scrolling = Descendants(form).Where(c => c.Visible && c.IsHandleCreated && (GetWindowLong(c.Handle, -16) & 0x00300000) != 0).ToArray();
-        if (scrolling.Length != 0) throw new InvalidOperationException("Expanded diagnostics should fit without scrolling in a tall work area.");
+        if (scrolling.Length > 1 || scrolling.Any(c => c.Name != "DetailsScroll")) throw new InvalidOperationException("Expanded diagnostics introduced nested scrollbars.");
+        if (scrolling.Length > 0 && form.Height < 1180) throw new InvalidOperationException("Content should fit in a tall work area or clamp to its one fallback scroll area.");
         int expandedHeight = form.Height, collapsedHeight = 0;
         var check = form.Controls.Find("CheckNowButton", true).OfType<Button>().Single();
         bool checkEnabled = check.Enabled;
@@ -133,7 +170,7 @@ internal static class PreviewRenderer
             Application.DoEvents();
             if (((StatusForm)form).DiagnosticsExpanded)
             {
-                if (form.Height <= collapsedHeight) throw new InvalidOperationException("Opening diagnostics did not expand the panel.");
+                if (form.Height <= collapsedHeight && form.Height < 1180) throw new InvalidOperationException("Opening diagnostics did not expand the panel.");
             }
             else collapsedHeight = form.Height;
             var bars = Descendants(form).Where(c => c.Visible && c.IsHandleCreated && (GetWindowLong(c.Handle, -16) & 0x00300000) != 0).ToArray();

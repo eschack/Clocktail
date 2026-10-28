@@ -194,7 +194,7 @@ public sealed class TrayStatusTests : IDisposable
         Assert.Equal(TrayState.Unavailable, TrayStatus.State(d, false, now, now));
         Assert.True(cache.Accept(new(1, "restarted", 1, now, [d with { Verification = null }])));
         Assert.Null(cache.Snapshot!.Devices[0].Verification);
-        Assert.False(cache.Accept(new(3, "future", 1, now, [])));
+        Assert.False(cache.Accept(new(4, "future", 1, now, [])));
         Assert.False(cache.Connected);
         Assert.False(cache.Accept(new(1, "malformed", 1, now, null!)));
         Assert.False(cache.Connected);

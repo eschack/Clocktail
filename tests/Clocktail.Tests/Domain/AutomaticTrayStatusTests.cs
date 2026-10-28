@@ -21,7 +21,7 @@ internal sealed class TrayTestClock : TimeProvider
 }
 
 [Collection("fake-driver")]
-public sealed class AutomaticTrayStatusTests : IDisposable
+public sealed partial class AutomaticTrayStatusTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "clocktail-auto-status", Guid.NewGuid().ToString("N"));
     private readonly FakeHost _host = new();
@@ -238,7 +238,7 @@ public sealed class AutomaticTrayStatusTests : IDisposable
         var serving = server.ServeOneAsync(stop.Token);
         var source = new BrokerTrayStatusSource((request, token) => BrokerClient.TryCallAsync(request, token, pipe));
         var snapshot = await source.Fetch(StatusFetchKind.Cached, null, stop.Token); await serving;
-        Assert.Equal(2, snapshot!.Version); Assert.Contains("restoration-state", snapshot.Capabilities!);
+        Assert.Equal(3, snapshot!.Version); Assert.Contains("restoration-state", snapshot.Capabilities!);
         Assert.Equal(RestorationState.Ready, snapshot.Devices[0].Refresh!.Restoration.Startup);
         Assert.Empty(FakeDriver.GetWords); Assert.Equal(0, FakeDriver.Sets);
     }
