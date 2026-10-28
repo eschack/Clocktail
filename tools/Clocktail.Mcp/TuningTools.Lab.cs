@@ -524,8 +524,11 @@ public sealed partial class TuningTools
     }
 
     private IEnumerable<string> Jobs() => Directory.Exists(LabDir())
-        ? Directory.GetDirectories(LabDir()).Where(d => Path.GetFileName(d) is var n && (n.StartsWith("sweep-", StringComparison.Ordinal) || n.StartsWith("uncore-", StringComparison.Ordinal)))
-            .OrderByDescending(d => Directory.GetCreationTimeUtc(d)) : [];
+        ? Directory.GetDirectories(LabDir()).Where(d => IsJob(Path.GetFileName(d))).OrderByDescending(d => Directory.GetCreationTimeUtc(d)) : [];
+
+    /// <summary>A lab job's folder by its name: tune_memory's sweep-…, tune_uncore's uncore-…, game_test's game-….</summary>
+    public static bool IsJob(string name) => name.StartsWith("sweep-", StringComparison.Ordinal) || name.StartsWith("uncore-", StringComparison.Ordinal)
+        || name.StartsWith("game-", StringComparison.Ordinal);
 
     private static JsonObject? Status(string dir)
     {
@@ -534,11 +537,14 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "lab_status", ReadOnly = true, OpenWorld = false), Description(
-        "Where tune_memory's sweep is: running, done, stopped or failed; every step so far (offset, bandwidth, latency, memory " +
-        "clock, temperature, P-state, spread, what stopped it), the best offset and what to do next. With no job, the latest.")]
-    public string LabStatus([Description("The job (sweep-…) from tune_memory; omit for the latest.")] string? job = null) => Guard(() =>
+        "Where a lab job is: running, done, stopped or failed, and what to do next. tune_memory's sweep: every step so far " +
+        "(offset, bandwidth, latency, memory clock, temperature, P-state, spread, what stopped it) and the best offset. " +
+        "tune_uncore: each comparison and the best setting. game_test: the step it plays, the levers applied, per pattern the " +
+        "fps, clocks, power and temperature, the heavy → light jumps and how many leapt, the seconds near the curve's top, its " +
+        "result (survived, failed, unjudged), recovery errors and why. With no job, the latest.")]
+    public string LabStatus([Description("The job (sweep-…, uncore-… or game-…); omit for the latest.")] string? job = null) => Guard(() =>
     {
-        string dir = job != null ? Path.Combine(LabDir(), Path.GetFileName(job)) : Jobs().FirstOrDefault() ?? throw new InvalidOperationException("no sweep has run on this card");
+        string dir = job != null ? Path.Combine(LabDir(), Path.GetFileName(job)) : Jobs().FirstOrDefault() ?? throw new InvalidOperationException("no lab job has run on this card");
         var s = Status(dir) ?? throw new InvalidOperationException($"{Path.GetFileName(dir)} has no status yet: it is starting, or its process ended before it wrote one");
         if ((string?)s["state"] == "running" && !Alive(dir))
             s["warning"] = "its process is not running (a reboot, or it was ended): the status stops where it got to; read its sweep.log";
@@ -547,9 +553,11 @@ public sealed partial class TuningTools
     });
 
     [McpServerTool(Name = "lab_stop", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "End a lab job (tune_memory, tune_uncore): its measurement stops within a second and its process is waited for, the " +
-        "daily profile goes back on, and the steps so far stay in lab_status. With no job, the one running.")]
-    public string LabStop([Description("The job (sweep-… or uncore-…) to end; omit for the one running.")] string? job = null) => Guard(() =>
+        "Request a lab job's stop (tune_memory, tune_uncore, game_test). Compute measurements poll within a second; " +
+        "game_test finishes its current bounded query/write and closes the game. The process is waited for before restoring " +
+        "settings (game_test: the starting controls, otherwise the daily profile). Check lab_status for completion or " +
+        "recovery errors; steps so far remain there. With no job, the one running.")]
+    public string LabStop([Description("The job (sweep-…, uncore-… or game-…) to end; omit for the one running.")] string? job = null) => Guard(() =>
     {
         string dir = job != null ? Path.Combine(LabDir(), Path.GetFileName(job)) : Running() ?? throw new InvalidOperationException("no lab job is running");
         if (!Directory.Exists(dir)) throw new InvalidOperationException($"no job {Path.GetFileName(dir)} on this card");

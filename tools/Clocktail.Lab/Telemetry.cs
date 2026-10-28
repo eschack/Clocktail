@@ -23,11 +23,11 @@ public sealed class NvmlSampler : ISampler
     public NvmlSampler(string cudaPciBusId)
     {
         _nvml = NvmlApi.Load();
-        var want = Pci(cudaPciBusId);
+        var want = Clocktail.Hw.PciAddress.Parse(cudaPciBusId) ?? throw new NotSupportedException("invalid target PCI address");
         for (uint i = 0; i < _nvml.DeviceCount(); i++)
         {
             var h = _nvml.HandleByIndex(i);
-            if (Pci(_nvml.Pci(h).BusId) == want) { _h = h; return; }
+            if (Clocktail.Hw.PciAddress.Parse(_nvml.Pci(h).BusId) == want) { _h = h; return; }
         }
         _nvml.Dispose();
         throw new InvalidOperationException($"NVML has no GPU at PCI {cudaPciBusId}");
@@ -54,6 +54,12 @@ public sealed class NvmlSampler : ISampler
     public (ulong Used, ulong Total)? Vram()
     {
         try { var m = _nvml.Memory(_h); return (m.Used, m.Total); } catch (NvmlException) { return null; }
+    }
+
+    /// <summary>The pids with a graphics context on this GPU (nvidia-smi's G / C+G); null when the driver does not say.</summary>
+    public IReadOnlyList<uint>? GraphicsPids()
+    {
+        try { return _nvml.GraphicsPids(_h); } catch (NvmlException) { return null; }
     }
 
     public void Dispose() => _nvml.Dispose();

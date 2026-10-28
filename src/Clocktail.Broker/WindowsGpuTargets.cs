@@ -12,7 +12,7 @@ internal sealed class WindowsGpuTargets : IGpuTargets
 
     /// <param name="standDown">What each sentinel asks once it is on disk (the judge lock); null asks nothing.</param>
     public WindowsGpuTargets(GpuManager mgr, IHost host, Func<string?>? standDown = null)
-        => _targets = mgr.Gpus.Select(g => new Target(g, host, standDown, mgr.Driver.Version == 0 ? null : $"{mgr.Driver.Version / 100}.{mgr.Driver.Version % 100:00}")).ToList();
+        => _targets = mgr.Gpus.Select(g => new Target(mgr, g, host, standDown, mgr.Driver.Version == 0 ? null : $"{mgr.Driver.Version / 100}.{mgr.Driver.Version % 100:00}")).ToList();
 
     public IReadOnlyList<string> Ids => _targets.Select(t => t.StableId).ToList();
 
@@ -22,7 +22,7 @@ internal sealed class WindowsGpuTargets : IGpuTargets
 
     private sealed class Target : IGpuTarget
     {
-        public Target(GpuDevice g, IHost host, Func<string?>? standDown, string? driver)
+        public Target(GpuManager manager, GpuDevice g, IHost host, Func<string?>? standDown, string? driver)
         {
             StableId = g.Identity.StableId;
             Name = g.Identity.Name;
@@ -32,6 +32,7 @@ internal sealed class WindowsGpuTargets : IGpuTargets
             var dir = BrokerPaths.GpuStateDir(StableId);
             Journal = new OwnershipJournal(Path.Combine(dir, "ownership.json"), host, StableId);
             Sentinel = new ApplySentinel(Path.Combine(dir, "apply.lock"), standDown);
+            GameAccess = new WindowsGameAccess(manager, g, this);
         }
 
         public string StableId { get; }
@@ -41,5 +42,6 @@ internal sealed class WindowsGpuTargets : IGpuTargets
         public ApplySentinel Sentinel { get; }
         public string? Vbios { get; }
         public string? Driver { get; }
+        public Clocktail.Domain.Game.IGameAccess GameAccess { get; }
     }
 }

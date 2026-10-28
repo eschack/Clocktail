@@ -19,6 +19,7 @@ public sealed unsafe class CudaApi : IDisposable
     private delegate* unmanaged[Cdecl]<uint, int> _init;
     private delegate* unmanaged[Cdecl]<int*, int> _deviceCount;
     private delegate* unmanaged[Cdecl]<int*, int, int> _deviceGet;
+    private delegate* unmanaged[Cdecl]<int*, byte*, int> _deviceByPci;
     private delegate* unmanaged[Cdecl]<byte*, int, int, int> _deviceGetName, _deviceGetPciBusId;
     private delegate* unmanaged[Cdecl]<int*, int, int, int> _deviceGetAttribute;
     private delegate* unmanaged[Cdecl]<nint*, int, int> _primaryCtxRetain;
@@ -59,6 +60,7 @@ public sealed unsafe class CudaApi : IDisposable
         _init = (delegate* unmanaged[Cdecl]<uint, int>)Sym("cuInit");
         _deviceCount = (delegate* unmanaged[Cdecl]<int*, int>)Sym("cuDeviceGetCount");
         _deviceGet = (delegate* unmanaged[Cdecl]<int*, int, int>)Sym("cuDeviceGet");
+        _deviceByPci = (delegate* unmanaged[Cdecl]<int*, byte*, int>)Sym("cuDeviceGetByPCIBusId");
         _deviceGetName = (delegate* unmanaged[Cdecl]<byte*, int, int, int>)Sym("cuDeviceGetName");
         _deviceGetPciBusId = (delegate* unmanaged[Cdecl]<byte*, int, int, int>)Sym("cuDeviceGetPCIBusId");
         _deviceGetAttribute = (delegate* unmanaged[Cdecl]<int*, int, int, int>)Sym("cuDeviceGetAttribute");
@@ -97,6 +99,14 @@ public sealed unsafe class CudaApi : IDisposable
 
     public int DeviceCount() { int n; Check("cuDeviceGetCount", _deviceCount(&n)); return n; }
     public int Device(int ordinal) { int d; Check("cuDeviceGet", _deviceGet(&d, ordinal)); return d; }
+
+    public int DeviceByPci(string pci)
+    {
+        byte[] text = System.Text.Encoding.ASCII.GetBytes(pci + "\0");
+        int device;
+        fixed (byte* p = text) Check("cuDeviceGetByPCIBusId", _deviceByPci(&device, p));
+        return device;
+    }
 
     public string DeviceName(int dev)
     {

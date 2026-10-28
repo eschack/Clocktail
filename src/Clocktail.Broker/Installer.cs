@@ -30,6 +30,12 @@ internal static class Installer
     /// <param name="log">Where the elevated copy appends its lines, so the caller (whose console it cannot reach) can print them.</param>
     public static int Install(string? log = null)
     {
+        // Validate the companions before any prompt and before stopping the installed task: a broken bundle must cost the
+        // person nothing and leave the old service running.
+#pragma warning disable IL3000
+        var files = BrokerInstallBundle.Files(AppContext.BaseDirectory,
+            Environment.ProcessPath ?? throw new InvalidOperationException("no broker executable path"), string.IsNullOrEmpty(typeof(Installer).Assembly.Location));
+#pragma warning restore IL3000
         if (!Elevation.IsAdministrator()) return Relaunch("install");
         var say = Logger(log);
         var dst = BrokerPaths.InstallDir();
@@ -37,7 +43,7 @@ internal static class Installer
 
         Run("schtasks", $"/end /tn {BrokerPaths.TaskName}", ignoreFailure: true);
         WaitForBrokerExit(dst, say);
-        CopyBuildOutput(dst, say);
+        CopyBuildOutput(dst, say, files);
 
         var xml = Path.Combine(Path.GetTempPath(), $"{BrokerPaths.TaskName}-{Environment.ProcessId}.xml");
         File.WriteAllText(xml, TaskXml(exe), new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
@@ -189,7 +195,7 @@ internal static class Installer
     }
 
     /// <summary>The broker's own framework-dependent output: its exe, the dlls it links, and the two run-time json files.</summary>
-    private static void CopyBuildOutput(string dst, Action<string> say)
+    private static void CopyBuildOutput(string dst, Action<string> say, IReadOnlyList<string> buildFiles)
     {
         var src = AppContext.BaseDirectory;
         if (string.Equals(Path.GetFullPath(src).TrimEnd('\\'), Path.GetFullPath(dst).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
@@ -198,12 +204,8 @@ internal static class Installer
             return;
         }
         Directory.CreateDirectory(dst);
-        // A single-file release build is the whole broker in one exe, sitting beside the MCP server and the CLI: copy just it.
-#pragma warning disable IL3000   // an empty Location is exactly how a single-file build is told apart
-        var files = string.IsNullOrEmpty(typeof(Installer).Assembly.Location) && Environment.ProcessPath is { } self
-            ? [self]
-            : Directory.EnumerateFiles(src).Where(f => Path.GetExtension(f).ToLowerInvariant() is ".exe" or ".dll" or ".json").ToList();
-#pragma warning restore IL3000
+        // The broker and lab must both run from the protected destination, never a user-writable helper path.
+        var files = buildFiles.ToList();
         // PresentMon goes with the broker, which runs it elevated from here (a folder only administrators can write). A
         // capture still running from here would hold the file: it ends first.
         if (Path.Combine(src, FrameCapture.ExeName) is var pm && File.Exists(pm) && !files.Contains(pm, StringComparer.OrdinalIgnoreCase))

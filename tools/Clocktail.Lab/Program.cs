@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Clocktail.Lab;
+using Clocktail.Lab.Game;
 
 // clocktail-lab: the lab the MCP server's lab_test and tune_memory start. Exit codes of run: 0 pass, 4 fail, 5 inconclusive,
 // 2 the lab itself failed (no CUDA, no NVML, no such GPU), 64 a usage error.
@@ -12,6 +13,12 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
                           [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N] [--max-temp-c C]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
         clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
+        clocktail-lab game-test --job DIR         (the same, for the Quake II RTX game test)
+        clocktail-lab vk-devices                  (the ray-tracing Vulkan devices, JSON; inventory only)
+        clocktail-lab game-info --gpu-pci ID --device-id HEX --subsystem-id HEX
+                                                  (the card host's context-free PnP/CUDA/Vulkan identity proof)
+        clocktail-lab game-plan --seconds N [--seed S] [--patterns LIST] [--levers LIST] [--max-scale P] [--json]
+                                                  (the game test's script, offline: no game, no GPU)
         clocktail-lab probe [--gpu-pci ID]
         """);
     return 64;
@@ -71,6 +78,7 @@ try
         }
         case "sweep-memory":
         case "tune-uncore":
+        case "game-test":
         {
             string dir = O("job") ?? throw new ArgumentException("--job DIR is needed");
             string self = Environment.ProcessPath ?? throw new InvalidOperationException("no process path");
@@ -86,9 +94,54 @@ try
             string specJson = File.ReadAllText(Path.Combine(dir, "spec.json"));
             using var logFile = new StreamWriter(Path.Combine(dir, "sweep.log"), append: true) { AutoFlush = true };
             void Log(string line) => logFile.WriteLine($"{DateTime.Now:HH:mm:ss} {line}");
+            if (args[0] == "game-test")
+                return new GameTest(JsonSerializer.Deserialize<GameSpec>(specJson, LabJson.Options) ?? throw new InvalidDataException("spec.json is empty"), dir, self, Log).Run();
             return args[0] == "tune-uncore"
                 ? new UncoreTune(JsonSerializer.Deserialize<UncoreSpec>(specJson, LabJson.Options) ?? throw new InvalidDataException("spec.json is empty"), dir, self, Log).Run()
                 : new MemorySweep(JsonSerializer.Deserialize<SweepSpec>(specJson, LabJson.Options) ?? throw new InvalidDataException("spec.json is empty"), dir, self, Log).Run();
+        }
+        case "game-plan":
+        {
+            var plan = GameScript.Plan(new GamePlanOptions(D("seconds", 600), (int)D("seed", 1),
+                Clocktail.Domain.Game.GameCatalog.Parse(O("patterns"), Clocktail.Domain.Game.GameCatalog.AllPatterns, Clocktail.Domain.Game.GameCatalog.DefaultPatterns, "patterns"),
+                GameScript.PlayMaps.Take(3).ToList(), (int)D("max-scale", 150),
+                Clocktail.Domain.Game.GameCatalog.Parse(O("levers"), Clocktail.Domain.Game.GameCatalog.AllLevers, Clocktail.Domain.Game.GameCatalog.DefaultLevers, "levers"),
+                (uint)(D("start-w", 600) * 1000), (uint)(D("min-w", 400) * 1000), (int)D("refresh-hz", 144)));
+            if (O("json") != null) { Console.WriteLine(JsonSerializer.Serialize(plan, LabJson.Options)); return 0; }
+            double at = 0;
+            foreach (var st in plan.Steps)
+            {
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{at,7:0.00}s  {st.Index,4}  {st.Pattern,-8} {st.Name,-18} {st.Kind,-7} {st.Seconds,5:0.##}s  {st.Render.Words()}")
+                    + (st.Scene is { } sc ? (sc.Kind == Scene.Demo ? $"  [demo @{sc.Seek:0}s]" : $"  [map {sc.Map}]") : "")
+                    + (st.RtApi != null ? "  [renderer restart]" : "")
+                    + (st.Levers is { } lv ? "  {" + string.Join("; ", lv.Select(l => l.Words())) + "}" : "")
+                    + (st.Actions is { } ac && ac.Count > 0 ? "  <" + string.Join(", ", ac) + ">" : ""));
+                at += st.Seconds;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{plan.Steps.Count} steps, {plan.Nominal:0} s nominal for {plan.Seconds:0} s; levers: {string.Join(" | ", plan.Epochs)}"));
+            return 0;
+        }
+        case "game-info":
+        {
+            string pci = O("gpu-pci") ?? throw new ArgumentException("--gpu-pci is required");
+            uint deviceId = uint.Parse(O("device-id") ?? "", NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            uint subsystem = uint.Parse(O("subsystem-id") ?? "", NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            var address = Clocktail.Hw.PciAddress.Parse(pci) ?? throw new NotSupportedException("invalid PCI target");
+            Clocktail.Hw.GpuTarget.Match(Clocktail.Hw.DisplayInventory.Read(), pci, deviceId, subsystem);
+            using var cu = CudaApi.Load(); // identification only: never retain/create a CUDA context
+            int device = cu.DeviceByPci(pci);
+            if (Clocktail.Hw.PciAddress.Parse(cu.DevicePciBusId(device)) != address || cu.Attribute(device, 75) != 12 || cu.Attribute(device, 76) != 0)
+                throw new NotSupportedException("CUDA and the selected compute capability 12.0 target disagree");
+            var rt = VulkanDevices.List();
+            if (VulkanDevices.Refusal(rt, pci) is { } refused || rt.Count == 1 && rt[0].Device != deviceId >> 16)
+                throw new NotSupportedException(VulkanDevices.Refusal(rt, pci) ?? "the Vulkan PCI device ID differs from the card host");
+            Console.WriteLine(JsonSerializer.Serialize(new { verified = true, pci, major = 12, minor = 0 }, LabJson.Options));
+            return 0;
+        }
+        case "vk-devices":
+        {
+            Console.WriteLine(JsonSerializer.Serialize(VulkanDevices.List(), LabJson.Options));
+            return 0;
         }
         case "probe":
         {
@@ -111,7 +164,7 @@ catch (ArgumentException e)
     Console.Error.WriteLine(e.Message);
     return 64;
 }
-catch (Exception e) when (e is CudaException or DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or Clocktail.Hw.NvmlException or IOException)
+catch (Exception e) when (e is CudaException or DllNotFoundException or EntryPointNotFoundException or InvalidOperationException or Clocktail.Hw.NvmlException or IOException or NotSupportedException or PlatformNotSupportedException)
 {
     Console.Error.WriteLine($"{e.GetType().Name}: {e.Message}");
     return 2;
