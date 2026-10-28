@@ -54,6 +54,7 @@ internal static class PreviewRenderer
                 { labels_enabled = true, nonactivating_style = true, mouse_hit_transparent = true }));
             }
             if (view == "details") VerifyPinToggle(form, directory, state);
+            if (view == "details") VerifyCellToolTip(form, Palette.Dark, directory, state + "-dark");
             if (view == "details" && device?.Applied is { Rows.Count: > 0 }) VerifyDynamicUpdate((StatusForm)form, cache, directory, state);
             if (view == "diagnostics") VerifyDiagnostics(form, directory, state, state == "quiet");
             bool unchanged = foreground == GetForegroundWindow();
@@ -66,6 +67,7 @@ internal static class PreviewRenderer
         light.FitToWorkArea(new Rectangle(0, 0, 1920, 1200));
         light.Present(cache, "demo-gpu", state == "quiet", true, false);
         light.Show(); light.PerformLayout();
+        VerifyCellToolTip(light, Palette.Light, directory, state + "-light");
         using var lightBitmap = new Bitmap(light.ClientSize.Width, light.ClientSize.Height);
         light.DrawToBitmap(lightBitmap, light.ClientRectangle);
         lightBitmap.Save(Path.Combine(directory, $"{state}-light.png"), ImageFormat.Png);
@@ -87,6 +89,7 @@ internal static class PreviewRenderer
     private static void VerifyDynamicUpdate(StatusForm form, TrayStatusCache cache, string directory, string state)
     {
         var grid = form.Controls.Find("AppliedSettingsGrid", true).OfType<DataGridView>().Single();
+        var tooltip = ((AppliedSettingsGrid)grid).CellDetailToolTip;
         grid.CurrentCell = grid.Rows[^1].Cells[1];
         var selected = grid.CurrentCell; var rowObjects = grid.Rows.Cast<DataGridViewRow>().ToArray();
         var controls = Descendants(form).ToArray();
@@ -99,14 +102,52 @@ internal static class PreviewRenderer
         if (!cache.Accept(snapshot with { Revision = snapshot.Revision + 1, Devices = [next] })) throw new InvalidOperationException("Age fixture rejected");
         form.UpdateAges(cache, "demo-gpu"); Application.DoEvents();
         if (!controls.SequenceEqual(Descendants(form)) || handles.Any(p => p.Key.IsDisposed || p.Key.Handle != p.Value)
-            || grid.CurrentCell != selected || !rowObjects.SequenceEqual(grid.Rows.Cast<DataGridViewRow>()) || scroll.AutoScrollPosition != position)
+            || grid.CurrentCell != selected || !rowObjects.SequenceEqual(grid.Rows.Cast<DataGridViewRow>()) || scroll.AutoScrollPosition != position
+            || !ReferenceEquals(tooltip, ((AppliedSettingsGrid)grid).CellDetailToolTip))
             throw new InvalidOperationException("Age-only update changed native controls, row identity, selection or scroll.");
         form.Present(cache, "demo-gpu", state == "quiet", true, false); Application.DoEvents();
         if (!ReferenceEquals(grid, form.Controls.Find("AppliedSettingsGrid", true).Single()) || !rowObjects.SequenceEqual(grid.Rows.Cast<DataGridViewRow>())
-            || grid.CurrentCell != selected || scroll.AutoScrollPosition != position)
+            || grid.CurrentCell != selected || scroll.AutoScrollPosition != position || !ReferenceEquals(tooltip, ((AppliedSettingsGrid)grid).CellDetailToolTip))
             throw new InvalidOperationException("Data refresh discarded stable grid rows, selection or scroll.");
         File.WriteAllText(Path.Combine(directory, $"{state}-dynamic-update.json"), JsonSerializer.Serialize(new
         { age_only_tree_and_handles_preserved = true, stable_native_rows = true, selection_preserved = true, scroll_preserved = true, rows = grid.RowCount }));
+    }
+    private static void VerifyCellToolTip(Form form, Palette palette, string directory, string name)
+    {
+        var grid = form.Controls.Find("AppliedSettingsGrid", true).OfType<AppliedSettingsGrid>().FirstOrDefault();
+        if (grid == null) return;
+        if (grid.ShowCellToolTips || !grid.CellDetailToolTip.OwnerDraw) throw new InvalidOperationException("Applied settings reverted to unthemed native cell tooltips.");
+        string? detail = null;
+        if (grid.RowCount > 0)
+        {
+            var enter = typeof(DataGridView).GetMethod("OnCellMouseEnter", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var leave = typeof(DataGridView).GetMethod("OnCellMouseLeave", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            enter.Invoke(grid, [new DataGridViewCellEventArgs(0, 0)]);
+            detail = grid.CellDetailToolTip.GetToolTip(grid);
+            if (string.IsNullOrEmpty(detail) || !detail.Contains("Identity: ") || !detail.Contains("Reference canonical: ") || !detail.Contains("Coverage:"))
+                throw new InvalidOperationException("Tooltip lost its existing canonical/provenance payload.");
+            leave.Invoke(grid, [new DataGridViewCellEventArgs(0, 0)]);
+            if (!string.IsNullOrEmpty(grid.CellDetailToolTip.GetToolTip(grid))) throw new InvalidOperationException("Tooltip survives leaving its cell.");
+        }
+        foreach (bool highContrast in new[] { false, true })
+        {
+            var expected = highContrast ? (Surface: SystemColors.Info, Ink: SystemColors.InfoText, Rule: SystemColors.WindowText)
+                : (Surface: palette.Secondary, Ink: palette.Ink, Rule: palette.Rule);
+            if (grid.CellToolTipColors(highContrast) != expected) throw new InvalidOperationException("Tooltip text/surface/border colors ignore the selected palette or Windows high contrast.");
+            using var sample = new Bitmap(48, 32);
+            using (var graphics = Graphics.FromImage(sample)) grid.PaintCellToolTip(graphics, new Rectangle(Point.Empty, sample.Size), "", grid.Font, highContrast);
+            if (sample.GetPixel(4, 4).ToArgb() != expected.Surface.ToArgb() || sample.GetPixel(0, 0).ToArgb() != expected.Rule.ToArgb())
+                throw new InvalidOperationException("Tooltip draw path did not paint its themed surface and border.");
+        }
+        if (detail != null)
+        {
+            var size = TextRenderer.MeasureText(detail, grid.Font, new Size(680, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+            using var painted = new Bitmap(size.Width + 4, size.Height + 4);
+            using (var graphics = Graphics.FromImage(painted)) grid.PaintCellToolTip(graphics, new Rectangle(Point.Empty, painted.Size), detail, grid.Font, false);
+            painted.Save(Path.Combine(directory, $"{name}-tooltip-paint.png"), ImageFormat.Png);
+        }
+        File.WriteAllText(Path.Combine(directory, $"{name}-tooltip-check.json"), JsonSerializer.Serialize(new
+        { native_cell_tooltips_disabled = true, palette_draw_path_checked = true, windows_high_contrast_colors_checked = true, payload_and_cell_exit_checked = detail != null }));
     }
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
