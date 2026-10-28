@@ -353,7 +353,8 @@ public class GameTests
         Assert.Equal("1", Value("maxclients"));
         Assert.Equal("1", Value("cheats"));
         Assert.Equal(["+demo", "q2demo1"], a[^2..]);
-        Assert.Equal(@"C:\Games\Q2RTX", psi.WorkingDirectory);
+        // Windows paths: elsewhere Path.GetDirectoryName does not split on a backslash.
+        if (OperatingSystem.IsWindows()) Assert.Equal(@"C:\Games\Q2RTX", psi.WorkingDirectory);
     }
 
     [Fact]
