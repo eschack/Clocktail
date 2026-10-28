@@ -121,17 +121,21 @@ internal sealed class TrayContext : ApplicationContext
                 devices = _cache.Snapshot?.Devices.Select(g => new { g.StableId, g.Name }),
                 controls = d?.Refresh?.Controls is { } c ? new { c.Settings, c.Comparison, c.Error } : null,
                 lifecycle = d?.Refresh?.Restoration,
-                fullAge = Presentation.FullAge(d),
-                controlsAge = Presentation.Age(d?.Refresh?.Controls?.At ?? (_cache.Snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"),
                 telemetry = new { d?.Telemetry?.TempC, d?.Telemetry?.Watts, d?.Telemetry?.UtilPercent },
-                telemetryAge = _details.Visible ? Presentation.Age(d?.Telemetry?.At, "Telemetry sampled") : null,
                 curve = d?.Verification is { } v ? new { v.Settings, v.Curve, v.Comparison, v.Error } : null,
+                applied = d?.Applied is { } a ? new { a.Generation, a.Complete, a.OmittedCount, a.Coverage, rows = a.Rows.Select(r => new
+                    { r.Id, r.Kind, r.Key, r.Child, r.Group, r.Label, r.Type, r.Saved, r.SavedValue, r.DailyEligible, r.Suspended, r.CurrentValue, r.LastValue, r.SampleGeneration, r.Error, r.ReferenceValue, r.Reference, r.Modification, r.Daily, r.ReadClass, r.Context }) } : null,
                 diagnostics = _details.Visible && _details.DiagnosticsExpanded ? StatusForm.Diagnostics(_cache, d) : null });
             if (signature != _lastPresentation)
             {
                 _lastPresentation = signature;
                 if (_hover.Visible) _hover.Present(_cache, _gpuId, _quiet, _demo, _busy);
                 if (_details.Visible) _details.Present(_cache, _gpuId, _quiet, _demo, _busy);
+            }
+            else
+            {
+                if (_hover.Visible) _hover.UpdateAges(_cache, _gpuId);
+                if (_details.Visible) _details.UpdateAges(_cache, _gpuId);
             }
         }
         _icon.Text = "Clocktail · " + (_quiet ? "Quiet" : state.ToString());

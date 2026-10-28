@@ -230,8 +230,8 @@ public sealed class TrayRefreshControllerTests
             return new(true, Result: JsonSerializer.SerializeToElement(await fake.Fetch(request.Kind == "verify" ? StatusFetchKind.Full : StatusFetchKind.Cached, request.GpuId, token)));
         });
         using var scheduler = new TrayRefreshController(source, clock); await scheduler.Tick();
-        Assert.Equal(new[] { "2", "1" }, calls.Select(r => r.Value)); Assert.Contains("Older broker", scheduler.Notice);
-        clock.Advance(3600); await scheduler.Tick(); Assert.Equal(2, calls.Count);
+        Assert.Equal(new[] { "3", "2", "1" }, calls.Select(r => r.Value)); Assert.Contains("Older broker", scheduler.Notice);
+        clock.Advance(3600); await scheduler.Tick(); Assert.Equal(3, calls.Count);
         scheduler.CheckNow(); await scheduler.Tick();
         Assert.Equal("verify", calls.Last().Kind); Assert.Equal("1", calls.Last().Value);
         Assert.DoesNotContain(calls, r => r.Kind == "light");
@@ -270,5 +270,30 @@ public sealed class TrayRefreshControllerTests
         var incomplete = new BrokerTrayStatusSource((_, _) => Task.FromResult<BrokerResponse?>(new(true,
             Result: JsonSerializer.SerializeToElement(snapshot with { Capabilities = ["light-status", "full-verification"] }))));
         await Assert.ThrowsAsync<InvalidDataException>(() => incomplete.Fetch(StatusFetchKind.Cached, null, default));
+    }
+    [Fact]
+    public async Task Protocol_two_fallback_keeps_automatic_refresh_with_an_explicit_fixed_table_notice()
+    {
+        var clock = new TrayTestClock(); var fake = new Source(clock); var calls = new List<BrokerRequest>();
+        var source = new BrokerTrayStatusSource(async (request, token) =>
+        {
+            calls.Add(request);
+            var kind = request.Kind == "cached" ? StatusFetchKind.Cached : request.Kind == "light" ? StatusFetchKind.Light : StatusFetchKind.Full;
+            return new(true, Result: JsonSerializer.SerializeToElement(await fake.Fetch(kind, request.GpuId, token)));
+        });
+        using var scheduler = new TrayRefreshController(source, clock); await scheduler.Tick();
+        Assert.Equal(new[] { "3", "2" }, calls.Take(2).Select(r => r.Value)); Assert.False(scheduler.Legacy);
+        Assert.Contains("fixed", scheduler.Notice); clock.Advance(15); await scheduler.Tick();
+        Assert.Contains(calls, r => r.Kind == "light" && r.Value == "2"); Assert.DoesNotContain(calls, r => r.Kind == "rows");
+    }
+    [Fact]
+    public async Task Leaving_quiet_while_a_request_is_inflight_keeps_one_immediate_catchup_due()
+    {
+        var clock = new TrayTestClock(); var source = new Source(clock);
+        using var scheduler = new TrayRefreshController(source, clock); await scheduler.Tick(); clock.Advance(15);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); source.Wait = (_, _) => gate.Task;
+        var pending = scheduler.Tick(); scheduler.SetQuiet(true); scheduler.SetQuiet(false); gate.SetResult(); await pending;
+        Assert.Equal(TimeSpan.Zero, scheduler.Delay); int calls = source.Calls.Count; source.Wait = null;
+        await scheduler.Tick(); Assert.Equal(calls + 1, source.Calls.Count); Assert.Equal(1, source.FullCount);
     }
 }

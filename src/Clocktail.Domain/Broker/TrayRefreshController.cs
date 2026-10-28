@@ -5,6 +5,7 @@ public interface ITrayStatusSource
 {
     Task<TrayStatus?> Fetch(StatusFetchKind kind, string? gpuId, CancellationToken token);
     string? CompatibilityNotice => null;
+    void SetPaused(bool paused) { }
 }
 
 /// <summary>One request at a time. The desktop timer merely wakes this monotonic, headless-testable policy.</summary>
@@ -14,7 +15,7 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
     private readonly TimeProvider _clock = time ?? TimeProvider.System;
     private readonly CancellationTokenSource _stop = new();
     private long _due, _inventoryDue;
-    private int _backoff = 15, _selection, _manualSerial;
+    private int _backoff = 15, _selection, _manualSerial, _wakeSerial;
     private bool _quiet, _locked, _disposed, _manual, _discover = true, _continuity, _catchUp;
     public TrayStatusCache Cache { get; } = new();
     public string? GpuId { get; private set; }
@@ -38,6 +39,7 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
     {
         if (id == GpuId) return;
         GpuId = id; _selection++;
+        source.SetPaused(true); // finish an already-sent call, but stop pages for the old selection
         if (Legacy) { Changed?.Invoke(); return; }
         _discover = true; _continuity = true;
         Cache.Disconnect("Refreshing selected GPU"); DueNow(); Changed?.Invoke();
@@ -46,17 +48,19 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
     {
         if (_quiet == value || _disposed) return;
         _quiet = value;
-        if (!value) { _catchUp = true; DueNow(); }
+        source.SetPaused(Paused);
+        if (!value) { _catchUp = true; _wakeSerial++; DueNow(); }
         Changed?.Invoke();
     }
     public void SetLocked(bool value)
     {
         if (_locked == value || _disposed) return;
         _locked = value;
-        if (!value) { _continuity = true; _catchUp = true; DueNow(); }
+        source.SetPaused(Paused);
+        if (!value) { _continuity = true; _catchUp = true; _wakeSerial++; DueNow(); }
         Changed?.Invoke();
     }
-    public void Resume() { if (_disposed) return; _continuity = true; _catchUp = true; DueNow(); }
+    public void Resume() { if (_disposed) return; _continuity = true; _catchUp = true; _wakeSerial++; DueNow(); }
     private void DueNow() => _due = _clock.GetTimestamp();
     private void Schedule(TimeSpan delay) => _due = _clock.GetTimestamp() + (long)(delay.TotalSeconds * _clock.TimestampFrequency);
     private bool Paused => _disposed || _quiet || _locked;
@@ -69,9 +73,11 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
     public async Task Tick()
     {
         if (Paused || Busy || Delay is null || Delay > TimeSpan.Zero) return;
+        source.SetPaused(false);
         Busy = true;
         int selection = _selection;
         int manual = _manualSerial;
+        int wake = _wakeSerial;
         bool discovered = false;
         try
         {
@@ -119,7 +125,7 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
             _backoff = 15;
             Schedule(RefreshEvery);
         }
-        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested || Paused || selection != _selection) { }
         catch (Exception e) when (e is IOException or InvalidOperationException or TimeoutException or System.Text.Json.JsonException)
         {
             if (!_disposed) { Cache.Disconnect(e.Message); _discover = true; Schedule(TimeSpan.FromSeconds(_backoff)); _backoff = Math.Min(60, _backoff * 2); }
@@ -129,7 +135,7 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
             Busy = false;
             if (!_disposed)
             {
-                if (selection != _selection || manual != _manualSerial) DueNow();
+                if (selection != _selection || manual != _manualSerial || wake != _wakeSerial) DueNow();
                 Changed?.Invoke();
             }
         }
@@ -155,5 +161,5 @@ public sealed class TrayRefreshController(ITrayStatusSource source, TimeProvider
         Changed?.Invoke();
         return true;
     }
-    public void Dispose() { if (_disposed) return; _disposed = true; _stop.Cancel(); _stop.Dispose(); }
+    public void Dispose() { if (_disposed) return; _disposed = true; source.SetPaused(true); _stop.Cancel(); _stop.Dispose(); }
 }

@@ -16,13 +16,13 @@ public sealed record StatusRefresh(long Generation, long? VerifiedGeneration, Re
 public sealed record StatusDevice(string StableId, string Name, string? Driver, string? Vbios,
     DailyProfile? SavedDaily, bool SavedDailyKnown, bool ExperimentKnown, string? SessionGame,
     string? TrialChange, bool OperationInProgress, StatusVerification? Verification,
-    FlightSample? Telemetry, IReadOnlyList<string> Errors, StatusRefresh? Refresh = null);
+    FlightSample? Telemetry, IReadOnlyList<string> Errors, StatusRefresh? Refresh = null, AppliedSettings? Applied = null);
 
 /// <summary>A request snapshot, not a subscription. Revision orders responses within one broker instance only.</summary>
 public sealed record TrayStatus(int Version, string InstanceId, long Revision, DateTimeOffset CapturedAt,
     IReadOnlyList<StatusDevice> Devices, IReadOnlyList<string>? Capabilities = null)
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
     public static readonly TimeSpan FreshFor = TimeSpan.FromSeconds(30);
 
     public static TrayState State(StatusDevice? device, bool connected, DateTimeOffset capturedAt, DateTimeOffset now)
@@ -72,16 +72,17 @@ public sealed class TrayStatusCache
     private readonly HashSet<string> _retiredInstances = new();
     public bool Accept(TrayStatus snapshot)
     {
-        if (snapshot.Version is not (1 or TrayStatus.CurrentVersion)) { Disconnect("Broker status version is unsupported; update the broker and tray together."); return false; }
+        if (snapshot.Version is not (1 or 2 or TrayStatus.CurrentVersion)) { Disconnect("Broker status version is unsupported; update the broker and tray together."); return false; }
         if (string.IsNullOrWhiteSpace(snapshot.InstanceId) || snapshot.Revision < 1 || snapshot.Devices == null || snapshot.Devices.Count > 32
             || snapshot.Devices.Select(d => d?.StableId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != snapshot.Devices.Count
             || snapshot.Devices.Any(d => d == null || string.IsNullOrWhiteSpace(d.StableId) || d.Name == null || d.Errors == null
                 || d.SavedDaily is { Writes: null }
-                || snapshot.Version == 2 && (d.Refresh == null || d.Refresh.Restoration == null || d.Refresh.Generation < 0
+                || snapshot.Version >= 2 && (d.Refresh == null || d.Refresh.Restoration == null || d.Refresh.Generation < 0
                     || d.Refresh.VerifiedGeneration is { } verified && (verified < 0 || verified > d.Refresh.Generation)
                     || d.Refresh.Restoration.Generation < 0 || !Enum.IsDefined(d.Refresh.Restoration.Startup) || !Enum.IsDefined(d.Refresh.Restoration.Recovery)
-                    || d.Refresh.Controls is { } check && (!Enum.IsDefined(check.Comparison) || check.Settings == null || check.Settings.Count > 64 || check.Settings.Any(s => s == null || s.Kind == null || s.Key == null)))
-                || d.Verification is { } v && (!Enum.IsDefined(v.Comparison) || v.Settings == null || v.Curve == null || v.Settings.Count > 65 || v.Curve.Count > 255
+                    || d.Refresh.Controls is { } check && (!Enum.IsDefined(check.Comparison) || check.Settings == null || check.Settings.Count > (snapshot.Version == 3 ? 144 : 64) || check.Settings.Any(s => s == null || s.Kind == null || s.Key == null)))
+                || snapshot.Version == 3 && !AppliedValid(d.Applied, snapshot.InstanceId, d.StableId, d.Refresh!.Generation)
+                || d.Verification is { } v && (!Enum.IsDefined(v.Comparison) || v.Settings == null || v.Curve == null || v.Settings.Count > (snapshot.Version == 3 ? 145 : 65) || v.Curve.Count > 255
                     || v.Settings.Any(s => s == null || s.Kind == null || s.Key == null)
                     || v.Curve.Any(p => p == null || !double.IsFinite(p.Millivolts) || !double.IsFinite(p.EffectiveMhz) || p.StockMhz is { } stock && !double.IsFinite(stock)))))
         { Disconnect("The broker returned malformed status data."); return false; }
@@ -102,4 +103,12 @@ public sealed class TrayStatusCache
         return true;
     }
     public void Disconnect(string error) { Connected = false; Error = error; }
+    private static bool AppliedValid(AppliedSettings? a, string instance, string gpuId, long generation) => a != null && a.InstanceId == instance && a.GpuId == gpuId && a.Generation == generation
+        && a.CandidateCount >= 0 && a.OmittedCount >= 0 && a.Rows != null && a.Coverage != null && a.Coverage.Count <= 96
+        && (a.TotalRows == null || a.TotalRows >= a.Rows.Count && a.TotalRows <= AppliedCatalog.MaxRows)
+        && a.Rows.Count <= AppliedCatalog.MaxRows && a.Rows.All(r => r != null && r.Id != null && r.Kind != null && r.Key != null && r.Label != null
+            && Enum.IsDefined(r.Type) && Enum.IsDefined(r.Reference) && Enum.IsDefined(r.Modification) && Enum.IsDefined(r.Daily) && Enum.IsDefined(r.ReadClass)
+            && (r.CurrentValue?.Length ?? 0) <= AppliedCatalog.MaxValueChars && (r.SavedValue?.Length ?? 0) <= AppliedCatalog.MaxValueChars
+            && (r.LastValue?.Length ?? 0) <= AppliedCatalog.MaxValueChars && (r.ReferenceValue?.Length ?? 0) <= AppliedCatalog.MaxValueChars
+            && (r.SampleGeneration == null || r.SampleGeneration >= 0 && r.SampleGeneration <= generation)) && a.Rows.Select(r => r.Id).Distinct().Count() == a.Rows.Count;
 }
