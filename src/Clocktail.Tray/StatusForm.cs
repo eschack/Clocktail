@@ -12,6 +12,9 @@ internal sealed class StatusForm : Form
     private bool _pinned;
     private bool _building;
     private bool _resizing;
+    private string? _structure;
+    private readonly List<Action> _bindings = [];
+    private Action<TrayStatusCache, StatusDevice?, bool, bool>? _refreshContext;
     private Button? _pinButton;
     private Rectangle? _workArea;
     public event Action? CheckRequested;
@@ -99,34 +102,62 @@ internal sealed class StatusForm : Form
 
     public void Present(TrayStatusCache cache, string? gpuId, bool quiet, bool demo, bool busy)
     {
-        var priorScroll = _scroll.AutoScrollPosition;
-        bool gridFocused = _settingsGrid?.ContainsFocus == true;
-        if (_settingsGrid?.Parent is { } parent) parent.Controls.Remove(_settingsGrid);
-        using var redraw = new ScrollLayoutUpdate(_scroll);
-        _building = true;
-        SuspendLayout();
-        _content.SuspendLayout();
-        foreach (Control old in _content.Controls.Cast<Control>().ToArray()) old.Dispose();
-        _content.Controls.Clear();
-        _content.RowStyles.Clear();
-        _content.RowCount = 0;
         var snapshot = cache.Snapshot;
         var d = snapshot?.Devices.FirstOrDefault(g => g.StableId == gpuId) ?? snapshot?.Devices.FirstOrDefault();
         var state = TrayStatus.State(d, cache.Connected, snapshot?.CapturedAt ?? DateTimeOffset.MinValue, DateTimeOffset.UtcNow);
         var description = Presentation.Describe(state);
+        string structure = string.Join("|", d?.StableId, snapshot?.Version, demo, DiagnosticsExpanded,
+            d?.Applied != null, d?.Applied?.Rows.Count == 0, cache.CompatibilityNotice, cache.Error,
+            string.Join(";", snapshot?.Devices.Select(g => g.StableId + ":" + g.Name) ?? []));
+        if (_structure == structure && _refreshContext != null)
+        {
+            var position = _scroll.AutoScrollPosition;
+            using var update = new ScrollLayoutUpdate(_scroll);
+            _building = true;
+            try
+            {
+                _refreshContext(cache, d, quiet, busy);
+                foreach (var binding in _bindings) binding();
+                UpdateAges(cache, gpuId);
+                _content.PerformLayout();
+            }
+            finally { _building = false; }
+            if (!_hover) _scroll.AutoScroll = true;
+            update.LayoutNow();
+            if (_scroll.AutoScroll) _scroll.AutoScrollPosition = new Point(-position.X, -position.Y);
+            return;
+        }
+        _structure = structure;
+        var priorScroll = _scroll.AutoScrollPosition;
+        bool gridFocused = _settingsGrid?.ContainsFocus == true;
+        using var redraw = new ScrollLayoutUpdate(_scroll);
+        _building = true;
+        SuspendLayout();
+        _content.SuspendLayout();
+        if (_settingsGrid?.Parent is { } parent) parent.Controls.Remove(_settingsGrid);
+        _bindings.Clear();
+        _controlsAge = _fullAge = _telemetryAge = _coverageAge = null;
+        _refreshContext = (nextCache, nextDevice, nextQuiet, nextBusy) =>
+        { cache = nextCache; snapshot = cache.Snapshot; d = nextDevice; quiet = nextQuiet; busy = nextBusy;
+            state = TrayStatus.State(d, cache.Connected, snapshot?.CapturedAt ?? DateTimeOffset.MinValue, DateTimeOffset.UtcNow);
+            description = Presentation.Describe(state); };
+        foreach (Control old in _content.Controls.Cast<Control>().ToArray()) old.Dispose();
+        _content.Controls.Clear();
+        _content.RowStyles.Clear();
+        _content.RowCount = 0;
         var header = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Margin = Padding.Empty };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var brand = Row();
         brand.WrapContents = false;
         brand.Controls.Add(new GlyphView(Glyph.Gauge, _palette.Accent, 27) { BackColor = _palette.AccentSurface, AccessibleName = "Clocktail gauge" });
-        brand.Controls.Add(Label("Clocktail", 16, false, 3));
-        if (!_hover) brand.Controls.Add(Label("Tray", 11, true, 5));
+        brand.Controls.Add(Bound(() => "Clocktail", 16, false, 3));
+        if (!_hover) brand.Controls.Add(Bound(() => "Tray", 11, true, 5));
         var windowControls = Row();
         windowControls.WrapContents = false;
         header.Controls.Add(brand, 0, 0);
         header.Controls.Add(windowControls, 1, 0);
-        if (_hover) windowControls.Controls.Add(Label(cache.Connected ? "Last check OK" : "Unavailable", 11, true, 5));
+        if (_hover) windowControls.Controls.Add(Bound(() => cache.Connected ? "Last check OK" : "Unavailable", 11, true, 5));
         if (!_hover)
         {
             _pinButton = Button("", TogglePin, Glyph.Pin);
@@ -144,9 +175,9 @@ internal sealed class StatusForm : Form
             windowControls.Controls.Add(close);
         }
         Add(header);
-        Add(Label(d?.Name ?? "No GPU status", _hover ? 13 : 18, false, 12));
-        if (demo) Add(Label("Synthetic preview · No GPU connection", 11, true));
-        else Add(Label(cache.Connected ? "Broker answered last check · Read-only companion" : "Broker disconnected", 11, true));
+        Add(Bound(() => d?.Name ?? "No GPU status", _hover ? 13 : 18, false, 12));
+        if (demo) Add(Bound(() => "Synthetic preview · No GPU connection", 11, true));
+        else Add(Bound(() => cache.Connected ? "Broker answered last check · Read-only companion" : "Broker disconnected", 11, true));
 
         if (!_hover && snapshot is { Devices.Count: > 1 })
         {
@@ -159,19 +190,23 @@ internal sealed class StatusForm : Form
 
         var band = Stack();
         bool matched = state == TrayState.DailyMatched;
+        _bindings.Insert(0, () => matched = state == TrayState.DailyMatched);
         band.BackColor = matched ? _palette.AccentSurface : _palette.Secondary;
         band.Padding = new Padding(12);
         band.Margin = new Padding(0, 16, 0, 14);
-        var title = Label(_hover ? state == TrayState.DailyMatched ? "Daily  ·  Controls match" : description.Title : description.Title, _hover ? 18 : 13, false);
+        var title = Bound(() => _hover ? state == TrayState.DailyMatched ? "Daily  ·  Controls match" : description.Title : description.Title, _hover ? 18 : 13, false);
         if (matched) title.ForeColor = _palette.Accent;
         var statusLine = Row();
-        statusLine.Controls.Add(new GlyphView(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted, 20));
+        var statusGlyph = new GlyphView(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted, 20);
+        statusLine.Controls.Add(statusGlyph);
+        _bindings.Add(() => { band.BackColor = matched ? _palette.AccentSurface : _palette.Secondary; title.ForeColor = matched ? _palette.Accent : _palette.Ink;
+            statusGlyph.UpdateGlyph(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted); });
         var statusText = Stack();
         title.MaximumSize = new Size(_hover ? 260 : 440, 0);
         statusText.Controls.Add(title);
         if (!_hover)
         {
-            var detail = Label(description.Detail, 11, true, 3);
+            var detail = Bound(() => description.Detail, 11, true, 3);
             detail.MaximumSize = new Size(440, 0);
             statusText.Controls.Add(detail);
         }
@@ -184,62 +219,64 @@ internal sealed class StatusForm : Form
             foreach (var control in Presentation.Rows.Take(3))
             {
                 var column = Stack();
-                column.Controls.Add(Label(control.Label.Replace(" offset", ""), 11, true));
-                column.Controls.Add(Label(Presentation.Applied(d, control.Kind, control.Key), 12, false, 4));
+                column.Controls.Add(Bound(() => control.Label.Replace(" offset", ""), 11, true));
+                column.Controls.Add(Bound(() => Presentation.Applied(d, control.Kind, control.Key), 12, false, 4));
                 offsets.Controls.Add(column);
             }
             Add(offsets);
             var readings = Row(); readings.Margin = new Padding(0, 12, 0, 0);
             readings.Controls.Add(new GlyphView(Glyph.Thermometer, _palette.Muted, 16));
-            readings.Controls.Add(Label($"{d?.Telemetry?.TempC?.ToString("0") ?? "—"} °C GPU", 11, true));
+            readings.Controls.Add(Bound(() => $"{d?.Telemetry?.TempC?.ToString("0") ?? "—"} °C GPU", 11, true));
             readings.Controls.Add(new GlyphView(Glyph.Zap, _palette.Muted, 16) { Margin = new Padding(10, 0, 4, 0) });
-            readings.Controls.Add(Label($"{d?.Telemetry?.Watts?.ToString("0") ?? "—"} W board", 11, true));
+            readings.Controls.Add(Bound(() => $"{d?.Telemetry?.Watts?.ToString("0") ?? "—"} W board", 11, true));
             Add(readings);
-            Add(Label($"Power limit: {Presentation.Applied(d, "power", "fe")}", 11, true, 3));
+            Add(Bound(() => $"Power limit: {Presentation.Applied(d, "power", "fe")}", 11, true, 3));
         }
         else
         {
             var live = Grid(3);
             string[] names = ["GPU temperature", "Board power", "GPU activity"];
-            string[] values = [$"{d?.Telemetry?.TempC?.ToString("0") ?? "—"} °C", $"{d?.Telemetry?.Watts?.ToString("0") ?? "—"} W", d?.Telemetry?.UtilPercent is { } util ? $"{util}%" : "—"];
             for (int i = 0; i < 3; i++)
             {
-                var col = Stack(); col.Controls.Add(Label(names[i], 11, true)); col.Controls.Add(Label(values[i], 25, false, 5)); live.Controls.Add(col);
+                int index = i;
+                var col = Stack(); col.Controls.Add(Bound(() => names[index], 11, true)); col.Controls.Add(Bound(() => TelemetryValues(d)[index], 25, false, 5)); live.Controls.Add(col);
             }
             Add(live);
-            _telemetryAge = Label(Presentation.Age(d?.Telemetry?.At, "Telemetry sampled"), 11, true, 3); Add(_telemetryAge);
+            _telemetryAge = Bound(() => Presentation.Age(d?.Telemetry?.At, "Telemetry sampled"), 11, true, 3); Add(_telemetryAge);
             var tabs = new QuietTabControl(_palette) { Dock = DockStyle.Top, Height = 264, AccessibleName = "Settings view", Margin = new Padding(0, 16, 0, 8) };
             var settings = new TabPage("Applied settings") { BackColor = _palette.Surface, ForeColor = _palette.Ink, Padding = new Padding(8), AutoScroll = false };
             if (d?.Applied is { } applied && snapshot?.Version == 3)
             {
                 _settingsGrid ??= new(_palette);
-                _settingsGrid.UpdateRows(applied, d.SavedDailyKnown); settings.Controls.Add(_settingsGrid);
+                _settingsGrid.UpdateRows(applied, d.SavedDailyKnown, d.Refresh?.MeasurementBusy == true); settings.Controls.Add(_settingsGrid);
                 tabs.Height = Math.Max(264, _settingsGrid.Height + settings.Padding.Vertical + 35);
                 EventHandler resizeGrid = (_, _) =>
                 {
                     if (CurveSelected) return;
                     tabs.Height = Math.Max(264, _settingsGrid.Height + settings.Padding.Vertical + 35);
-                    if (!_building && !_resizing && IsHandleCreated) { using var update = new ScrollLayoutUpdate(_scroll); ResizeToContent(update); }
+                    // Routine growth uses the outer scroll area without moving the window.
                 };
                 _settingsGrid.SizeChanged += resizeGrid;
                 tabs.Disposed += (_, _) => _settingsGrid.SizeChanged -= resizeGrid;
-                if (applied.Rows.Count == 0) settings.Controls.Add(Label(applied.Complete ? "No saved or confirmed modified settings" : "Settings discovery is incomplete · see coverage below", 12, true, 12));
+                if (applied.Rows.Count == 0) settings.Controls.Add(Bound(() => applied.Complete ? "No saved or confirmed modified settings" : "Settings discovery is incomplete · see coverage below", 12, true, 12));
             }
             else
             {
                 var table = Grid(3); table.Dock = DockStyle.Top;
-                foreach (var heading in new[] { "Control", "Applied (readback)", "Saved daily" }) table.Controls.Add(Label(heading, 11, true));
+                foreach (var heading in new[] { "Control", "Applied (readback)", "Saved daily" }) table.Controls.Add(Bound(() => heading, 11, true));
                 foreach (var control in Presentation.Rows)
                 {
-                    table.Controls.Add(Label(control.Label, 11, true, 13));
-                    table.Controls.Add(Label(Presentation.Applied(d, control.Kind, control.Key), 12, false, 13));
-                    table.Controls.Add(Label(Presentation.Saved(d, control.Kind, control.Key), 11, true, 13));
+                    table.Controls.Add(Bound(() => control.Label, 11, true, 13));
+                    table.Controls.Add(Bound(() => Presentation.Applied(d, control.Kind, control.Key), 12, false, 13));
+                    table.Controls.Add(Bound(() => Presentation.Saved(d, control.Kind, control.Key), 11, true, 13));
                 }
                 settings.Controls.Add(table);
                 tabs.Height = Math.Max(264, table.GetPreferredSize(new Size(500, 0)).Height + settings.Padding.Vertical + 35);
             }
             var plot = new TabPage("V/F curve") { BackColor = _palette.Surface, ForeColor = _palette.Ink };
-            plot.Controls.Add(new CurvePanel(d?.Verification?.Curve ?? [], _palette) { Dock = DockStyle.Fill });
+            var curvePanel = new CurvePanel(d?.Verification?.Curve ?? [], _palette) { Dock = DockStyle.Fill };
+            plot.Controls.Add(curvePanel);
+            _bindings.Add(() => curvePanel.UpdatePoints(d?.Verification?.Curve ?? []));
             tabs.TabPages.Add(settings); tabs.TabPages.Add(plot);
             tabs.SelectedIndex = CurveSelected ? 1 : 0;
             if (CurveSelected && d?.Applied != null) tabs.Height = 280;
@@ -253,23 +290,34 @@ internal sealed class StatusForm : Form
             Add(tabs);
             if (d?.Applied is { } inventory)
             {
-                _coverageAge = Label(Coverage(inventory), 11, true, 3); _coverageAge.AccessibleDescription = string.Join("\n", inventory.Coverage); Add(_coverageAge);
-                Add(Label("New external changes in unscanned controls are found at the next full check. Double-click a row for source and canonical details.", 11, true, 4));
+                _coverageAge = Bound(() => Coverage(d!.Applied!), 11, true, 3); _coverageAge.AccessibleDescription = string.Join("\n", inventory.Coverage); Add(_coverageAge);
+                Add(Bound(() => "New external changes in unscanned controls are found at the next full check. Double-click a row for source and canonical details.", 11, true, 4));
             }
-            else Add(Label("Fixed legacy table · full saved/modified settings coverage requires a newer broker.", 11, true, 3));
+            else Add(Bound(() => "Fixed legacy table · full saved/modified settings coverage requires a newer broker.", 11, true, 3));
             var session = Row(); session.Margin = new Padding(0, 6, 0, 0);
-            session.Controls.Add(new GlyphView(d?.ExperimentKnown == true && d.TrialChange == null ? Glyph.CircleCheck : Glyph.Attention, _palette.Muted, 16));
-            session.Controls.Add(Label(d?.ExperimentKnown != true ? "Trial status unavailable" : d.TrialChange != null ? $"Temporary trial: {d.TrialChange}" : "No temporary trial recorded", 11, true));
+            var trialGlyph = new GlyphView(d?.ExperimentKnown == true && d.TrialChange == null ? Glyph.CircleCheck : Glyph.Attention, _palette.Muted, 16);
+            session.Controls.Add(trialGlyph);
+            _bindings.Add(() => trialGlyph.UpdateGlyph(d?.ExperimentKnown == true && d.TrialChange == null ? Glyph.CircleCheck : Glyph.Attention, _palette.Muted));
+            session.Controls.Add(Bound(() => d?.ExperimentKnown != true ? "Trial status unavailable" : d.TrialChange != null ? $"Temporary trial: {d.TrialChange}" : "No temporary trial recorded", 11, true));
             Add(session);
-            Add(Label(d?.SavedDailyKnown != true ? "Daily restoration status unavailable" : d.SavedDaily == null ? "No saved daily profile" : d.SavedDaily.Suspended ? "Daily restoration suspended"
+            Add(Bound(() => d?.SavedDailyKnown != true ? "Daily restoration status unavailable" : d.SavedDaily == null ? "No saved daily profile" : d.SavedDaily.Suspended ? "Daily restoration suspended"
                 : d.Refresh is { } restoration ? $"Startup restoration: {restoration.Restoration.Startup} · Recovery: {restoration.Restoration.Recovery}" : "Daily restoration configured · outcome unconfirmed", 11, true, 4));
             var actions = Row(); actions.Margin = new Padding(0, 16, 0, 8);
             var check = Button(busy ? "Checking…" : "Check now", () => CheckRequested?.Invoke(), Glyph.Refresh);
             check.Name = "CheckNowButton";
-            check.Enabled = !busy && !quiet;
-            check.AccessibleDescription = quiet ? "Unavailable while benchmark quiet mode is enabled." : busy ? "A status check is already in progress." : "Verify the selected GPU settings.";
+            check.Enabled = !busy && !quiet && d?.Refresh?.MeasurementBusy != true;
+            check.AccessibleDescription = d?.Refresh?.MeasurementBusy == true ? "Measurement running: verification paused. Current readback is unconfirmed." : quiet ? "Unavailable while benchmark quiet mode is enabled." : busy ? "A status check is already in progress." : "Verify the selected GPU settings.";
+            _bindings.Add(() =>
+            {
+                check.Text = busy ? "Checking…" : "Check now";
+                check.Enabled = !busy && !quiet && d?.Refresh?.MeasurementBusy != true;
+                check.AccessibleDescription = d?.Refresh?.MeasurementBusy == true ? "Measurement running: verification paused. Current readback is unconfirmed."
+                    : quiet ? "Unavailable while benchmark quiet mode is enabled." : busy ? "A status check is already in progress." : "Verify the selected GPU settings.";
+            });
             actions.Controls.Add(check);
-            actions.Controls.Add(Button(quiet ? "Leave quiet mode" : "Quiet for benchmark", () => QuietRequested?.Invoke(), Glyph.Moon));
+            var quietButton = Button(quiet ? "Leave quiet mode" : "Quiet for benchmark", () => QuietRequested?.Invoke(), Glyph.Moon);
+            actions.Controls.Add(quietButton);
+            _bindings.Add(() => { quietButton.Text = quiet ? "Leave quiet mode" : "Quiet for benchmark"; quietButton.AccessibleName = quietButton.Text; });
             var diagnostics = Button(DiagnosticsExpanded ? "Hide diagnostics" : "Diagnostics", () => { DiagnosticsExpanded = !DiagnosticsExpanded; Present(cache, gpuId, quiet, demo, busy); }, DiagnosticsExpanded ? Glyph.ChevronUp : Glyph.ChevronDown);
             diagnostics.Name = "DiagnosticsToggleButton";
             diagnostics.TextImageRelation = TextImageRelation.TextBeforeImage;
@@ -277,14 +325,16 @@ internal sealed class StatusForm : Form
             Add(actions);
             if (DiagnosticsExpanded)
             {
-                Add(DiagnosticsBlock(Diagnostics(cache, d)));
+                var diagnosticsBlock = DiagnosticsBlock(Diagnostics(cache, d)); Add(diagnosticsBlock);
+                var diagnosticsText = (TextBox)diagnosticsBlock.Controls[0];
+                _bindings.Add(() => { string text = Diagnostics(cache, d).TrimEnd(); if (diagnosticsText.Text != text) diagnosticsText.Text = text; });
             }
         }
-        _controlsAge = Label(Presentation.Age(d?.Refresh?.Controls?.At ?? (snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"), 11, true, 12); Add(_controlsAge);
-        _fullAge = Label(Presentation.FullAge(d), 11, true, 4); Add(_fullAge);
-        Add(Label(quiet ? "Quiet · all automatic requests paused" : cache.Snapshot?.Version >= 2 ? "Automatic light refresh · 15 s · curve checked on changes" : "Manual refresh · older broker", 11, true, 4));
-        if (cache.CompatibilityNotice != null) Add(Label(cache.CompatibilityNotice, 11, true, 4));
-        if (cache.Error != null) Add(Label(cache.Error, 11, true, 6));
+        _controlsAge = Bound(() => Presentation.Age(d?.Refresh?.Controls?.At ?? (snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked"), 11, true, 12); Add(_controlsAge);
+        _fullAge = Bound(() => Presentation.FullAge(d), 11, true, 4); Add(_fullAge);
+        Add(Bound(() => quiet ? "Quiet · all automatic requests paused" : cache.Snapshot?.Version >= 2 ? "Automatic light refresh · 15 s · curve checked on changes" : "Manual refresh · older broker", 11, true, 4));
+        if (cache.CompatibilityNotice != null) Add(Bound(() => cache.CompatibilityNotice, 11, true, 4));
+        if (cache.Error != null) Add(Bound(() => cache.Error, 11, true, 6));
         _content.ResumeLayout(true);
         ResumeLayout(true);
         ResizeToContent(redraw);
@@ -292,6 +342,13 @@ internal sealed class StatusForm : Form
         if (gridFocused && !_offscreen) _settingsGrid?.Focus();
         _building = false;
     }
+    private Label Bound(Func<string> text, float px, bool muted, int top = 0)
+    {
+        var label = Label(text(), px, muted, top);
+        _bindings.Add(() => { string value = text(); if (label.Text != value) { label.Text = value; label.AccessibleName = value; } });
+        return label;
+    }
+    private static string[] TelemetryValues(StatusDevice? d) => [$"{d?.Telemetry?.TempC?.ToString("0") ?? "—"} °C", $"{d?.Telemetry?.Watts?.ToString("0") ?? "—"} W", d?.Telemetry?.UtilPercent is { } util ? $"{util}%" : "—"];
     private static string Coverage(AppliedSettings a) => $"{(a.Complete ? "Supported inventory complete" : "Partial / unavailable coverage")} · {a.Rows.Count} rows · {Presentation.Age(a.InventoryAt, "Inventory checked")}";
     public void UpdateAges(TrayStatusCache cache, string? gpuId)
     {
@@ -300,8 +357,8 @@ internal sealed class StatusForm : Form
         if (_controlsAge != null) _controlsAge.Text = Presentation.Age(d?.Refresh?.Controls?.At ?? (cache.Snapshot?.Version == 1 ? d?.Verification?.At : null), "Controls checked");
         if (_fullAge != null) _fullAge.Text = Presentation.FullAge(d);
         if (_telemetryAge != null) _telemetryAge.Text = Presentation.Age(d?.Telemetry?.At, "Telemetry sampled");
-        if (_coverageAge != null && d?.Applied is { } a) _coverageAge.Text = Coverage(a);
-        if (_settingsGrid?.Parent != null && d?.Applied is { } applied) _settingsGrid.UpdateRows(applied, d.SavedDailyKnown);
+        if (_coverageAge != null && d?.Applied is { } a) { _coverageAge.Text = Coverage(a); _coverageAge.AccessibleDescription = string.Join("\n", a.Coverage); }
+        if (_settingsGrid?.Parent != null && d?.Applied is { } applied) _settingsGrid.UpdateRows(applied, d.SavedDailyKnown, d.Refresh?.MeasurementBusy == true);
         if (_scroll.AutoScroll) _scroll.AutoScrollPosition = new Point(-position.X, -position.Y);
     }
 
@@ -385,6 +442,7 @@ internal sealed class StatusForm : Form
             block.Height = height + block.Padding.Vertical;
         }
         block.SizeChanged += (_, _) => MeasureText();
+        box.TextChanged += (_, _) => MeasureText();
         MeasureText();
         return block;
     }

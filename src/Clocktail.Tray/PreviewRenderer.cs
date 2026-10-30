@@ -11,6 +11,7 @@ internal static class PreviewRenderer
     public static void Render(string directory, string state)
     {
         Directory.CreateDirectory(directory);
+        if (state == "matched") VerifyRoutineRefresh(directory);
         var cache = new TrayStatusCache();
         var source = new DemoSource(state);
         if (source.Create() is { } snapshot && !cache.Accept(snapshot)) throw new InvalidOperationException(cache.Error);
@@ -18,6 +19,7 @@ internal static class PreviewRenderer
         cache.CompatibilityNotice = source.CompatibilityNotice;
         var expected = state switch
         {
+            "measurement" or "measurement-empty" => TrayState.MeasurementPaused,
             "startup" => TrayState.StartupPending, "recovery" => TrayState.Recovering,
             "changed" or "different" => TrayState.SettingsDiffer, "trial" or "trial-controls" or "many-settings" => TrayState.TrialActive,
             "empty" or "partial" or "unavailable-saved" => TrayState.Unknown,
@@ -53,6 +55,15 @@ internal static class PreviewRenderer
                 File.WriteAllText(Path.Combine(directory, $"{state}-hover-check.json"), JsonSerializer.Serialize(new
                 { labels_enabled = true, nonactivating_style = true, mouse_hit_transparent = true }));
             }
+            if (view == "details" && state is "measurement" or "measurement-empty")
+            {
+                var grid = form.Controls.Find("AppliedSettingsGrid", true).OfType<AppliedSettingsGrid>().Single();
+                string expectedValue = state == "measurement-empty" ? "No prior readback" : "Last known · unconfirmed";
+                if (grid.Rows.Cast<DataGridViewRow>().Any(r => !r.Cells[1].Value!.ToString()!.Contains(expectedValue))
+                    || form.Controls.Find("CheckNowButton", true).OfType<Button>().Single().Enabled
+                    || !grid.Rows.Cast<DataGridViewRow>().Single(r => r.Tag is AppliedRow { Kind: "pstates20", Key: "core" }).Cells[2].Value!.ToString()!.Contains("240"))
+                    throw new InvalidOperationException("Measurement presentation lost prior evidence/saved targets or enabled verification.");
+            }
             if (view == "details") VerifyPinToggle(form, directory, state);
             if (view == "details") VerifyCellToolTip(form, Palette.Dark, directory, state + "-dark");
             if (view == "details" && device?.Applied is { Rows.Count: > 0 }) VerifyDynamicUpdate((StatusForm)form, cache, directory, state);
@@ -85,6 +96,68 @@ internal static class PreviewRenderer
         using var contrastBitmap = new Bitmap(highContrast.ClientSize.Width, highContrast.ClientSize.Height);
         highContrast.DrawToBitmap(contrastBitmap, highContrast.ClientRectangle); contrastBitmap.Save(Path.Combine(directory, $"{state}-high-contrast.png"), ImageFormat.Png);
         highContrast.Hide();
+    }
+    private static void VerifyRoutineRefresh(string directory)
+    {
+        foreach (bool pinned in new[] { false, true })
+        foreach (bool curve in new[] { false, true })
+        {
+            var cache = new TrayStatusCache(); cache.Accept(new DemoSource("matched").Create()!);
+            using var form = new StatusForm(false, Palette.Dark, offscreen: true)
+                { DiagnosticsExpanded = true, CurveSelected = curve, Location = new Point(-32000, -32000) };
+            form.FitToWorkArea(new Rectangle(0, 0, 800, 600));
+            form.Present(cache, "demo-gpu", false, true, false); form.Show(); Application.DoEvents();
+            if (pinned) form.Controls.Find("PinButton", true).OfType<Button>().Single().PerformClick();
+            var grid = form.Controls.Find("AppliedSettingsGrid", true).OfType<AppliedSettingsGrid>().Single();
+            grid.CurrentCell = grid.Rows[0].Cells[1];
+            var selected = grid.CurrentCell;
+            var scroll = (Panel)form.Controls.Find("DetailsScroll", true).Single();
+            scroll.AutoScrollPosition = new Point(0, 40);
+            var position = scroll.AutoScrollPosition; var bounds = form.Bounds;
+            var controls = Descendants(form).ToArray();
+            var handles = controls.Where(c => c.IsHandleCreated).ToDictionary(c => c, c => c.Handle);
+            foreach (int age in new[] { 9, 10, 99, 100, 9, 10, 99, 100 })
+            {
+                var snapshot = cache.Snapshot!; var d = snapshot.Devices[0]; long generation = d.Refresh!.Generation + 1;
+                bool measurement = age == 99;
+                var next = d with
+                {
+                    Telemetry = d.Telemetry! with { TempC = age, Watts = age + 20, At = DateTimeOffset.UtcNow.AddSeconds(-age) },
+                    Refresh = d.Refresh with { Generation = generation, VerifiedGeneration = generation, MeasurementBusy = measurement },
+                    Applied = d.Applied! with { Generation = generation, Rows = d.Applied.Rows.Select((r, i) => r with
+                        { SampleGeneration = generation, SampledAt = DateTimeOffset.UtcNow.AddSeconds(-age), CurrentValue = i == 0 ? (age * 1000).ToString() : r.CurrentValue }).ToArray() }
+                };
+                if (!cache.Accept(snapshot with { Revision = snapshot.Revision + 1, CapturedAt = DateTimeOffset.UtcNow, Devices = [next] })) throw new InvalidOperationException(cache.Error);
+                form.Present(cache, "demo-gpu", false, true, false); Application.DoEvents();
+                if (!controls.SequenceEqual(Descendants(form)) || handles.Any(p => p.Key.IsDisposed || p.Key.Handle != p.Value)
+                    || form.Bounds != bounds || scroll.AutoScrollPosition != position || grid.CurrentCell != selected || form.CurveSelected != curve || !form.DiagnosticsExpanded)
+                    throw new InvalidOperationException("Routine telemetry/value/measurement refresh replaced controls or moved the pinned/unpinned details view.");
+                var check = form.Controls.Find("CheckNowButton", true).OfType<Button>().Single();
+                if (check.Enabled == measurement) throw new InvalidOperationException("Measurement did not gate Check now.");
+                if (!SystemInformation.HighContrast && grid.DefaultCellStyle.SelectionBackColor != Palette.Dark.Surface)
+                    throw new InvalidOperationException("Read-only selection uses a success color.");
+            }
+            // Inventory changes retain the existing form and controls; the outer panel handles real growth.
+            var beforeRows = cache.Snapshot!; var original = beforeRows.Devices[0];
+            var extra = original.Applied!.Rows[0] with { Id = "synthetic-extra", Label = new string('W', 220) };
+            foreach (bool add in new[] { true, false })
+            {
+                var changed = original with { Applied = original.Applied with { Rows = add ? [.. original.Applied.Rows, extra] : original.Applied.Rows } };
+                cache.Accept(beforeRows with { Revision = cache.Snapshot!.Revision + 1, Devices = [changed] });
+                form.Present(cache, "demo-gpu", false, true, false); Application.DoEvents();
+                if (form.Bounds != bounds || !controls.SequenceEqual(Descendants(form)) || grid.CurrentCell != selected)
+                    throw new InvalidOperationException("Row growth/removal replaced controls or moved the window.");
+            }
+            // Exercise layout at an enlarged control scale without changing the user's Windows DPI settings.
+            form.Scale(new SizeF(1.5f, 1.5f)); form.FitToWorkArea(new Rectangle(0, 0, 1200, 900)); Application.DoEvents();
+            var scaledBounds = form.Bounds;
+            form.Present(cache, "demo-gpu", false, true, false); Application.DoEvents();
+            if (form.Bounds != scaledBounds || form.Height > 900) throw new InvalidOperationException("Scaled routine refresh changed/clipped monitor bounds.");
+            typeof(Form).GetMethod("OnDeactivate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(form, [EventArgs.Empty]);
+            if (form.Visible != pinned) throw new InvalidOperationException("Pinned/unpinned deactivation behavior changed.");
+        }
+        File.WriteAllText(Path.Combine(directory, "routine-refresh.json"), JsonSerializer.Serialize(new
+        { pinned_and_unpinned = true, both_tabs = true, diagnostics = true, small_monitor = true, updates = 32, controls_handles_bounds_scroll_selection_preserved = true, deactivation_checked = true, row_growth_removal = true, enlarged_scale = true }));
     }
     private static void VerifyDynamicUpdate(StatusForm form, TrayStatusCache cache, string directory, string state)
     {

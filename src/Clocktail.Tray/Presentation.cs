@@ -15,6 +15,7 @@ internal static class Presentation
         TrayState.DailyMatched => ("Daily controls match", "Current controls match; the curve has its own verification age below."),
         TrayState.StartupPending => ("Startup restoration pending", "Waiting for the broker to finish restoring the daily profile."),
         TrayState.Recovering => ("Broker recovery in progress", "Full verification will follow completed recovery."),
+        TrayState.MeasurementPaused => ("Measurement running — verification paused", "Temporary test controls may differ. Readback is last known and unconfirmed; saved daily values remain targets."),
         TrayState.VerificationPending => ("Full verification pending", "Waiting for settled changes and an available measurement window."),
         TrayState.TrialActive => ("Temporary trial is active", "The card may differ from your saved daily profile."),
         TrayState.DailySuspended => ("Daily restoration is suspended", "Saved targets are retained; applied settings are shown separately."),

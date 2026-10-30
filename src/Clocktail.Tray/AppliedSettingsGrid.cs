@@ -10,6 +10,7 @@ internal sealed class AppliedSettingsGrid : DataGridView
     private readonly ToolTip _cellTip = new() { OwnerDraw = true, IsBalloon = false };
     private string? _tipRowId;
     private bool _disposing;
+    private bool _updating;
     private AppliedSettings? _snapshot;
     private bool _savedKnown = true;
     public AppliedSettingsGrid(Palette palette)
@@ -40,8 +41,8 @@ internal sealed class AppliedSettingsGrid : DataGridView
         EnableHeadersVisualStyles = false; ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
         ColumnHeadersDefaultCellStyle = new() { BackColor = palette.Surface, ForeColor = palette.Muted, Padding = new Padding(4, 7, 4, 7) };
         ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
-        DefaultCellStyle = new() { BackColor = palette.Surface, ForeColor = palette.Ink, SelectionBackColor = palette.AccentSurface,
-            SelectionForeColor = palette.Ink, WrapMode = DataGridViewTriState.True, Padding = new Padding(4, 7, 4, 7) };
+        DefaultCellStyle = new() { BackColor = palette.Surface, ForeColor = palette.Ink, SelectionBackColor = SystemInformation.HighContrast ? SystemColors.Highlight : palette.Surface,
+            SelectionForeColor = SystemInformation.HighContrast ? SystemColors.HighlightText : palette.Ink, WrapMode = DataGridViewTriState.True, Padding = new Padding(4, 7, 4, 7) };
         foreach (var (label, width) in new[] { ("Control", 34f), ("Applied (readback)", 38f), ("Saved daily", 28f) })
             Columns.Add(new DataGridViewTextBoxColumn { HeaderText = label, FillWeight = width, SortMode = DataGridViewColumnSortMode.NotSortable });
         CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) ShowDetails(); };
@@ -50,11 +51,15 @@ internal sealed class AppliedSettingsGrid : DataGridView
         menu.Items.Add("Setting details", null, (_, _) => ShowDetails());
         menu.Items.Add("Copy setting details", null, (_, _) => { if (CurrentRow?.Tag is AppliedRow row) Clipboard.SetText(Details(row)); });
         ContextMenuStrip = menu;
+        CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex >= 0) CurrentCell = Rows[e.RowIndex].Cells[e.ColumnIndex]; };
         RowsAdded += (_, _) => FitHeight(); RowsRemoved += (_, _) => FitHeight(); RowHeightChanged += (_, _) => FitHeight();
     }
-    private void FitHeight() => Height = Math.Max(48, ColumnHeadersHeight + Rows.Cast<DataGridViewRow>().Sum(r => r.Height) + 4);
-    public void UpdateRows(AppliedSettings snapshot, bool savedKnown = true)
+    private void FitHeight() { if (!_updating) Height = Math.Max(48, ColumnHeadersHeight + Rows.Cast<DataGridViewRow>().Sum(r => r.Height) + 4); }
+    public void UpdateRows(AppliedSettings snapshot, bool savedKnown = true, bool measurementBusy = false)
     {
+        _updating = true;
+        try
+        {
         _savedKnown = savedKnown;
         if (_snapshot?.GpuId != snapshot.GpuId) { ClearCellToolTip(); Rows.Clear(); _rows.Clear(); }
         _snapshot = snapshot;
@@ -68,14 +73,16 @@ internal sealed class AppliedSettingsGrid : DataGridView
             var value = snapshot.Rows[i];
             if (!_rows.TryGetValue(value.Id, out var row))
             {
-                row = new DataGridViewRow(); row.CreateCells(this); Rows.Insert(i, row); _rows[value.Id] = row;
+                row = new DataGridViewRow(); row.CreateCells(this); Rows.Insert(i, row); row = Rows[i]; _rows[value.Id] = row;
             }
-            else if (row.Index != i) { Rows.Remove(row); Rows.Insert(i, row); }
+            else if (row.Index != i) { Rows.Remove(row); Rows.Insert(i, row); row = Rows[i]; _rows[value.Id] = row; }
             row.Tag = value;
             string group = i == 0 || snapshot.Rows[i - 1].Group != value.Group ? value.Group + "\n" : "";
             string current = value.CurrentValue == null && value.LastValue != null
                 ? "Unavailable · last observed\n" + AppliedCatalog.Format(value.Type, value.LastValue) : AppliedCatalog.Format(value.Type, value.CurrentValue);
             string Brief(string text, int length = 180) => text.Length <= length ? text : text[..(length - 20)] + "… (open details)";
+            if (measurementBusy) current = (value.CurrentValue ?? value.LastValue) is { } last
+                ? "Last known · unconfirmed\n" + AppliedCatalog.Format(value.Type, last) : "No prior readback";
             current = Brief(current);
             string state = value.Modification switch
             {
@@ -86,6 +93,7 @@ internal sealed class AppliedSettingsGrid : DataGridView
             if (value.Saved) state = value.Daily switch { DailyComparison.Matched => "Matches daily", DailyComparison.Different => "Differs from daily", _ => "Daily comparison unknown" };
             if (value.Saved && value.Modification is AppliedModification.Pending or AppliedModification.Unconfirmed)
                 state += value.Modification == AppliedModification.Pending ? " · Pending readback" : " · Modification unconfirmed";
+            if (measurementBusy) state = "Verification paused";
             if (!value.DailyEligible) state += " · Trial only";
             string[] cells = [group + Brief(value.Label, 96), current + "\n" + state + " · " + Presentation.Age(value.SampledAt, "").Trim(),
                 !_savedKnown ? value.Saved ? "Unknown · last saved\n" + Brief(AppliedCatalog.Format(value.Type, value.SavedValue)) : "Unknown · saved record unavailable"
@@ -95,7 +103,8 @@ internal sealed class AppliedSettingsGrid : DataGridView
         }
         if (selected != null && _rows.TryGetValue(selected, out var selectedRow)) CurrentCell = selectedRow.Cells[column];
         else if (!ContainsFocus) ClearSelection();
-        ResumeLayout(true); FitHeight();
+        }
+        finally { ResumeLayout(true); _updating = false; FitHeight(); }
     }
     internal ToolTip CellDetailToolTip => _cellTip;
     private void ClearCellToolTip()

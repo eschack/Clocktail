@@ -5,6 +5,8 @@ namespace Clocktail.Tray;
 
 internal sealed class CurvePanel(IReadOnlyList<StatusCurvePoint> points, Palette palette) : Control
 {
+    public void UpdatePoints(IReadOnlyList<StatusCurvePoint> next)
+    { if (points.SequenceEqual(next)) return; points = next; Invalidate(); }
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
