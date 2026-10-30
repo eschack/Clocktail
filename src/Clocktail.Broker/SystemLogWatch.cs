@@ -33,11 +33,17 @@ internal sealed partial class SystemLogWatch : IDisposable
     /// <param name="what">The events in words, passed to <paramref name="onEvent"/> and used in errors.</param>
     /// <param name="onEvent">Called on an event-log thread with <paramref name="what"/>; must not block.</param>
     /// <param name="log">A subscription error: logged, never taken for an event (a give-back would end a tuning run for nothing).</param>
-    public SystemLogWatch(string query, string what, Action<string> onEvent, Action<string> log)
+    public SystemLogWatch(string query, string what, Action<string> onEvent, Action<string> log, Func<string, bool>? accepts = null)
     {
         _callback = (action, _, evt) =>
         {
-            if (action == ActionDeliver) onEvent(what);
+            if (action == ActionDeliver)
+            {
+                bool recover = true;   // the safe side: giving back only ever lowers what the card runs
+                try { recover = accepts == null || accepts(Domain.Platform.SystemLog.EventXml(evt)); }
+                catch (Exception e) { log("event attribution failed, answering the reset as the service always did: " + e.Message); }
+                if (recover) onEvent(what);
+            }
             else log($"System log subscription ({what}) reported error {evt.ToInt64()}");
             return 0;
         };

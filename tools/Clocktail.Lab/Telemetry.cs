@@ -4,7 +4,7 @@ using Clocktail.Hw;
 namespace Clocktail.Lab;
 
 /// <summary>One look at the card through NVML: what the load ran at. Null fields where NVML did not answer.</summary>
-public sealed record LabSample(double T, int Phase, double? BoardW, uint? TempC, uint? SmMhz, uint? MemMhz, uint? UtilPct, int? PState = null);
+public sealed record LabSample(double T, int Phase, double? BoardW, uint? TempC, uint? SmMhz, uint? MemMhz, uint? UtilPct, int? PState = null, double? LimitW = null);
 
 public interface ISampler : IDisposable
 {
@@ -23,11 +23,11 @@ public sealed class NvmlSampler : ISampler
     public NvmlSampler(string cudaPciBusId)
     {
         _nvml = NvmlApi.Load();
-        var want = Pci(cudaPciBusId);
+        var want = Clocktail.Hw.PciAddress.Parse(cudaPciBusId) ?? throw new NotSupportedException("invalid target PCI address");
         for (uint i = 0; i < _nvml.DeviceCount(); i++)
         {
             var h = _nvml.HandleByIndex(i);
-            if (Pci(_nvml.Pci(h).BusId) == want) { _h = h; return; }
+            if (Clocktail.Hw.PciAddress.Parse(_nvml.Pci(h).BusId) == want) { _h = h; return; }
         }
         _nvml.Dispose();
         throw new InvalidOperationException($"NVML has no GPU at PCI {cudaPciBusId}");
@@ -47,13 +47,19 @@ public sealed class NvmlSampler : ISampler
         T? Try<T>(Func<T> f) where T : struct { try { return f(); } catch (NvmlException) { return null; } }
         return new(t, phase, Try(() => _nvml.PowerUsageMw(_h) / 1000.0), Try(() => _nvml.TemperatureC(_h)),
             Try(() => _nvml.ClockMhz(_h, NvmlClock.Graphics)), Try(() => _nvml.ClockMhz(_h, NvmlClock.Memory)), Try(() => _nvml.Utilization(_h).Gpu),
-            _nvml.PerformanceState(_h));
+            _nvml.PerformanceState(_h), Try(() => _nvml.PowerEnforcedMw(_h) / 1000.0));
     }
 
     /// <summary>Video memory in use and in all, bytes (NVML's _v2 count: the driver's reservation left out); null when unread.</summary>
     public (ulong Used, ulong Total)? Vram()
     {
         try { var m = _nvml.Memory(_h); return (m.Used, m.Total); } catch (NvmlException) { return null; }
+    }
+
+    /// <summary>The pids with a graphics context on this GPU (nvidia-smi's G / C+G); null when the driver does not say.</summary>
+    public IReadOnlyList<uint>? GraphicsPids()
+    {
+        try { return _nvml.GraphicsPids(_h); } catch (NvmlException) { return null; }
     }
 
     public void Dispose() => _nvml.Dispose();

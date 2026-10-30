@@ -104,6 +104,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(r.Ok);
         Assert.True(r.Result!.Value.GetProperty("pong").GetBoolean());
         Assert.Equal("gpu-A", r.Result!.Value.GetProperty("gpus")[0].GetString());
+        Assert.Equal(Clocktail.Domain.Game.GameSession.Protocol, r.Result!.Value.GetProperty("game_protocol").GetInt32());   // what `status` shows: the new broker is the one running
         Assert.Equal(0, FakeDriver.Sets);
     }
 

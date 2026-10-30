@@ -34,6 +34,50 @@ public static class SystemLog
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EvtClose(IntPtr handle);
 
+    [DllImport("wevtapi.dll", SetLastError = true)]
+    private static extern bool EvtRender(IntPtr context, IntPtr evt, uint flags, uint size, IntPtr buffer, out uint used, out uint properties);
+
+    public static string EventXml(IntPtr evt)
+    {
+        EvtRender(IntPtr.Zero, evt, 1, 0, IntPtr.Zero, out uint size, out _);
+        if (size is 0 or > 1_048_576) throw new InvalidOperationException("invalid event XML size");
+        IntPtr data = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            if (!EvtRender(IntPtr.Zero, evt, 1, size, data, out _, out _)) throw new InvalidOperationException("cannot render event XML");
+            return Marshal.PtrToStringUni(data) ?? throw new InvalidOperationException("empty event XML");
+        }
+        finally { Marshal.FreeHGlobal(data); }
+    }
+
+    public static TargetResetCount CountTarget(Clocktail.Hw.GpuTarget target, DateTime sinceUtc)
+    {
+        var present = Clocktail.Hw.DisplayInventory.Read();
+        var query = EvtQuery(IntPtr.Zero, "System", Query(DriverResetFilter, sinceUtc), QueryChannelPath);
+        if (query == IntPtr.Zero) throw new InvalidOperationException("cannot query target reset events");
+        int known = 0, ambiguous = 0;
+        try
+        {
+            var events = new IntPtr[16];
+            for (int seen = 0; seen < 256 && EvtNext(query, 16, events, 1000, 0, out uint count); seen += (int)count)
+            {
+                if (count == 0) break;
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        var owner = ResetAttribution.Match(EventXml(events[i]), target, present);
+                        if (owner == ResetOwner.Target) known++;
+                        else if (owner == ResetOwner.Ambiguous) ambiguous++;
+                    }
+                    finally { EvtClose(events[i]); }
+                }
+            }
+            return new(known, ambiguous);
+        }
+        finally { EvtClose(query); }
+    }
+
     /// <summary>The XPath for <see cref="Count"/>. The time is the event log's own format whatever the person's culture:
     /// with the current one, a non-Gregorian calendar or a '.' time separator made a query that matched nothing, so a
     /// driver reset during a stress run went unseen and the run passed.</summary>

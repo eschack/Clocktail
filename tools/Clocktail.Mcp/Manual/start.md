@@ -22,9 +22,10 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 | Power, as a trial | `set_power_limit`, `set_current_limit`, `set_power_cap` (ask first) |
 | Fans, as a trial | `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
 | The daily wall | `set_daily_power_limit` |
-| Judge it | `stress_test` (NVIDIA's nvgwls.exe); `lab_test` (the lab: every result checked bit for bit, burn, light, pulse, memory, latency, l2) |
+| Judge it | `stress_test` (NVIDIA's nvgwls.exe: the knee and the middle); `lab_test` (the lab, every result checked exactly: burn, light, pulse, solo for the curve's top, leap for the jump onto it, memory, latency, l2) |
 | Find the memory's best offset by itself | `tune_memory`, then `lab_status` / `lab_stop` |
 | Find the best XBAR, ratio and MSVDD by itself | `tune_uncore`, then `lab_status` / `lab_stop` |
+| Play a game for them while they are away (optional) | `game_test` (Quake II RTX in a window of 90 % of the screen or more, a seeded script of load patterns, the wall and the fans moved under it; a failure is the trial's crash), then `lab_status` / `lab_stop` |
 | Watch them play | `live_start` / `live_read` / `live_stop` (a whole session, live: a line every 10 s, hangs as they happen); `watch` (one stretch, summarized) |
 | Record the outcome | `mark_stable`, `mark_crash`, `log_note` |
 | Undo / keep | `back_to_daily`; `preview_daily`, then `keep_as_daily` |

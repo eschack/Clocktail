@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using Clocktail.Broker;
@@ -118,6 +118,7 @@ static int Run()
     dispatcher.StatusLifecycle.InitializeStartup(targets.Ids);
     dispatcher.StatusMeasurementReason = () => JudgeLock.Live(JudgeLock.Candidates(judgePath,
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _) is { } run ? JudgeLock.Reason(run) : null;
+    dispatcher.GameLeaseHeld = run => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _)?.RunId == run;
     var server = new BrokerServer(
         () => OperatingSystem.IsWindows() ? PipeFactory.Create(BrokerTransport.PipeName) : throw new PlatformNotSupportedException("the broker's pipe ACL is Windows-only"),
         dispatcher);
@@ -154,17 +155,38 @@ static int Run()
 
     // A driver reset keeps every offset on the card: give back what is held, through the same recovery op a client would send.
     // A reset the worker before this one never answered (it died in the hang, or handed over) is answered at start.
-    static int? ResetsSince(DateTime sinceUtc)
+    int? ResetsSince(DateTime sinceUtc)
     {
         if (!OperatingSystem.IsWindows()) return null;
-        try { return SystemLog.Count(SystemLog.DriverResetFilter, sinceUtc); }
+        try { var c = SystemLog.CountTarget(mgr.Gpus.Single().Target!, sinceUtc); return c.Target + c.Ambiguous; }
         catch (InvalidOperationException) { return null; }
     }
     var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince, dispatcher.StatusLifecycle);
     KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
     // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
     // shutdown) is recorded first.
-    Once("the daily profile at start", () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
+    KeepRunning("startup and interrupted game recovery", async () =>
+    {
+        var target = targets.Resolve(targets.Ids.Single())!;
+        string recovery = Clocktail.Domain.Game.GameSession.PathBeside(target.Journal.Path);
+        bool initialized = false;
+        while (!cts.IsCancellationRequested)
+        {
+            if (File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)))
+            {
+                // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
+                Action startup = initialized ? () => { } : () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
+                if (RecoverGame(dispatcher, target.StableId, host, Log, startup)) initialized = true;
+            }
+            else if (!initialized)
+            {
+                responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
+                initialized = true;
+            }
+            try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    });
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
     dispatcher.CachedTelemetry = id => sampler.Recorders.TryGetValue(id, out var recorder) ? recorder.Freeze().LastOrDefault() : null;
@@ -245,7 +267,7 @@ static int Run()
         });
     }
     SystemLogWatch? watch = null, wakeWatch = null;
-    try { watch = new SystemLogWatch(SystemLog.DriverResetQuery, "nvlddmkm 153 / Display 4101 in the System log", OnReset, Log); Log("watching the System log for driver resets"); }
+    try { watch = new SystemLogWatch(SystemLog.DriverResetQuery, "nvlddmkm 153 / Display 4101 in the System log", OnReset, Log, xml => ResetAttribution.ShouldRecover(xml, mgr.Gpus.Single().Target!, DisplayInventory.Read())); Log("watching the System log for driver resets (another vendor's driver is ignored)"); }
     catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"driver resets will not be answered: {e.Message}"); }
     // Waking from sleep: whether the card keeps what the profile wrote is not measured (sleep is off on the reference
     // machine), so the profile goes on again once the GPU is idle; only what differs is written, and a trial is left alone.
@@ -263,6 +285,35 @@ static int Run()
 
 /// <summary>Idle enough to write a curve: NVML's GPU utilization under 15 %. No NVML reading counts as busy, and so does
 /// a driver that is gone (its NVML is not read again).</summary>
+static bool RecoverGame(BrokerDispatcher dispatcher, string id, IHost host, Action<string> log, Action recoverProfile)
+{
+    using var card = new Mutex(false, LabCard.JobMutex(id));
+    bool taken = false;
+    string run = "game-recovery-" + Guid.NewGuid().ToString("N");
+    string path = JudgeLock.DefaultPath();
+    try
+    {
+        try { taken = card.WaitOne(0); } catch (AbandonedMutexException) { taken = true; }
+        if (!taken) return false; // a live game job owns restoration, including its reset wait
+        if (!JudgeLock.TryAcquire(path, new JudgeLock.Info(Environment.ProcessId, run, "game startup recovery", DateTimeOffset.UtcNow, Waits: true), host,
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), out _)) return false;
+        var proof = dispatcher.Dispatch(new BrokerRequest(BrokerRequest.OpGame, id, Kind: "verify", Lease: run));
+        if (!proof.Ok) { log("game startup identity/readback failed: " + proof.Error); return false; }
+        string? priorLease = BrokerDispatcher.CurrentLease.Value;
+        BrokerDispatcher.CurrentLease.Value = run;
+        try { recoverProfile(); } // record any unanswered target reset BEFORE applying daily settings
+        finally { BrokerDispatcher.CurrentLease.Value = priorLease; }
+        var result = dispatcher.Dispatch(new BrokerRequest(BrokerRequest.OpGame, id, Kind: "recover", Lease: run));
+        log("interrupted game recovery: " + (result.Ok ? "restored and independently verified" : result.Error));
+        return result.Ok;
+    }
+    finally
+    {
+        JudgeLock.Release(path, run);
+        if (taken) card.ReleaseMutex();
+    }
+}
+
 static bool Idle(GpuManager mgr, WindowsGpuTargets targets, string id)
 {
     var g = mgr.Gpus.FirstOrDefault(x => string.Equals(x.Identity.StableId, id, StringComparison.OrdinalIgnoreCase));

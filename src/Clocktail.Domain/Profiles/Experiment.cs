@@ -78,7 +78,8 @@ public sealed record DataPoint(
     int? XbarKhz = null,
     int? XbarVdemandUv = null,
     /// <summary>The trial's other writes (<see cref="ExperimentTrial.Writes"/>).</summary>
-    IReadOnlyList<ProfileWrite>? Writes = null);
+    IReadOnlyList<ProfileWrite>? Writes = null,
+    DateTimeOffset? TrialAt = null);
 
 /// <summary>
 /// An agent tuning the curve live while the person plays (the MCP server): the session and the trial in force, in
@@ -134,7 +135,7 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
     public DataPoint? Point(string outcome, DateTimeOffset at, string? note = null, uint? crashUv = null) =>
         Trial is { } t
             ? new DataPoint(at, Game, outcome, Math.Round((at - t.At).TotalMinutes, 1), t.Change, t.AtUv, t.AtMhz, t.Curve, note, crashUv, t.PowerMw, t.NvvddMa, t.MsvddMa, t.MsvddRelUv, t.MsvddVminUv,
-                t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes)
+                t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes, t.At)
             : null;
 
     public static void Append(string dataPath, DataPoint point)
