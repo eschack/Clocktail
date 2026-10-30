@@ -307,3 +307,33 @@ require separate user authorization.
 Historical journal entries with a wrongly captured original cannot be
 reconstructed from the current card alone; this fix preserves existing
 originals rather than guessing replacements.
+
+## Game-recovery integration after upstream 0.5.0 (2026-10-30)
+
+Upstream's guarded game session treated every omitted daily cell as its ownership
+original. A daily with P0 core +240 MHz and no explicit V/F entry could therefore
+restore correctly but fail the game's final check: the original curve was zero,
+while the driver-generated daily controls were +240 MHz.
+
+Game snapshots now include independently reported regional effective-minus-base
+frequency offsets. For an enabled daily with a core P0 target and no explicit V/F
+entry, game recovery verifies the raw P0 target and every effective curve point
+(with the coupled restoration's sub-MHz tolerance), instead of comparing generated
+V/F controls with the pre-tuning original. Other cells still require their expected
+values. Explicit curves, suspended profiles, and memory-only profiles retain their
+raw-control checks. Missing independent status, including legacy derived bases,
+cannot prove an implicit daily curve.
+
+The same proof is required when starting a game on that daily. Interrupted recovery
+can recognize an already-restored generated curve; an unrelated shape cannot gain
+that exemption. Effective offsets participate in snapshot and completion-receipt
+comparisons. Older recovery records can still return to daily using fresh proof;
+older completion receipts without effective evidence are not silently accepted as
+matching a newly measured regional snapshot.
+
+`GameImplicitDailyTests` adds 22 fake-data cases covering both control models,
+recover/failed/reset completion paths, partial or missing readback, retry after a
+lost reply, explicit/suspended/memory-only profiles, old recovery records, receipt
+replay, startup proof, and rounding. Validation: 1,152 .NET tests and 11 installer
+tests passed; Release solution build had zero warnings/errors. No GPU tests,
+broker restarts, installation, or game workloads were performed.
