@@ -53,6 +53,8 @@ public sealed record BrokerRequest(
     public const string OpPing = "ping";
     /// <summary>Read-only status versions 1/2/3. Cached is driver-free; light (2/3) excludes V/F; verify reads the full curve. Version 3 adds dynamic settings and driver-free rows pages (Key = opaque cursor).</summary>
     public const string OpStatus = "status";
+    /// <summary>Guarded game-test session: info, begin, check, lever, finish and interrupted-run recovery.</summary>
+    public const string OpGame = "game";
     public const string OpOwnership = "ownership";
     public const string OpRecover = "recover";
     /// <summary>

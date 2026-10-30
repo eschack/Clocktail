@@ -27,10 +27,16 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     public string AlivePath => Path.Combine(jobDir, "alive.json");
     protected bool StopAsked => File.Exists(StopPath);
     protected string JobDir => jobDir;
+    /// <summary>This program (clocktail-lab.exe), for the job's own child processes.</summary>
+    protected string LabExe => labExe;
     /// <summary>The job's identity: its folder's name, unique per start. The measurement lease's RunId too.</summary>
     protected string RunId => Path.GetFileName(jobDir);
 
     private readonly KillOnCloseJob? _children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
+
+    /// <summary>Ties a child to this job: it never outlives it (the game a game test starts, as each measurement). False when
+    /// Windows would not take it into the job.</summary>
+    protected bool Contain(Process p) => !OperatingSystem.IsWindows() || _children?.Add(p) == true;
     private static readonly SystemHost Host = new();
 
     /// <summary>Takes the card for this job, or null when another job holds it. Held until the holder is disposed or the
@@ -142,7 +148,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     protected string? TrialAt() => TrialAt(out _);
 
     /// <summary><see cref="TrialAt()"/>, and whether the service answered at all: null is also what no answer gives.</summary>
-    private string? TrialAt(out bool answered)
+    protected string? TrialAt(out bool answered)
     {
         var r = Broker("show");
         answered = r is { Ok: true };

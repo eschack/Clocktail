@@ -87,9 +87,15 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, byte*, uint, int> _vbios;
     private delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int> _fields;
     private delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int> _margin;
+    private delegate* unmanaged[Cdecl]<nint, int*, int*, int> _computeCapability;
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _pstate;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _threshold;
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _pcieGen, _pcieWidth, _pcieMaxGen, _pcieMaxWidth, _pcieGpuMaxGen, _pcieReplays;
+    private delegate* unmanaged[Cdecl]<nint, uint*, ProcessInfo*, int> _graphicsProcesses;
+
+    /// <summary>nvmlProcessInfo_t (v2, what the _v3 process lists fill): pid, used memory, the GPU and compute instances; 24 bytes.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInfo { public uint Pid; public ulong UsedGpuMemory; public uint GpuInstanceId, ComputeInstanceId; }
 
     /// <summary>nvmlFieldValue_t: 40 bytes, the value union 8-aligned at +32.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -186,6 +192,7 @@ public sealed unsafe class NvmlApi : IDisposable
         _vbios = (delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)Sym(e, "nvmlDeviceGetVbiosVersion", true);
         _fields = (delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int>)Sym(e, "nvmlDeviceGetFieldValues", true);
         _margin = (delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int>)Sym(e, "nvmlDeviceGetMarginTemperature", true);
+        _computeCapability = (delegate* unmanaged[Cdecl]<nint, int*, int*, int>)Sym(e, "nvmlDeviceGetCudaComputeCapability", true);
         _pstate = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPerformanceState", true);
         _threshold = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetTemperatureThreshold", true);
         _pcieGen = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetCurrPcieLinkGeneration", true);
@@ -194,6 +201,7 @@ public sealed unsafe class NvmlApi : IDisposable
         _pcieMaxWidth = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetMaxPcieLinkWidth", true);
         _pcieGpuMaxGen = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetGpuMaxPcieLinkGeneration", true);
         _pcieReplays = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPcieReplayCounter", true);
+        _graphicsProcesses = (delegate* unmanaged[Cdecl]<nint, uint*, ProcessInfo*, int>)Sym(e, "nvmlDeviceGetGraphicsRunningProcesses_v3", true);
     }
 
     /// <summary>Before every call: once lost, fail as the call would have, without entering the library.</summary>
@@ -258,6 +266,15 @@ public sealed unsafe class NvmlApi : IDisposable
         uint a, b;
         Check("nvmlDeviceGetPowerManagementLimitConstraints", _powerConstraints(h, &a, &b));
         return (a, b);
+    }
+
+    public (int Major, int Minor) ComputeCapability(nint h)
+    {
+        Live("nvmlDeviceGetCudaComputeCapability");
+        if (_computeCapability == null) throw new NotSupportedException("NVML cannot identify compute capability");
+        int major, minor;
+        Check("nvmlDeviceGetCudaComputeCapability", _computeCapability(h, &major, &minor));
+        return (major, minor);
     }
 
     public uint ClockMhz(nint h, NvmlClock c) { Live("nvmlDeviceGetClockInfo"); uint v; Check("nvmlDeviceGetClockInfo", _clock(h, (uint)c, &v)); return v; }
@@ -351,6 +368,29 @@ public sealed unsafe class NvmlApi : IDisposable
         if (f == null || _lost) return null;
         uint v;
         return Seen(f(h, &v)) == 0 ? v : null;
+    }
+
+    /// <summary>The processes with a graphics context on the GPU (what nvidia-smi lists as G / C+G), by pid; null when the
+    /// driver does not say (the entry point missing, not supported, or an error).</summary>
+    public IReadOnlyList<uint>? GraphicsPids(nint h)
+    {
+        if (_graphicsProcesses == null || _lost) return null;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            uint count = 0;
+            int rc = Seen(_graphicsProcesses(h, &count, null));
+            if (rc == 0) return [];
+            if (rc != 7 || count > 4096) return null;   // 7: insufficient size, count says how many
+            count += 8;
+            var buf = new ProcessInfo[count];
+            fixed (ProcessInfo* p = buf)
+            {
+                rc = Seen(_graphicsProcesses(h, &count, p));
+                if (rc == 0) return [.. buf.Take((int)Math.Min(count, (uint)buf.Length)).Select(x => x.Pid)];
+                if (rc != 7) return null;
+            }
+        }
+        return null;
     }
 
     public ulong ThrottleReasons(nint h)

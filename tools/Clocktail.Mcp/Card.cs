@@ -32,14 +32,13 @@ public sealed class Card : IDisposable
     {
         _mgr = GpuManager.Open();
         _gpu = Pick(_mgr.Gpus) ?? throw new InvalidOperationException("no NVIDIA GPU was found: Clocktail needs an NVIDIA RTX 50 series card with its driver loaded");
-        OtherGpus = [.. _mgr.Gpus.Where(g => g != _gpu).Select(g => g.Identity.Name)];
+        OtherGpus = _mgr.OtherGpus;
         _hw = new NvClient(_mgr.NvApi);
         _session = new GpuSession(_gpu.NvapiHandle, _gpu.Identity.Name);
     }
 
-    /// <summary>The card to talk to: the first RTX 50 series card (what every layout was measured on), else the first
-    /// NVIDIA GPU; null with none. The broker is asked by this card's stable id, so the order is never relied on.</summary>
-    public static GpuDevice? Pick(IReadOnlyList<GpuDevice> gpus) => gpus.FirstOrDefault(g => IsRtx50(g.Identity.Name)) ?? gpus.FirstOrDefault();
+    /// <summary>GpuManager has already selected and identified one supported card by PCI address. Never fall back.</summary>
+    public static GpuDevice? Pick(IReadOnlyList<GpuDevice> gpus) => gpus.Count == 1 && gpus[0].Target is { Major: 12, Minor: 0 } ? gpus[0] : null;
 
     public static bool IsRtx50(string name) => System.Text.RegularExpressions.Regex.IsMatch(name, @"RTX\s*50\d\d");
 
@@ -49,7 +48,8 @@ public sealed class Card : IDisposable
     public string StableId => _gpu.Identity.StableId;
 
     /// <summary>The card's PCI address as CUDA writes it ("0000:01:00.0"): how the lab finds the same GPU.</summary>
-    public string PciBusId => $"0000:{_gpu.Identity.Bus:x2}:00.0";
+    public string PciBusId => _gpu.Target?.Pci ?? throw new NotSupportedException("the GPU has no verified PCI identity");
+    public GpuTarget Target => _gpu.Target ?? throw new NotSupportedException("the GPU identity is not verified");
 
     /// <summary>NVIDIA's temperature thresholds for this GPU, absolute °C: where it slows down to stay safe (max operating; the
     /// driver's T.Limit margin counts down to it), the hardware slowdown and the shutdown (90 / 93 / 96 on the reference
