@@ -6,7 +6,7 @@ namespace Clocktail.Tray;
 /// <summary>Entirely synthetic; no pipes, hardware, recovery or persistent profile state.</summary>
 internal sealed class DemoSource(string state) : ITrayStatusSource
 {
-    public static readonly string[] States = ["matched", "trial", "stale", "unavailable", "suspended", "different", "quiet", "startup", "older-curve", "changed", "recovery", "incompatible", "extra-controls", "trial-controls", "shaped-vf", "long-fans", "many-settings", "empty", "partial", "unavailable-saved", "unknown-profile"];
+    public static readonly string[] States = ["matched", "trial", "stale", "unavailable", "suspended", "different", "quiet", "startup", "older-curve", "changed", "recovery", "incompatible", "extra-controls", "trial-controls", "shaped-vf", "long-fans", "many-settings", "empty", "partial", "unavailable-saved", "unknown-profile", "measurement", "measurement-empty"];
     private long _revision;
     private DateTimeOffset? _fullAt;
     public string? CompatibilityNotice => state == "incompatible" ? "Older broker: automatic refresh unavailable; manual Check now only." : null;
@@ -91,6 +91,14 @@ internal sealed class DemoSource(string state) : ITrayStatusSource
                     Rows = device.Applied.Rows.Select(r => r with { CurrentValue = null, LastValue = r.CurrentValue, Modification = AppliedModification.Pending, Daily = DailyComparison.Unknown, Context = "Saved values are last known and unconfirmed" }).ToArray() }
             };
         }
+        if (state is "measurement" or "measurement-empty") device = device with
+        {
+            Verification = state == "measurement-empty" ? null : device.Verification,
+            Refresh = device.Refresh! with { MeasurementBusy = true, Settled = false, FullRequiredReason = "Measurement in progress", Controls = null },
+            Applied = device.Applied! with { Rows = device.Applied.Rows.Select(r => r with
+            { CurrentValue = null, LastValue = state == "measurement-empty" ? null : r.CurrentValue,
+                SampledAt = state == "measurement-empty" ? null : r.SampledAt, Modification = AppliedModification.Pending, Daily = DailyComparison.Unknown }).ToArray() }
+        };
         return new(state == "incompatible" ? 1 : 3, "synthetic-demo", ++_revision, state == "stale" ? at : now, [device], ["light-status", "full-verification", "restoration-state", "mutation-generation", "applied-settings"]);
     }
 }

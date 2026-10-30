@@ -93,6 +93,8 @@ internal sealed class GlyphView(Glyph glyph, Color ink) : Control
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
         BackColor = Color.Transparent;
     }
+    public void UpdateGlyph(Glyph next, Color color)
+    { if (glyph == next && ink == color) return; glyph = next; ink = color; Invalidate(); }
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);

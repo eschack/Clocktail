@@ -2,7 +2,7 @@ using Clocktail.Domain.Profiles;
 
 namespace Clocktail.Domain.Broker;
 
-public enum TrayState { Unknown, Unavailable, Stale, DailyMatched, DailySuspended, TrialActive, SettingsDiffer, Applying, Failed, StartupPending, Recovering, VerificationPending }
+public enum TrayState { Unknown, Unavailable, Stale, DailyMatched, DailySuspended, TrialActive, SettingsDiffer, Applying, Failed, StartupPending, Recovering, VerificationPending, MeasurementPaused }
 public enum DailyComparison { Unknown, Matched, Different }
 
 /// <summary>Canonical registry encodings and units; null is unreadable, never an implicit zero.</summary>
@@ -36,7 +36,9 @@ public sealed record TrayStatus(int Version, string InstanceId, long Revision, D
             if (refresh.Restoration.Startup is RestorationState.Pending or RestorationState.Unknown) return TrayState.StartupPending;
             if (refresh.Restoration.Recovery == RestorationState.Pending) return TrayState.Recovering;
             if (refresh.Restoration.Startup == RestorationState.Failed || refresh.Restoration.Recovery == RestorationState.Failed) return TrayState.Failed;
-            if (refresh.MeasurementBusy || !refresh.Settled) return TrayState.VerificationPending;
+            if (device.Errors.Count > 0) return TrayState.Failed;
+            if (refresh.MeasurementBusy) return TrayState.MeasurementPaused;
+            if (!refresh.Settled) return TrayState.VerificationPending;
         }
         if (device.Errors.Count > 0) return TrayState.Failed;
         if (!device.ExperimentKnown || !device.SavedDailyKnown) return TrayState.Unknown;
