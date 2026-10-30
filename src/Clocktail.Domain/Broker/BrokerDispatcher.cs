@@ -26,6 +26,7 @@ public interface IGpuTarget
     string? Vbios => null;
     /// <summary>The driver version ("617.42"), null when unknown.</summary>
     string? Driver => null;
+    Clocktail.Domain.Game.IGameAccess? GameAccess => null;
 }
 
 /// <summary>The GPUs the broker manages. A null id selects the first, matching the CLI's default adapter.</summary>
@@ -86,6 +87,7 @@ public sealed partial class BrokerDispatcher
     }
 
     private readonly Fps.IFrameCapture? _frames;
+    public Func<string, bool> GameLeaseHeld { get; set; } = _ => false;
 
     /// <summary>Why a GPU looks hung right now (the broker's flight recorder; <see cref="FlightRecorder.HungNow"/>), or null.</summary>
     public Func<string, string?> HungReason { get; set; } = _ => null;
@@ -207,6 +209,7 @@ public sealed partial class BrokerDispatcher
     /// <summary>Whether the request can change the card, the profile or the experiment: everything but the reads.</summary>
     private static bool Changes(BrokerRequest req) =>
         req.IsWrite
+        || req.Op == BrokerRequest.OpGame
         || req.Op == BrokerRequest.OpProfile && req.Kind is not ("show" or "preview" or "preview-adopt" or "saved")
         || req.Op == BrokerRequest.OpExperiment && req.Kind is not ("show" or "alive");
 
@@ -217,7 +220,7 @@ public sealed partial class BrokerDispatcher
             if (req.Op == BrokerRequest.OpPing)
                 return Ok(new
                 {
-                    pong = true, pid = _host.Pid, can_write = _canWrite, gpus = _gpus.Ids,
+                    pong = true, pid = _host.Pid, can_write = _canWrite, gpus = _gpus.Ids, game_protocol = Game.GameSession.Protocol,
                     paths = WriteRegistry.All.Select(p => new { kind = p.Kind, keys = p.Keys, values = p.Values, checks_after_write = p.AfterWrite, equal_value_proof = p.ProveEqual != null }),
                 });
 
@@ -238,6 +241,7 @@ public sealed partial class BrokerDispatcher
                 return req.Op switch
                 {
                     BrokerRequest.OpOwnership => Ownership(target),
+                    BrokerRequest.OpGame => GameOperation(target, req),
                     BrokerRequest.OpProfile => Profile(target, req),
                     BrokerRequest.OpExperiment => ExperimentOp(target, req),
                     BrokerRequest.OpFps => FpsOp(target, req),

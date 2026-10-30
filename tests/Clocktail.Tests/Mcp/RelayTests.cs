@@ -181,7 +181,7 @@ public class RelayTests
             ], names.Where(n => !RelayCore.MayWriteCard(n)).Order(StringComparer.Ordinal));
         foreach (var w in new[] { "shift_curve", "set_curve", "flatten_curve", "adjust_nvvdd", "adjust_clock_domain", "set_core_offset", "set_clock_lock",
                      "set_clock_ratio", "set_voltage_boost", "set_fan_start", "set_power_cap", "begin_session", "lab_test", "tune_memory",
-                     "tune_uncore", "lab_stop", "install_service", "adjust_curve", "stress_test", "mark_crash", "end_session" })
+                     "tune_uncore", "game_test", "lab_stop", "install_service", "adjust_curve", "stress_test", "mark_crash", "end_session" })
             Assert.True(RelayCore.MayWriteCard(w), w);
         Assert.True(RelayCore.MayWriteCard("a_tool_added_later"));   // the safe side
     }

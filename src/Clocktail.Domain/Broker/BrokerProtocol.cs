@@ -57,6 +57,8 @@ public sealed record BrokerRequest(
     internal int? EffectiveCoreTargetKhz { get; init; }
 
     public const string OpPing = "ping";
+    /// <summary>Guarded game-test session: info, begin, check, lever, finish and interrupted-run recovery.</summary>
+    public const string OpGame = "game";
     public const string OpOwnership = "ownership";
     public const string OpRecover = "recover";
     /// <summary>
