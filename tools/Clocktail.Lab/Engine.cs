@@ -28,6 +28,16 @@ public interface ILoadEngine : IDisposable
     /// <summary>One fill and verify of a region that fits in L2, walked many times over in one launch: what it measures is the
     /// crossbar between the SMs and L2, the path XBAR clocks, not the DRAM. WorkUnits = bytes moved.</summary>
     ChunkOutcome RunL2(uint seed);
+
+    /// <summary>Why the soloist cannot play on this card (its module did not load), or null when it can.</summary>
+    string? SoloUnavailable { get; }
+
+    /// <summary>The soloist's resident blocks per SM: an SM meant to play ran its full share when it ran this many.</summary>
+    int SoloBlocksPerSm { get; }
+
+    /// <summary>One soloist launch of <paramref name="units"/> units with <paramref name="mask"/>'s SMs playing (eight words, a bit
+    /// per %smid): read back and judged lane by lane (<see cref="SoloRules.Judge"/>). <paramref name="playing"/>: the SMs in the mask.</summary>
+    SoloOutcome RunSolo(uint units, uint seed, uint[] mask, IReadOnlyCollection<int> playing);
 }
 
 /// <summary>
@@ -38,7 +48,12 @@ public sealed unsafe class CudaEngine : ILoadEngine
 {
     private readonly CudaApi _cu;
     private readonly int _dev;
-    private readonly nint _mod, _fFma, _fFill, _fVerify, _fChaseFill, _fChaseRun;
+    private readonly nint _mod, _fFma, _fFill, _fVerify, _fChaseFill, _fChaseRun, _modSolo, _fSolo;
+    private readonly ulong _dSoloSum, _dSoloSm, _dSoloCycles, _dSoloNs, _dSoloMask;
+    private readonly ulong[] _soloSum = [], _soloCycles = [], _soloNs = [];
+    private readonly uint[] _soloSm = [];
+    private readonly uint _soloGrid;
+    private int _soloLaunches;
     private readonly ulong _dOut, _dErr, _dMem;
     private readonly byte[] _hostOut, _reference;
     private readonly uint[] _window = new uint[16384];
@@ -60,8 +75,11 @@ public sealed unsafe class CudaEngine : ILoadEngine
     public string PciBusId { get; }
     private int ChaseChains => SmCount * 32;
 
+    public string? SoloUnavailable { get; }
+    public int SoloBlocksPerSm { get; }
+
     /// <summary>A flip of one bit of the output after this compute launch (1-based), as a wrong ALU result would arrive: the
-    /// run must then fail. 0 = never.</summary>
+    /// run must then fail; the soloist's launches count on their own, and the bit goes into its mma8 lane. 0 = never.</summary>
     public int InjectAtComputeLaunch { get; set; }
     private int _computeLaunches;
 
@@ -108,6 +126,59 @@ public sealed unsafe class CudaEngine : ILoadEngine
 
         _evStart = cu.EventCreate();
         _evEnd = cu.EventCreate();
+
+        // The soloist is a module of its own (compute_80 PTX: the INT8 mma.sync is sm_80's); a driver that cannot compile it
+        // leaves the lab's other phases as they were.
+        try
+        {
+            _modSolo = cu.ModuleLoadPtx(SoloKernel.Ptx());
+            _fSolo = cu.Function(_modSolo, SoloKernel.Entry);
+            SoloBlocksPerSm = Math.Max(1, cu.MaxActiveBlocksPerSm(_fSolo, (int)Block));
+            _soloGrid = (uint)(SmCount * SoloBlocksPerSm);
+            _dSoloSum = cu.MemAlloc(_soloGrid * (ulong)SoloKernel.Lanes * 8);
+            _dSoloSm = cu.MemAlloc(_soloGrid * 4UL);
+            _dSoloCycles = cu.MemAlloc(_soloGrid * 8UL);
+            _dSoloNs = cu.MemAlloc(_soloGrid * 8UL);
+            _dSoloMask = cu.MemAlloc(32);
+            _soloSum = new ulong[_soloGrid * SoloKernel.Lanes];
+            _soloSm = new uint[_soloGrid];
+            _soloCycles = new ulong[_soloGrid];
+            _soloNs = new ulong[_soloGrid];
+        }
+        catch (CudaException ex) { SoloUnavailable = "the soloist's kernel did not load: " + ex.Message; }
+        catch (InvalidOperationException ex) { SoloUnavailable = ex.Message; }
+    }
+
+    public SoloOutcome RunSolo(uint units, uint seed, uint[] mask, IReadOnlyCollection<int> playing)
+    {
+        if (_dead) return SoloOutcome.Failed("the CUDA context is already dead");
+        if (SoloUnavailable != null) return SoloOutcome.Failed(SoloUnavailable);
+        int rc;
+        fixed (uint* m = mask)
+            if ((rc = _cu.MemcpyHtoDRaw(_dSoloMask, m, 32)) != 0) return SoloFailed("cuMemcpyHtoD(mask)", rc);
+        uint u = units, sd = seed, wf = SoloKernel.WFp32, wi = SoloKernel.WInt, wd = SoloKernel.WDp4a, ws = SoloKernel.WS8;
+        uint never = uint.MaxValue, lane = 0;
+        ulong dMask = _dSoloMask, dSum = _dSoloSum, dSm = _dSoloSm, dCyc = _dSoloCycles, dNs = _dSoloNs;
+        void** args = stackalloc void*[14] { &u, &sd, &wf, &wi, &wd, &ws, &dMask, &never, &never, &lane, &dSum, &dSm, &dCyc, &dNs };
+        if ((rc = _cu.EventRecordRaw(_evStart)) != 0) return SoloFailed("cuEventRecord", rc);
+        if ((rc = _cu.LaunchRaw(_fSolo, _soloGrid, Block, args)) != 0) return SoloFailed("cuLaunchKernel(solo)", rc);
+        if ((rc = _cu.EventRecordRaw(_evEnd)) != 0) return SoloFailed("cuEventRecord", rc);
+        if ((rc = _cu.EventSynchronizeRaw(_evEnd)) != 0) return SoloFailed("solo", rc);
+        float ms = _cu.EventElapsedMs(_evStart, _evEnd);
+        fixed (ulong* p = _soloSum) if ((rc = _cu.MemcpyDtoHRaw(p, _dSoloSum, (ulong)_soloSum.Length * 8)) != 0) return SoloFailed("cuMemcpyDtoH", rc);
+        fixed (uint* p = _soloSm) if ((rc = _cu.MemcpyDtoHRaw(p, _dSoloSm, (ulong)_soloSm.Length * 4)) != 0) return SoloFailed("cuMemcpyDtoH", rc);
+        fixed (ulong* p = _soloCycles) if ((rc = _cu.MemcpyDtoHRaw(p, _dSoloCycles, (ulong)_soloCycles.Length * 8)) != 0) return SoloFailed("cuMemcpyDtoH", rc);
+        fixed (ulong* p = _soloNs) if ((rc = _cu.MemcpyDtoHRaw(p, _dSoloNs, (ulong)_soloNs.Length * 8)) != 0) return SoloFailed("cuMemcpyDtoH", rc);
+        if (++_soloLaunches == InjectAtComputeLaunch)
+            for (int b = 0; b < _soloNs.Length; b++)
+                if (_soloNs[b] != 0) { _soloSum[b * SoloKernel.Lanes + 3] ^= 1UL << 3; break; }   // one block's mma8 lane, as a wrong MAC would arrive
+        return new SoloOutcome(ms, SoloRules.Judge(_soloSum, _soloSm, _soloCycles, _soloNs, SoloBlocksPerSm, playing));
+    }
+
+    private SoloOutcome SoloFailed(string fn, int rc)
+    {
+        _dead = true;
+        return SoloOutcome.Failed($"{fn}: {_cu.ErrorName(rc)}");
     }
 
     public PatternPlan Plan(AccessPattern p) => _plans[p];
@@ -277,6 +348,8 @@ public sealed unsafe class CudaEngine : ILoadEngine
     {
         _cu.EventDestroy(_evStart); _cu.EventDestroy(_evEnd);
         _cu.MemFree(_dChaseOut); _cu.MemFree(_dOut); _cu.MemFree(_dErr); _cu.MemFree(_dMem);
+        _cu.MemFree(_dSoloSum); _cu.MemFree(_dSoloSm); _cu.MemFree(_dSoloCycles); _cu.MemFree(_dSoloNs); _cu.MemFree(_dSoloMask);
+        _cu.ModuleUnload(_modSolo);
         _cu.ModuleUnload(_mod);
         _cu.PrimaryCtxRelease(_dev);
     }

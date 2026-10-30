@@ -336,7 +336,7 @@ public class XbarAdvisoryTests
         Assert.Null(parameters[2].DefaultValue);
         var tools = typeof(TuningTools).Assembly.GetTypes().SelectMany(t => t.GetMethods())
             .Select(m => m.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>()).OfType<ModelContextProtocol.Server.McpServerToolAttribute>();
-        Assert.Equal(52, tools.Count());
+        Assert.Equal(53, tools.Count()); // upstream added game_test
         Assert.Equal(22, LiteMode.Tools.Count);
         Assert.DoesNotContain("adjust_xbar", LiteMode.Tools);
     }

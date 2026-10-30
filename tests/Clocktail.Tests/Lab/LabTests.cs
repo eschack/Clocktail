@@ -103,6 +103,9 @@ public class LabTests
             new(pattern is AccessPattern.Linear or AccessPattern.BlockXor ? 1.4 : 25, ++Launches == BadAt ? 3 : 0, 2.0 * MemoryBufferBytes, null, Launches == BadAt ? 4096UL : null);
         public ChunkOutcome RunLatency(uint hops) { Launches++; return new(hops / 2000.0, 0, hops * 512.0); }
         public ChunkOutcome RunL2(uint seed) { Launches++; return new(4, 0, 2.0 * (32 << 20) * 256); }
+        public string? SoloUnavailable => "not in this fake";
+        public int SoloBlocksPerSm => 6;
+        public SoloOutcome RunSolo(uint units, uint seed, uint[] mask, IReadOnlyCollection<int> playing) => SoloOutcome.Failed("not in this fake");
         public void Dispose() { }
     }
 
