@@ -1,4 +1,4 @@
-﻿namespace Clocktail.Domain.Broker;
+namespace Clocktail.Domain.Broker;
 
 /// <summary>
 /// What the broker does when the display driver resets (a TDR: nvlddmkm 153 or Display 4101 in the System log).
@@ -20,7 +20,9 @@ public sealed class DriverResetResponder(
     Action<TimeSpan> sleep,
     Func<string, bool>? idle = null,
     Func<DateTime, int?>? resetsSince = null,
-    BrokerStatusLifecycle? statusLifecycle = null)
+    BrokerStatusLifecycle? statusLifecycle = null,
+    Func<string, uint?>? utilization = null,
+    Action<string>? unusableTelemetry = null)
 {
     /// <summary>
     /// The daily profile goes back on only once the GPU has been idle for this many looks in a row: two of three hangs
@@ -142,7 +144,7 @@ public sealed class DriverResetResponder(
                 if (!down)
                 {
                     bool recovered = RecoverLeftovers(id);
-                    bool applied = Profile(id, "apply", "the broker started", "at start");
+                    bool applied = recovered && Profile(id, "apply", "the broker started", "at start");
                     status?.Complete(recovered && applied);
                     continue;
                 }
@@ -227,7 +229,7 @@ public sealed class DriverResetResponder(
     {
         if (!WaitIdle(gpuId))
         {
-            log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
+            log($"gpu {gpuId}: daily profile {when}: idle qualification did not complete; not applied (see preceding wait diagnostics)");
             return false;
         }
         var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence));
@@ -237,11 +239,28 @@ public sealed class DriverResetResponder(
 
     private bool WaitIdle(string gpuId)
     {
-        if (idle == null) return true;
+        if (idle == null && utilization == null) return true;
         var deadline = now() + IdleWaitAtMost;
+        int unreadable = 0; string? previous = null; var reportAt = now();
         for (int run = 0; run < IdleLooks;)
         {
-            run = idle(gpuId) ? run + 1 : 0;
+                        uint? value = utilization?.Invoke(gpuId);
+            bool unknown = utilization != null && (value == null || value > 100);
+            bool isIdle = utilization != null ? !unknown && value < 15 : idle!(gpuId);
+            string reason = unknown ? "telemetry unreadable or invalid" : isIdle ? "qualifying idle sample" : "waiting for GPU idle";
+            if (utilization != null && (reason != previous || now() >= reportAt))
+            {
+                log($"gpu {gpuId}: daily restoration: {reason}");
+                previous = reason; reportAt = now() + TimeSpan.FromMinutes(1);
+            }
+            unreadable = unknown ? unreadable + 1 : 0;
+            if (unreadable >= 6)
+            {
+                log($"gpu {gpuId}: daily restoration blocked by six unusable samples; requesting fresh worker, not applying");
+                unusableTelemetry?.Invoke(gpuId);
+                return false;
+            }
+            run = isIdle ? run + 1 : 0;
             if (run == IdleLooks) break;
             if (now() > deadline) return false;
             sleep(RetryEvery);
@@ -269,3 +288,4 @@ public sealed class DriverResetResponder(
         return each.Count == 0 ? "nothing was held" : string.Join(", ", each);
     }
 }
+

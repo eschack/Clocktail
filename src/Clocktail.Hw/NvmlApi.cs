@@ -254,8 +254,17 @@ public sealed unsafe class NvmlApi : IDisposable
         return new NvmlPci(u[0], u[1], u[2], u[3], u[4], Marshal.PtrToStringAnsi((nint)(b + 36)) ?? "");
     }
 
-    public uint TemperatureC(nint h) { Live("nvmlDeviceGetTemperature"); uint v; Check("nvmlDeviceGetTemperature", _temp(h, 0, &v)); return v; }
-    public uint PowerUsageMw(nint h) { Live("nvmlDeviceGetPowerUsage"); uint v; Check("nvmlDeviceGetPowerUsage", _powerUsage(h, &v)); return v; }
+    // Broad impossibility bounds, not operating limits. A successful call with garbage is
+    // unusable native state: use the existing process handover, never native teardown.
+    private uint Plausible(string field, uint value, uint maximum)
+    {
+        if (value <= maximum) return value;
+        MarkLost(GpuIsLost);
+        throw new NvmlException($"invalid {field} value {value}", GpuIsLost);
+    }
+
+    public uint TemperatureC(nint h) { Live("nvmlDeviceGetTemperature"); uint v = uint.MaxValue; Check("nvmlDeviceGetTemperature", _temp(h, 0, &v)); return Plausible("temperature", v, 150); }
+    public uint PowerUsageMw(nint h) { Live("nvmlDeviceGetPowerUsage"); uint v = uint.MaxValue; Check("nvmlDeviceGetPowerUsage", _powerUsage(h, &v)); return Plausible("power (mW)", v, 10000000); }
     public uint PowerLimitMw(nint h) { Live("nvmlDeviceGetPowerManagementLimit"); uint v; Check("nvmlDeviceGetPowerManagementLimit", _powerLimit(h, &v)); return v; }
     public uint PowerDefaultMw(nint h) { Live("nvmlDeviceGetPowerManagementDefaultLimit"); uint v; Check("nvmlDeviceGetPowerManagementDefaultLimit", _powerDefault(h, &v)); return v; }
     public uint PowerEnforcedMw(nint h) { Live("nvmlDeviceGetEnforcedPowerLimit"); uint v; Check("nvmlDeviceGetEnforcedPowerLimit", _powerEnforced(h, &v)); return v; }
@@ -277,15 +286,15 @@ public sealed unsafe class NvmlApi : IDisposable
         return (major, minor);
     }
 
-    public uint ClockMhz(nint h, NvmlClock c) { Live("nvmlDeviceGetClockInfo"); uint v; Check("nvmlDeviceGetClockInfo", _clock(h, (uint)c, &v)); return v; }
+    public uint ClockMhz(nint h, NvmlClock c) { Live("nvmlDeviceGetClockInfo"); uint v = uint.MaxValue; Check("nvmlDeviceGetClockInfo", _clock(h, (uint)c, &v)); return Plausible("clock (MHz)", v, 100000); }
     public uint MaxClockMhz(nint h, NvmlClock c) { Live("nvmlDeviceGetMaxClockInfo"); uint v; Check("nvmlDeviceGetMaxClockInfo", _maxClock(h, (uint)c, &v)); return v; }
 
     public NvmlUtilization Utilization(nint h)
     {
         Live("nvmlDeviceGetUtilizationRates");
-        uint* v = stackalloc uint[2];
+        uint* v = stackalloc uint[2] { uint.MaxValue, uint.MaxValue };
         Check("nvmlDeviceGetUtilizationRates", _util(h, v));
-        return new NvmlUtilization(v[0], v[1]);
+        return new NvmlUtilization(Plausible("GPU utilization", v[0], 100), Plausible("memory utilization", v[1], 100));
     }
 
     /// <summary>Total, free and used memory. The _v2 call (nvmlMemory_v2_t: version, total, reserved, free, used) leaves
@@ -409,3 +418,4 @@ public sealed unsafe class NvmlApi : IDisposable
         if (_lib != 0) { NativeLibrary.Free(_lib); _lib = 0; }
     }
 }
+

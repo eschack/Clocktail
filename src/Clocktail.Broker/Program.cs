@@ -161,7 +161,7 @@ static int Run()
         try { var c = SystemLog.CountTarget(mgr.Gpus.Single().Target!, sinceUtc); return c.Target + c.Ambiguous; }
         catch (InvalidOperationException) { return null; }
     }
-    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince, dispatcher.StatusLifecycle);
+    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince, dispatcher.StatusLifecycle, id => IdleUtilization(mgr, targets, id), _ => mgr.Nvml?.MarkLost());
     KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
     // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
     // shutdown) is recorded first.
@@ -314,13 +314,14 @@ static bool RecoverGame(BrokerDispatcher dispatcher, string id, IHost host, Acti
     }
 }
 
-static bool Idle(GpuManager mgr, WindowsGpuTargets targets, string id)
+static bool Idle(GpuManager mgr, WindowsGpuTargets targets, string id) => IdleUtilization(mgr, targets, id) is < 15;
+static uint? IdleUtilization(GpuManager mgr, WindowsGpuTargets targets, string id)
 {
     var g = mgr.Gpus.FirstOrDefault(x => string.Equals(x.Identity.StableId, id, StringComparison.OrdinalIgnoreCase));
-    if (g is not { HasNvml: true } || mgr.Nvml == null || targets.Resolve(id) is not { } t) return false;
-    if (DriverLoss.Why(mgr.Nvml, [t.Session]) != null) return false;
-    try { return mgr.Nvml.Utilization(g.NvmlHandle).Gpu < 15; }
-    catch (NvmlException) { return false; }
+    if (g is not { HasNvml: true } || mgr.Nvml == null || targets.Resolve(id) is not { } t) return null;
+    if (DriverLoss.Why(mgr.Nvml, [t.Session]) != null) return null;
+    try { return mgr.Nvml.Utilization(g.NvmlHandle).Gpu; }
+    catch (NvmlException) { return null; }
 }
 
 static int Status()
@@ -391,3 +392,4 @@ static partial class NativeConsole
         Console.SetError(w);
     }
 }
+

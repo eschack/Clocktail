@@ -10,9 +10,9 @@ namespace Clocktail.Tests.Hw;
 /// </summary>
 internal static unsafe class FakeNvml
 {
-    public static int Answer, Calls, Shutdowns, FieldAnswer;
+    public static int Answer, Calls, Shutdowns, FieldAnswer; public static uint GpuUtil = 100;
 
-    public static void Reset() { Answer = 0; Calls = 0; Shutdowns = 0; FieldAnswer = 0; }
+    public static void Reset() { Answer = 0; Calls = 0; Shutdowns = 0; FieldAnswer = 0; GpuUtil = 100; }
 
     public static NvmlApi Open() => NvmlApi.FromExports(name => name switch
     {
@@ -22,7 +22,8 @@ internal static unsafe class FakeNvml
         "nvmlDeviceGetHandleByIndex_v2" => (nint)(delegate* unmanaged[Cdecl]<uint, nint*, int>)&ByIndex,
         "nvmlDeviceGetName" or "nvmlDeviceGetVbiosVersion" => (nint)(delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)&Text,
         "nvmlDeviceGetPciInfo_v3" => (nint)(delegate* unmanaged[Cdecl]<nint, byte*, int>)&Pci,
-        "nvmlDeviceGetTemperature" or "nvmlDeviceGetClockInfo" or "nvmlDeviceGetMaxClockInfo" or "nvmlDeviceGetFanSpeed_v2"
+        "nvmlDeviceGetTemperature" => (nint)(delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)&Temperature,
+        "nvmlDeviceGetClockInfo" or "nvmlDeviceGetMaxClockInfo" or "nvmlDeviceGetFanSpeed_v2"
             => (nint)(delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)&IndexedValue,
         "nvmlDeviceGetPowerUsage" or "nvmlDeviceGetPowerManagementLimit" or "nvmlDeviceGetPowerManagementDefaultLimit"
             or "nvmlDeviceGetEnforcedPowerLimit" or "nvmlDeviceGetNumFans"
@@ -41,9 +42,10 @@ internal static unsafe class FakeNvml
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int ByIndex(uint i, nint* h) { Calls++; *h = 0x77; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Text(nint h, byte* b, uint n) { Calls++; b[0] = (byte)'G'; b[1] = 0; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pci(nint h, byte* b) { Calls++; return Answer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Temperature(nint h, uint i, uint* v) { Calls++; *v = 35; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int IndexedValue(nint h, uint i, uint* v) { Calls++; *v = 2880; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Value(nint h, uint* v) { Calls++; *v = 1; return Answer; }
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pair(nint h, uint* v) { Calls++; v[0] = 100; v[1] = 50; return Answer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pair(nint h, uint* v) { Calls++; v[0] = GpuUtil; v[1] = 50; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int TwoValues(nint h, uint* a, uint* b) { Calls++; *a = 400_000; *b = 600_000; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Margin(nint h, uint* m) { Calls++; m[1] = 39; return Answer; }
 
@@ -73,6 +75,19 @@ internal static unsafe class FakeNvml
 [Collection("fake-nvml")]
 public sealed class NvmlApiTests : IDisposable
 {
+    [Fact]
+    public void Successful_native_call_with_impossible_utilization_is_not_busy_or_idle()
+    {
+        using var api = FakeNvml.Open();
+        FakeNvml.GpuUtil = 1099622400;
+        Assert.Throws<NvmlException>(() => api.Utilization(H));
+        Assert.True(api.Lost);
+        int calls = FakeNvml.Calls;
+        Assert.Throws<NvmlException>(() => api.Utilization(H));
+        Assert.Equal(calls, FakeNvml.Calls);
+        api.Dispose();
+        Assert.Equal(0, FakeNvml.Shutdowns);
+    }
     private const nint H = 0x77;
 
     public NvmlApiTests() => FakeNvml.Reset();
@@ -161,7 +176,7 @@ public sealed class NvmlApiTests : IDisposable
         Assert.Equal(code, Assert.Throws<NvmlException>(() => nvml.TemperatureC(H)).Code);
         Assert.False(nvml.Lost);
         FakeNvml.Answer = 0;
-        Assert.Equal(2880u, nvml.TemperatureC(H));
+        Assert.Equal(35u, nvml.TemperatureC(H));
         nvml.Dispose();
         Assert.Equal(1, FakeNvml.Shutdowns);
     }
@@ -184,3 +199,6 @@ public sealed class NvmlApiTests : IDisposable
         Assert.Null(DriverLoss.Why(null, [healthy]));
     }
 }
+
+
+
