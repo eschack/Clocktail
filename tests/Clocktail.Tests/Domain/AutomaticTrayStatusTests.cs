@@ -291,7 +291,7 @@ public sealed partial class AutomaticTrayStatusTests : IDisposable
         int observed = 0;
         var responder = new DriverResetResponder(request =>
         {
-            if (request.Op == BrokerRequest.OpProfile && request.Kind is "apply" or "after-reset" or "resume")
+            if (request.Op == BrokerRequest.OpProfile && request.Kind is "start" or "after-reset" or "resume")
             {
                 FakeDriver.GetWords.Clear(); var during = Status("verify").Devices[0];
                 Assert.True(during.Refresh!.Restoration.Startup == RestorationState.Pending || during.Refresh.Restoration.Recovery == RestorationState.Pending);
@@ -310,6 +310,18 @@ public sealed partial class AutomaticTrayStatusTests : IDisposable
         Assert.Equal(RestorationState.Ready, _dispatcher.StatusLifecycle.Read("gpu-A").Recovery);
         Assert.Equal(0, FakeDriver.Sets);
     }
+    [Fact]
+    public void Tray_recovery_stays_pending_until_both_observed_resets_finish()
+    {
+        var lifecycle = new BrokerStatusLifecycle();
+        lifecycle.PendingRecovery(["gpu"], "first reset");
+        lifecycle.PendingRecovery(["gpu"], "second reset");
+        using (var first = lifecycle.Begin("gpu", RestorationKind.DriverReset)) first.Complete(true);
+        Assert.Equal(RestorationState.Pending, lifecycle.Read("gpu").Recovery);
+        using (var second = lifecycle.Begin("gpu", RestorationKind.DriverReset)) second.Complete(true);
+        Assert.Equal(RestorationState.Ready, lifecycle.Read("gpu").Recovery);
+    }
+
     [Fact]
     public void Overlapping_startup_cannot_clear_a_queued_reset_and_failed_recovery_stays_failed()
     {

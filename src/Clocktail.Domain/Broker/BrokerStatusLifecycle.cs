@@ -13,7 +13,7 @@ public sealed class BrokerStatusLifecycle
         public long Generation;
         public int Active;
         public bool Failed;
-        public bool QueuedRecovery;
+        public int QueuedRecovery;
         public string? Reason;
     }
     private readonly object _gate = new();
@@ -26,7 +26,7 @@ public sealed class BrokerStatusLifecycle
     }
     public void PendingRecovery(IEnumerable<string> ids, string reason)
     {
-        lock (_gate) foreach (var id in ids) { var d = Get(id); d.Recovery = RestorationState.Pending; d.QueuedRecovery = true; d.Reason = reason; d.Generation++; }
+        lock (_gate) foreach (var id in ids) { var d = Get(id); d.Recovery = RestorationState.Pending; d.QueuedRecovery++; d.Reason = reason; d.Generation++; }
         Invalidated?.Invoke();
     }
     public Lease Begin(string id, RestorationKind kind)
@@ -36,7 +36,7 @@ public sealed class BrokerStatusLifecycle
             var d = Get(id);
             if (d.Active++ == 0) d.Failed = false;
             if (kind == RestorationKind.Startup) d.Startup = RestorationState.Pending;
-            else { d.Recovery = RestorationState.Pending; d.QueuedRecovery = false; }
+            else { d.Recovery = RestorationState.Pending; if (d.QueuedRecovery > 0) d.QueuedRecovery--; }
             d.Reason = kind.ToString(); d.Generation++;
         }
         Invalidated?.Invoke();
@@ -63,7 +63,7 @@ public sealed class BrokerStatusLifecycle
             d.Failed |= !success;
             d.Active--;
             if (kind == RestorationKind.Startup) d.Startup = success ? RestorationState.Ready : RestorationState.Failed;
-            if (d.Active == 0 && !d.QueuedRecovery && d.Recovery == RestorationState.Pending) d.Recovery = d.Failed ? RestorationState.Failed : RestorationState.Ready;
+            if (d.Active == 0 && d.QueuedRecovery == 0 && d.Recovery == RestorationState.Pending) d.Recovery = d.Failed ? RestorationState.Failed : RestorationState.Ready;
             d.Reason = success ? null : $"{kind} did not complete successfully";
         }
         Invalidated?.Invoke();
