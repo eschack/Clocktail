@@ -52,7 +52,8 @@ internal static class PreviewRenderer
                 string? requested = null;
                 form.EditorRequested += id => requested = id;
                 launch.PerformClick();
-                if (!launch.Visible || launch.Enabled != (device != null) || requested != device?.StableId)
+                bool canOpen = device != null && device.Refresh?.MeasurementBusy != true;
+                if (!launch.Visible || launch.Enabled != canOpen || requested != (canOpen ? device!.StableId : null))
                     throw new InvalidOperationException("The editor action must target the displayed GPU.");
             }
             if (view == "hover" && (!form.Enabled || Descendants(form).OfType<Label>().Any(label => !label.Enabled)))
@@ -142,6 +143,8 @@ internal static class PreviewRenderer
                     || form.Bounds != bounds || scroll.AutoScrollPosition != position || grid.CurrentCell != selected || form.CurveSelected != curve || !form.DiagnosticsExpanded)
                     throw new InvalidOperationException("Routine telemetry/value/measurement refresh replaced controls or moved the pinned/unpinned details view.");
                 var check = form.Controls.Find("CheckNowButton", true).OfType<Button>().Single();
+                var editor = controls.OfType<Button>().Single(b => b.Text == "Open V/F editor");
+                if (editor.Enabled == measurement) throw new InvalidOperationException("Measurement did not gate the open editor action.");
                 if (check.Enabled == measurement) throw new InvalidOperationException("Measurement did not gate Check now.");
                 if (!SystemInformation.HighContrast && grid.DefaultCellStyle.SelectionBackColor != Palette.Dark.Surface)
                     throw new InvalidOperationException("Read-only selection uses a success color.");

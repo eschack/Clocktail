@@ -16,6 +16,35 @@ internal static class Program
     private static T Control<T>(CurveEditorForm form, string name) where T : Control => (T)form.Controls[name]!;
     private static void Check(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
+    private static int ProbeSave(string id)
+    {
+        bool wrote = false;
+        var result = EditorState.Save(id, () => { wrote = true; return new(true, null, null); });
+        if (result.Saved && wrote) return 0;
+        return !wrote && result.Error?.Contains("Another editor") == true ? 2 : 1;
+    }
+
+    private static void VerifyConcurrentSave()
+    {
+        string id = "synthetic-" + Guid.NewGuid().ToString("N");
+        int Probe()
+        {
+            var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add(typeof(Program).Assembly.Location);
+            start.ArgumentList.Add("--probe-save");
+            start.ArgumentList.Add(id.ToUpperInvariant());
+            using var child = Process.Start(start)!;
+            Check(child.WaitForExit(10000), "The competing editor save blocked.");
+            return child.ExitCode;
+        }
+        var first = EditorState.Save(id, () =>
+        {
+            Check(Probe() == 2, "The competing process must be refused before its write callback.");
+            return new(true, null, null);
+        });
+        Check(first.Saved && Probe() == 0, "A second process must be able to save after the first finishes.");
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -26,6 +55,8 @@ internal static class Program
                 Console.Error.WriteLine("UI preview timed out; a modal dialog or native operation did not return.");
                 Environment.Exit(1);
             }, null, TimeSpan.FromMinutes(1), Timeout.InfiniteTimeSpan);
+            if (args is ["--probe-save", var id]) return ProbeSave(id);
+            VerifyConcurrentSave();
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();

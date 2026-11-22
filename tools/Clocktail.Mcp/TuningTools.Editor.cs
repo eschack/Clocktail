@@ -24,9 +24,6 @@ public sealed partial class TuningTools
     /// <summary>Beside the GPU's records: the curve the window saved last and the band it was drawn with, so the same band
     /// is shown again while the card still holds that curve (a detection alone would reopen a widened band narrower).</summary>
     public const string BandFile = "curve-editor.json";
-    /// <summary>One save at a time in this process (the window allows one, but the claim is cheap and the card is one).</summary>
-    private static readonly SemaphoreSlim SaveGate = new(1, 1);
-
     [McpServerTool(Name = "curve_editor", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Open the V/F curve editor window on the person's desktop, when they ask for it. It shows this GPU's curve (dark, " +
         "points dragged by hand), a live dashed crosshair at measured NVVDD voltage and core frequency, every crash pinned to the curve point it happened at, the highest setting each point was " +
@@ -426,11 +423,7 @@ public sealed partial class TuningTools
     /// none is), its readback, then keep_as_daily; a session it opened is ended (the daily profile, now this curve, stays
     /// on). Every refusal says what the card holds afterwards.</summary>
     private SaveResult SaveFromEditor(EditorData data, SaveRequest request, Action<string> progress)
-    {
-        if (!SaveGate.Wait(0)) return new SaveResult(false, null, "Another save is in progress");
-        try { using (EditorState.Saving()) return SaveNow(data, request, progress); }
-        finally { SaveGate.Release(); }
-    }
+        => EditorState.Save(card.StableId, () => SaveNow(data, request, progress));
 
     private SaveResult SaveNow(EditorData data, SaveRequest request, Action<string> progress)
     {

@@ -279,9 +279,16 @@ internal sealed class StatusForm : Form
             plot.Controls.Add(curvePanel);
             var editor = Button("Open V/F editor", () =>
             {
-                if (d != null) EditorRequested?.Invoke(d.StableId);
+                if (d != null && d.Refresh?.MeasurementBusy != true) EditorRequested?.Invoke(d.StableId);
             }, Glyph.Curve);
-            editor.Enabled = d != null;
+            void UpdateEditor()
+            {
+                bool measuring = d?.Refresh?.MeasurementBusy == true;
+                editor.Enabled = d != null && !measuring;
+                editor.AccessibleDescription = measuring ? "Measurement running: opening the editor is paused." : "Open the selected GPU’s V/F editor.";
+            }
+            UpdateEditor();
+            _bindings.Add(UpdateEditor);
             var curveActions = Row();
             curveActions.Dock = DockStyle.Bottom;
             curveActions.Controls.Add(editor);

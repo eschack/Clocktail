@@ -132,6 +132,21 @@ public static class EditorState
         return true;
     }
 
+    /// <summary>Both editor hosts hold the same GPU lock from initial readback through keep or rollback.</summary>
+    public static SaveResult Save(string stableId, Func<SaveResult> save)
+    {
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(stableId.ToUpperInvariant())));
+        using var gate = new Mutex(false, $@"Global\Clocktail.CurveEditor.Save.{key}");
+        try
+        {
+            if (!gate.WaitOne(0)) return new(false, null, "Another editor is saving this GPU. Try again after it finishes.");
+        }
+        catch (AbandonedMutexException) { } // We own the mutex. Save starts with a fresh GPU readback.
+        try { using (Saving()) return save(); }
+        finally { gate.ReleaseMutex(); }
+    }
+
     /// <summary>A save in flight, until the returned scope is disposed.</summary>
     public static IDisposable Saving()
     {
