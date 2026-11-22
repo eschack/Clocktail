@@ -17,6 +17,7 @@ internal sealed class StatusForm : Form
     private Action<TrayStatusCache, StatusDevice?, bool, bool>? _refreshContext;
     private Button? _pinButton;
     private Rectangle? _workArea;
+    public event Action<string>? EditorRequested;
     public event Action? CheckRequested;
     public event Action? QuietRequested;
     public event Action<string>? DeviceSelected;
@@ -191,16 +192,16 @@ internal sealed class StatusForm : Form
         var band = Stack();
         bool matched = state == TrayState.DailyMatched;
         _bindings.Insert(0, () => matched = state == TrayState.DailyMatched);
-        band.BackColor = matched ? _palette.AccentSurface : _palette.Secondary;
+        band.BackColor = matched ? _palette.GoodSurface : _palette.Secondary;
         band.Padding = new Padding(12);
         band.Margin = new Padding(0, 16, 0, 14);
         var title = Bound(() => _hover ? state == TrayState.DailyMatched ? "Daily  ·  Controls match" : description.Title : description.Title, _hover ? 18 : 13, false);
-        if (matched) title.ForeColor = _palette.Accent;
+        if (matched) title.ForeColor = _palette.Good;
         var statusLine = Row();
-        var statusGlyph = new GlyphView(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted, 20);
+        var statusGlyph = new GlyphView(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Good : _palette.Warning, 20);
         statusLine.Controls.Add(statusGlyph);
-        _bindings.Add(() => { band.BackColor = matched ? _palette.AccentSurface : _palette.Secondary; title.ForeColor = matched ? _palette.Accent : _palette.Ink;
-            statusGlyph.UpdateGlyph(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Accent : _palette.Muted); });
+        _bindings.Add(() => { band.BackColor = matched ? _palette.GoodSurface : _palette.Secondary; title.ForeColor = matched ? _palette.Good : _palette.Ink;
+            statusGlyph.UpdateGlyph(matched ? _hover ? Glyph.Check : Glyph.CheckCheck : Glyph.Attention, matched ? _palette.Good : _palette.Warning); });
         var statusText = Stack();
         title.MaximumSize = new Size(_hover ? 260 : 440, 0);
         statusText.Controls.Add(title);
@@ -276,6 +277,15 @@ internal sealed class StatusForm : Form
             var plot = new TabPage("V/F curve") { BackColor = _palette.Surface, ForeColor = _palette.Ink };
             var curvePanel = new CurvePanel(d?.Verification?.Curve ?? [], _palette) { Dock = DockStyle.Fill };
             plot.Controls.Add(curvePanel);
+            var editor = Button("Open V/F editor", () =>
+            {
+                if (d != null) EditorRequested?.Invoke(d.StableId);
+            }, Glyph.Curve);
+            editor.Enabled = d != null;
+            var curveActions = Row();
+            curveActions.Dock = DockStyle.Bottom;
+            curveActions.Controls.Add(editor);
+            plot.Controls.Add(curveActions);
             _bindings.Add(() => curvePanel.UpdatePoints(d?.Verification?.Curve ?? []));
             tabs.TabPages.Add(settings); tabs.TabPages.Add(plot);
             tabs.SelectedIndex = CurveSelected ? 1 : 0;

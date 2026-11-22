@@ -4,6 +4,8 @@ Clocktail.Tray is a separate, unelevated, read-only Windows application. Launchi
 
 The **Profile first** design provides a compact cached hover card, a click-open details panel, an applied/saved comparison, and the last fully verified effective V/F curve. GPU identity and values come from the broker. Missing values are unavailable; missing saved targets are **Not saved**. Policy remains **managed by the agent / unavailable**. A match is not a stability or safety assessment.
 
+On the **V/F curve** tab in Details, **Open V/F editor** opens the interactive Clocktail editor for the selected GPU. Opening reads the curve. Saving and deleting history use the editor’s existing confirmation flows. The editor stays open if you exit the tray. In demo mode it uses synthetic points and cannot save.
+
 ## Build and preview
 
 Requires the repository's .NET 10 SDK and Windows for native execution.

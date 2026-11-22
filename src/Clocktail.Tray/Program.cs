@@ -28,6 +28,11 @@ internal static class Program
             MessageBox.Show("Launch Clocktail Tray from a normal, unelevated desktop session.", "Clocktail Tray");
             return;
         }
+        if (args is [("--curve-editor" or "--demo-editor"), var id])
+        {
+            EditorLauncher.Run(id, args[0] == "--demo-editor");
+            return;
+        }
         using var single = new Mutex(true, $"Local\\Clocktail.Tray.{identity.User?.Value}", out bool first);
         if (!first) return;
         try { using var context = new TrayContext(demo); Application.Run(context); }

@@ -2,7 +2,7 @@ using System.Drawing.Drawing2D;
 
 namespace Clocktail.Tray;
 
-internal enum Glyph { Gauge, Pin, Close, Check, CheckCheck, Thermometer, Zap, CircleCheck, Refresh, Moon, ChevronDown, ChevronUp, Attention }
+internal enum Glyph { Gauge, Pin, Close, Check, CheckCheck, Thermometer, Zap, CircleCheck, Refresh, Moon, ChevronDown, ChevronUp, Attention, Curve }
 
 /// <summary>Locally drawn, DPI-independent line icons; no symbol-font fallback or network assets.</summary>
 internal static class LineIcons
@@ -50,6 +50,12 @@ internal static class LineIcons
                 break;
             case Glyph.Zap:
                 Line(new(13, 2), new(4, 13), new(11, 13), new(10, 22), new(21, 10), new(14, 10), new(13, 2));
+                break;
+            case Glyph.Curve:
+                Line(new(3, 18), new(11, 10), new(21, 5));
+                using (var dot = new SolidBrush(color))
+                    foreach (var point in new PointF[] { new(3, 18), new(11, 10), new(21, 5) })
+                        graphics.FillEllipse(dot, point.X - 2, point.Y - 2, 4, 4);
                 break;
             case Glyph.Refresh:
                 graphics.DrawArc(pen, 3, 4, 17, 16, 55, 270);
@@ -110,7 +116,7 @@ internal sealed class GlyphButton : Button
     private readonly Palette _palette;
     public GlyphButton(Glyph glyph, Palette palette)
     {
-        _glyph = glyph; _ink = palette.Muted; _palette = palette;
+        _glyph = glyph; _ink = palette.Ink; _palette = palette;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
         TextImageRelation = TextImageRelation.ImageBeforeText;
         UpdateImage();

@@ -10,6 +10,7 @@
     <Description>Optional unelevated, read-only Clocktail tray companion.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\tools\Clocktail.Mcp\Clocktail.Mcp.csproj" />
     <ProjectReference Include="..\Clocktail.Domain\Clocktail.Domain.csproj" />
   </ItemGroup>
 </Project>

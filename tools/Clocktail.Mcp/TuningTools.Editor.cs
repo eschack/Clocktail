@@ -42,7 +42,9 @@ public sealed partial class TuningTools
         "daily profile (with any other trial settings in force, available in Details) and shows the result. The opened curve " +
         "is preserved until edited; undo/redo, exact restore, numeric offsets and layer toggles are available. Returns at once; call " +
         "again to bring the window to the front or to read how the last one ended. Opening it writes nothing.")]
-    public string CurveEditor() => Guard(() =>
+    public string CurveEditor() => OpenCurveEditor(null);
+
+    public string OpenCurveEditor(Action<string>? onClosed) => Guard(() =>
     {
 #if WINDOWS
         if (!EditorState.TryClaim())
@@ -64,7 +66,9 @@ public sealed partial class TuningTools
         }, outcome =>
         {
             EditorState.Closed(outcome);
-            try { card.Broker(BrokerRequest.OpExperiment, "note", $"Curve editor window closed: {outcome}"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
+            try { card.Broker(BrokerRequest.OpExperiment, "note", $"Curve editor window closed: {outcome}"); }
+            catch (Exception e) when (e is IOException or InvalidOperationException) { }
+            finally { onClosed?.Invoke(outcome); }
         }, () => residency.LatestPoint);
         return Out(new
         {

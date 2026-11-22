@@ -41,7 +41,9 @@ internal sealed class TrayContext : ApplicationContext
             else _cache.Disconnect("Synthetic disconnected preview");
         }
         _ui.CreateControl();
-        _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "Clocktail · status unverified", Visible = true, ContextMenuStrip = _menu };
+        _ownedIcon = AppIcon.Create(TrayState.Unknown, _quiet);
+        _iconState = (TrayState.Unknown, _quiet);
+        _icon = new NotifyIcon { Icon = _ownedIcon, Text = "Clocktail · status unverified", Visible = true, ContextMenuStrip = _menu };
         Menu("Open details", OpenDetails);
         Menu("Check now", () => _ = Fetch(true));
         Menu("Quiet for benchmark", ToggleQuiet);
@@ -78,6 +80,7 @@ internal sealed class TrayContext : ApplicationContext
             if (!_quiet) Render();
         };
         _details.VisibleChanged += (_, _) => { if (_details.Visible) ScheduleExpiry(); };
+        _details.EditorRequested += id => EditorLauncher.Open(_details, id, _demo);
         _details.CheckRequested += () => _ = Fetch(true);
         _details.QuietRequested += ToggleQuiet;
         _details.DeviceSelected += id => _refresh.Select(id);

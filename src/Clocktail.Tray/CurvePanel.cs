@@ -36,7 +36,7 @@ internal sealed class CurvePanel(IReadOnlyList<StatusCurvePoint> points, Palette
             g.DrawString($"{maxY - (maxY - minY) * i / 3:0}", Font, ink, 3, y - 7);
         }
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var applied = new Pen(palette.Accent, 2);
+        using var applied = new Pen(palette.Ink, 2);
         g.DrawLines(applied, points.Select(p => At(p, p.EffectiveMhz)).ToArray());
         if (points.All(p => p.StockMhz != null))
         {

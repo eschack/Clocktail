@@ -46,6 +46,15 @@ internal static class PreviewRenderer
             using var bitmap = new Bitmap(form.ClientSize.Width, form.ClientSize.Height);
             form.DrawToBitmap(bitmap, form.ClientRectangle);
             bitmap.Save(Path.Combine(directory, $"{state}-{view}.png"), ImageFormat.Png);
+            if (view == "curve")
+            {
+                var launch = Descendants(form).OfType<Button>().Single(b => b.Text == "Open V/F editor");
+                string? requested = null;
+                form.EditorRequested += id => requested = id;
+                launch.PerformClick();
+                if (!launch.Visible || launch.Enabled != (device != null) || requested != device?.StableId)
+                    throw new InvalidOperationException("The editor action must target the displayed GPU.");
+            }
             if (view == "hover" && (!form.Enabled || Descendants(form).OfType<Label>().Any(label => !label.Enabled)))
                 throw new InvalidOperationException("The hover card is inheriting disabled text rendering.");
             if (view == "hover")
@@ -89,7 +98,7 @@ internal static class PreviewRenderer
         light.DrawToBitmap(lightDiagnostics, light.ClientRectangle);
         lightDiagnostics.Save(Path.Combine(directory, $"{state}-light-diagnostics.png"), ImageFormat.Png);
         light.Hide();
-        var contrast = new Palette(Color.Black, Color.Black, Color.White, Color.White, Color.White, Color.Yellow, Color.FromArgb(0, 0, 96));
+        var contrast = new Palette(Color.Black, Color.Black, Color.White, Color.White, Color.White, Color.Yellow, Color.FromArgb(0, 0, 96), Color.White, Color.Black, Color.White);
         using var highContrast = new StatusForm(false, contrast, offscreen: true) { Location = new Point(-32000, -32000) };
         highContrast.FitToWorkArea(new Rectangle(0, 0, 1920, 1200)); highContrast.Present(cache, "demo-gpu", state == "quiet", true, false);
         highContrast.Show(); Application.DoEvents(); highContrast.PerformLayout();

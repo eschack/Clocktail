@@ -58,20 +58,20 @@ internal static class Presentation
         device?.Verification is { Error: not null } or { Curve.Count: 0 } ? "Full check attempted" : "Curve last verified");
 }
 
-internal sealed record Palette(Color Surface, Color Secondary, Color Ink, Color Muted, Color Rule, Color Accent, Color AccentSurface)
+internal sealed record Palette(Color Surface, Color Secondary, Color Ink, Color Muted, Color Rule, Color Accent, Color AccentSurface, Color Good, Color GoodSurface, Color Warning)
 {
     public static Palette Current
     {
         get
         {
             if (SystemInformation.HighContrast) return new(SystemColors.Window, SystemColors.Control, SystemColors.WindowText,
-                SystemColors.WindowText, SystemColors.WindowText, SystemColors.HighlightText, SystemColors.Highlight);
+                SystemColors.WindowText, SystemColors.WindowText, SystemColors.HighlightText, SystemColors.Highlight, SystemColors.WindowText, SystemColors.Window, SystemColors.WindowText);
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
             bool light = key?.GetValue("AppsUseLightTheme") is int v && v != 0;
             return light ? Light : Dark;
         }
     }
-    public static Palette Dark => new(C("202226"), C("282b30"), C("e8ebf0"), C("a1a8b3"), C("373b42"), C("59cdb2"), C("243c36"));
-    public static Palette Light => new(C("fcfcfd"), C("f1f3f5"), C("24282f"), C("63707c"), C("e2e6e9"), C("137966"), C("e8f5f0"));
+    public static Palette Dark { get; } = new(C("1c1b19"), C("2a2825"), C("f0eee6"), C("aba69c"), C("48443d"), C("d97757"), C("3d3029"), C("a3c47e"), C("293025"), C("e9c46a"));
+    public static Palette Light { get; } = new(C("fcfcfd"), C("f1f3f5"), C("24282f"), C("63707c"), C("e2e6e9"), C("9e472e"), C("faeae3"), C("396523"), C("edf4e7"), C("805900"));
     private static Color C(string hex) => ColorTranslator.FromHtml("#" + hex);
 }
