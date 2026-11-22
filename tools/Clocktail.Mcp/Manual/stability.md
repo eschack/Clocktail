@@ -2,8 +2,14 @@
 Validate this GPU's settings with tests and real workloads; there is no universal stable offset or margin.
 
 `stress_test` runs NVIDIA's nvgwls when it is installed and usable. Its load parameter controls the stress workload.
-`lab_test` checks core, memory and cache results exactly. Burn, light and pulse cover different loads; solo isolates high curve points; leap exercises heavy-to-light transitions.
-Verify that the intended clock/voltage point actually ran. An inconclusive test is not a pass.
+Choose a goal with `lab_test(profile: "core" | "memory" | "uncore" | "all" | "aria" | "symphony")`. These are test workloads and time budgets, not GPU tuning presets.
+The default core profile gives burn 30 s, solo 60 s and leap 60 s (150 s total). Memory gives memory 60 s + latency 30 s; uncore gives l2 30 s + memory 30 s; all takes 270 s.
+Profiles can be lengthened with `seconds`; a shorter screening run uses explicit `phases`. Bare phase lists keep the old equal split and 60 s default. Explicit `phase:seconds` schedules must add up to `seconds`.
+Aria names the existing C01 FP32 FMA workload; `c01_test` remains compatible. Symphony plays Aria (180 s) and then core (150 s) in isolated sequential workers under one card hold; it stops if a movement fails or is incomplete. Its aggregate clock/voltage medians include preparation and multiple movements and cannot qualify a V/F point. Aria defaults to an 85 °C limit and stops if temperature readings are unavailable for ten seconds.
+
+Burn, light and pulse are modes of the FP32 load family. Solo isolates high curve points; leap exercises heavy-to-light transitions. Memory, latency and l2 preserve their different access paths and results.
+Use targeted screening first, paired comparisons of a few candidates next, then graphics/application validation. NVIDIA nvgwls and custom light/pulse loads are optional cross-checks, not a mandatory suite for every step.
+Pass a point index from `curve_around` as `lab_test.targetPoint`. In each phase compare `target_samples` to `paired_samples` and inspect `most_sampled_vf`. Counts cover sampled visits, including CPU checks and pauses. An inconclusive test is not a pass.
 `watch` and `live_start` / `live_read` / `live_stop` measure the user's workload and frame times without injecting into the game. The live watch's whole-run frame rate (`fps_under_load`) covers only its windows under load; `fps_whole_capture` includes menus and loading screens.
 `game_test` is optional automation for Quake II RTX. It needs matching supported devices, an open session and the required local game installation. Its seed allows repeatable comparisons.
 ## Failure handling

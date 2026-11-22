@@ -11,6 +11,8 @@ Only two tuning guardrails apply:
 No extra software tuning envelope, mandatory clock/voltage pairing or model-specific preset is imposed. Encoding, GPU identity, concurrency and readback checks are execution requirements, not substitute tuning policy.
 A confirmation code is not consent: present the returned question, wait for the person's yes, then use that one-time code. Legacy `CLOCKTAIL_CONFIRM=off` does not bypass consent.
 Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile and install_service. begin_session and load_daily ask too: like all of these but install_service, through their own confirmation code.
+For client-requested daily-profile changes, the elevated broker service also presents an authoritative Windows confirmation dialog after MCP confirmation (`CLOCKTAIL_CONFIRM`) and revalidates the previewed state/fingerprint before committing; expect both prompts in interactive sessions.
+The dialog runs outside the card operation lock. Only one confirmation can wait; decline/cancel has a brief cooldown. Daily JSON is not approval: protected broker receipts must match before automatic apply. After upgrading, an existing profile needs one explicit `load_daily` confirmation; never ask the user to bypass this by editing receipt files.
 
 ## Baseline and daily
 "Stock" means this GPU's NVIDIA/board firmware settings, not a bundled set of numbers. Existing settings from another utility are not stock: report them and ask whether to tune from them, adopt them, or explicitly clear them.
@@ -28,6 +30,8 @@ Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, 
 By default `stress_test` and `lab_test` stop only when the card comes within 2 Â°C of NVIDIA's slowdown point; with a `maxTempC` they also stop there. `game_test` stops only at a `maxTempC` it is given, and the background sweeps (`tune_memory`, `tune_uncore`) make no thermal stop. NVIDIA's own protection stays active throughout.
 
 ## Tool map
+Choose a testing goal: `lab_test` for V/F validation (default core profile, 150 s), `tune_memory` for memory search, `tune_uncore` for XBAR/ratio/boost search, and `game_test` or the user's game for graphics confirmation. `lab_test` also has memory/uncore/all workload profiles; explicit custom phases retain the old equal split. Follow background jobs with `lab_status` / `lab_stop`. Memory `best_mhz` is a confirmed recommendation; `edge_mhz` is the scan boundary. Other backends are optional cross-checks.
+
 | Area | Tools |
 |---|---|
 | Read the current GPU | `card_report`, `card_settings`, `gpu_status`, `limiter`, `curve_around`, `diagnostic_report` |
@@ -35,7 +39,9 @@ By default `stress_test` and `lab_test` stop only when the card comes within 2 Â
 | Core curve and clocks | `adjust_curve`, `flatten_curve`, `set_curve`, `shift_curve`, `set_core_offset`, `set_clock_lock`, `curve_editor` |
 | Memory and clock domains | `set_memory_offset`, `adjust_xbar`, `adjust_clock_domain`, `set_clock_ratio`, `set_voltage_boost` |
 | Power and cooling | `set_power_limit`, `set_daily_power_limit`, `set_power_cap`, `set_current_limit`, `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
-| Measurements | `stress_test`, `lab_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+| Measurements | `stress_test`, `lab_test`, `c01_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+
+`c01_test` checks current GPU settings with sustained FP32 FMA and exact CPU comparison. Use the 180 s default near a suspected core V/F boundary. Compare the measured voltage, frequency and board power when changing `intensity`, which scales the thread-block grid.
 | User-owned profiles | `preview_daily`, `keep_as_daily`, `back_to_daily`, `stock`, `load_daily`, `list_presets`, `save_profile`, `load_preset`, `delete_profile` |
 | Setup and help | `install_service`, `manual` |
 

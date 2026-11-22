@@ -41,7 +41,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
 
     /// <summary>Takes the card for this job, or null when another job holds it. Held until the holder is disposed or the
     /// process ends (an abandoned mutex is taken over: its job is gone).</summary>
-    protected IDisposable? ClaimCard()
+    protected virtual IDisposable? ClaimCard()
     {
         var m = new Mutex(false, LabCard.JobMutex(stableId));
         try
@@ -60,7 +60,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
 
     /// <summary>"alive" once a minute: the service hands back trial-only settings when no agent says it is there; and
     /// alive.json, this process and its start, for whoever asks whether the job still runs.</summary>
-    protected Timer Heartbeat() => new(_ =>
+    protected virtual Timer Heartbeat() => new(_ =>
     {
         Broker("alive");
         try
@@ -86,6 +86,47 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// <summary>The transport boundary; protocol/state tests can exercise job cleanup without a service or a GPU.</summary>
     protected virtual BrokerResponse? Send(BrokerRequest request) => BrokerClient.TryCall(request);
 
+    /// <summary>Recheck the session in this job, after taking the card: an earlier entry-point check can be out of date.</summary>
+    protected string? SessionProblem(string subject)
+    {
+        var show = Broker("show");
+        if (show is not { Ok: true, Result: { } res } || !res.TryGetProperty("experiment", out var exp) || exp.ValueKind != JsonValueKind.Object)
+            return "no experiment session is open: begin_session first";
+        return exp.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object
+            ? $"a trial is in force: back_to_daily (or keep_as_daily) first, so the {subject} starts from the daily profile" : null;
+    }
+
+    protected RecordingResult? FailureRecording { get; private set; }
+    protected string? FailureRecordingProblem => FailureRecording is { State: not RecordingResult.Confirmed } r
+        ? $"failure recording {r.State}: {r.Detail}" : null;
+
+    /// <summary>A failure may be followed by more candidates only after the service acknowledges its measured trial.</summary>
+    protected RecordingResult RecordFailure(string? trialId, string note) =>
+        FailureRecording = RecordingResult.From(Broker("crash", note, key: trialId), trialId);
+
+    /// <summary>Call after releasing the measurement lease: recovery must give the card back before another trial.</summary>
+    protected bool RecordResetRecovery(string? stamp, string? trialId)
+    {
+        bool identified = !string.IsNullOrWhiteSpace(stamp) && !string.IsNullOrWhiteSpace(trialId);
+        bool recorded = identified && CrashRecorded(stamp);
+        string? detail = recorded ? null : !identified ? "the measured trial could not be identified: reset recovery cannot be confirmed"
+            : Inv($"the service had not recorded the driver reset within {CrashRecordWait.TotalSeconds:0} s");
+        FailureRecording = new(recorded ? RecordingResult.Confirmed : RecordingResult.Unknown, detail, trialId);
+        return recorded;
+    }
+
+    protected virtual void Settle()
+    {
+        for (int i = 0; i < 3 && !StopAsked; i++) Thread.Sleep(1000);
+    }
+
+    protected virtual int? CountResets(DateTime since)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try { return SystemLog.Count(SystemLog.DriverResetFilter, since.AddSeconds(-2)); }
+        catch (InvalidOperationException) { return null; }
+    }
+
     /// <summary>
     /// Holds the card for one measurement (a candidate written and measured, a comparison's four runs): judge.lock with this
     /// job's RunId, so every write but this job's own waits until it is given back. Waits for another run that holds it (a
@@ -95,7 +136,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// waits so (<see cref="JudgeLock.Info.Waits"/>), so such an operation finishes rather than stop part-way. How each
     /// answer is taken: <see cref="Quiet"/>.
     /// </summary>
-    protected IDisposable? Hold(Action<string>? log)
+    protected virtual IDisposable? Hold(Action<string>? log)
     {
         string path = JudgeLock.DefaultPath(), local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var until = DateTime.UtcNow.AddMinutes(LeaseWaitMinutes);
@@ -203,7 +244,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// back_to_daily in between took the trial off the record as survived, and the crash went to the daily profile. True
     /// once recorded.
     /// </summary>
-    protected bool CrashRecorded(string? stamp) => Recorded(() => (TrialAt(out bool answered), answered), stamp, CrashRecordWait, Thread.Sleep);
+    protected virtual bool CrashRecorded(string? stamp) => Recorded(() => (TrialAt(out bool answered), answered), stamp, CrashRecordWait, Thread.Sleep);
 
     /// <summary><see cref="CrashRecorded"/>'s wait: <paramref name="look"/> asked every second until the service answers
     /// with a trial other than <paramref name="stamp"/> (<see cref="SameTrial"/>; no answer says nothing: a busy pipe, a
@@ -223,7 +264,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// under its load. A child that hangs past its time and the grace, dies, or writes no result is a measurement that could
     /// not be made (inconclusive, the runner's), not a result about the card: a driver reset, which a GPU hang brings within
     /// the TDR delay, is counted apart by the caller.</summary>
-    protected LabResult Measure(int seconds, string phases, ulong? capMib)
+    protected virtual LabResult Measure(int seconds, string phases, ulong? capMib)
     {
         string json = Path.Combine(jobDir, $"run-{DateTime.UtcNow:HHmmssfff}.json");
         var psi = new ProcessStartInfo(labExe) { UseShellExecute = false, CreateNoWindow = true };

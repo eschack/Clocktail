@@ -91,10 +91,13 @@ public static class Limiter
         return best;
     }
 
+    private static readonly IReadOnlyList<ClockLimit> IdleOnly = [ClockLimit.Idle];
+    private static readonly IReadOnlyList<ClockLimit> NoneOnly = [ClockLimit.None];
+
     /// <summary>The limits in force, the wall first; <see cref="ClockLimit.Idle"/> or <see cref="ClockLimit.None"/> alone when none is.</summary>
     public static IReadOnlyList<ClockLimit> Holding(LimiterReading r, uint? maxUv, uint? curveTopKhz)
     {
-        if (Idle(r)) return [ClockLimit.Idle];
+        if (Idle(r)) return IdleOnly;
         var held = new List<ClockLimit>();
         if (PowerHolds(r)) held.Add(ClockLimit.Power);
         if (CurrentHolds(r)) held.Add(ClockLimit.Current);
@@ -103,7 +106,7 @@ public static class Limiter
         else if (CurveHolds(r, curveTopKhz)) held.Add(ClockLimit.Curve);
         if (ThermalHolds(r)) held.Add(ClockLimit.Thermal);
         if (HardwareHolds(r)) held.Add(ClockLimit.Hardware);
-        return held.Count == 0 ? [ClockLimit.None] : held;
+        return held.Count == 0 ? NoneOnly : held;
     }
 
     /// <summary>

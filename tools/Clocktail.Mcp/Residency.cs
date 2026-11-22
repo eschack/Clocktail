@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Clocktail.Domain.Broker;
+using Clocktail.Mcp.CurveEditor;
 using Microsoft.Extensions.Hosting;
 
 namespace Clocktail.Mcp;
@@ -43,6 +44,10 @@ public sealed class Residency(Card card) : BackgroundService
     private readonly object _gate = new();
     private readonly Queue<Tick> _recent = new();
     private readonly ResidencyLog _log = new(() => BrokerDir(card));
+    private LiveVfPoint? _latestPoint;
+
+    /// <summary>The latest unfiltered read, for the editor's live overlay. In-memory only; history still keeps load only.</summary>
+    public LiveVfPoint? LatestPoint => Volatile.Read(ref _latestPoint);
 
     protected override async Task ExecuteAsync(CancellationToken stop)
     {
@@ -54,7 +59,7 @@ public sealed class Residency(Card card) : BackgroundService
             {
                 // A sampler must never take the server down: an unreadable second is just a missing sample. Nor wait on a
                 // tool's read of the day files: the batch goes out on a later round.
-                try { Take(); } catch (Exception) { }
+                try { Take(); } catch (Exception) { Volatile.Write(ref _latestPoint, null); }
                 if (++n % 5 == 0) try { _log.Flush(wait: false); } catch (Exception) { }
             }
         }
@@ -66,6 +71,7 @@ public sealed class Residency(Card card) : BackgroundService
     {
         var (uv, mhz, util, w) = card.ReadPoint();
         var now = DateTimeOffset.Now;
+        Volatile.Write(ref _latestPoint, LiveVfPoint.From(now, uv, mhz));
         DateTimeOffset stress;
         lock (_gate) stress = _stressUntil;
         if (uv is not { } u || mhz is not { } m || util is not { } p || !Counts(p, now, stress)) return;
@@ -99,10 +105,17 @@ public sealed class Residency(Card card) : BackgroundService
 
     public static uint? LastLoadMedian(IReadOnlyList<Tick> ticks, DateTimeOffset now, TimeSpan within, TimeSpan span)
     {
-        var recent = ticks.Where(t => t.At >= now - within).ToList();
-        if (recent.Count == 0) return null;
-        var end = recent.Max(t => t.At);
-        var v = recent.Where(t => t.At >= end - span).Select(t => t.Uv).Order().ToList();
+        var cutoff = now - within;
+        DateTimeOffset? end = null;
+        for (int i = 0; i < ticks.Count; i++)
+            if (ticks[i].At >= cutoff && (end == null || ticks[i].At > end.GetValueOrDefault())) end = ticks[i].At;
+        if (end is not { } maxAt) return null;
+        var low = maxAt - span;
+        if (cutoff > low) low = cutoff;
+        var v = new List<uint>();
+        for (int i = 0; i < ticks.Count; i++)
+            if (ticks[i].At >= low) v.Add(ticks[i].Uv);
+        v.Sort();
         return v[v.Count / 2];
     }
 
@@ -133,6 +146,7 @@ public sealed class ResidencyLog(Func<string?> dir)
     private readonly object _gate = new();   // _pending
     private readonly object _io = new();     // the day files: one flush or read at a time
     private readonly List<Residency.Tick> _pending = [];
+    private long _trimmed;
     private string? _dir;
 
     public void Add(Residency.Tick tick)
@@ -140,7 +154,12 @@ public sealed class ResidencyLog(Func<string?> dir)
         lock (_gate)
         {
             _pending.Add(tick);
-            if (_pending.Count > MaxPending) _pending.RemoveRange(0, _pending.Count - MaxPending);
+            if (_pending.Count > MaxPending)
+            {
+                int drop = _pending.Count - MaxPending;
+                _pending.RemoveRange(0, drop);
+                _trimmed += drop;
+            }
         }
     }
 
@@ -173,7 +192,7 @@ public sealed class ResidencyLog(Func<string?> dir)
                     using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                     using var r = new StreamReader(fs);
                     while (r.ReadLine() is { } line)
-                        if (Parse(line) is { } t && t.At >= from && t.At <= to) ticks.Add(t);
+                        if (Parse(line, from, to) is { } t) ticks.Add(t);
                 }
             lock (_gate) ticks.AddRange(_pending.Where(t => t.At >= from && t.At <= to));
         }
@@ -184,9 +203,13 @@ public sealed class ResidencyLog(Func<string?> dir)
     private void FlushHeld()
     {
         List<Residency.Tick> batch;
+        int count;
+        long startTrim;
         lock (_gate)
         {
             if (_pending.Count == 0) return;
+            count = _pending.Count;
+            startTrim = _trimmed;
             batch = [.. _pending];
         }
         if (Dir() is not { } dir) return;
@@ -198,19 +221,43 @@ public sealed class ResidencyLog(Func<string?> dir)
                 sb.Append(string.Create(CultureInfo.InvariantCulture, $"{t.At:O},{t.Uv},{t.Mhz},{t.Util},{t.W:0.#}\n"));
             File.AppendAllText(Path.Combine(dir, Residency.DayFile(day.Key)), sb.ToString());
         }
-        var written = batch.ToHashSet();
-        lock (_gate) _pending.RemoveAll(written.Contains);
+        lock (_gate)
+        {
+            int alreadyDropped = (int)Math.Min(count, _trimmed - startTrim);
+            int removeCount = count - alreadyDropped;
+            if (removeCount > 0)
+            {
+                _pending.RemoveRange(0, removeCount);
+                _trimmed += removeCount;
+            }
+        }
     }
 
     private string? Dir() => _dir ??= dir();
 
-    private static Residency.Tick? Parse(string line)
+    private static Residency.Tick? Parse(ReadOnlySpan<char> line, DateTimeOffset from, DateTimeOffset to)
     {
-        var f = line.Split(',');
-        if (f.Length < 4 || !DateTimeOffset.TryParse(f[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out var at)) return null;
-        if (!uint.TryParse(f[1], CultureInfo.InvariantCulture, out var uv) || !uint.TryParse(f[2], CultureInfo.InvariantCulture, out var mhz)
-            || !uint.TryParse(f[3], CultureInfo.InvariantCulture, out var util)) return null;
-        double? w = f.Length > 4 && double.TryParse(f[4], CultureInfo.InvariantCulture, out var x) ? x : null;
+        int c1 = line.IndexOf(',');
+        if (c1 < 0 || !DateTimeOffset.TryParse(line[..c1], CultureInfo.InvariantCulture, DateTimeStyles.None, out var at)) return null;
+        if (at < from || at > to) return null;
+        var rest = line[(c1 + 1)..];
+        int c2 = rest.IndexOf(',');
+        if (c2 < 0 || !uint.TryParse(rest[..c2], CultureInfo.InvariantCulture, out var uv)) return null;
+        rest = rest[(c2 + 1)..];
+        int c3 = rest.IndexOf(',');
+        if (c3 < 0 || !uint.TryParse(rest[..c3], CultureInfo.InvariantCulture, out var mhz)) return null;
+        rest = rest[(c3 + 1)..];
+        int c4 = rest.IndexOf(',');
+        var f3 = c4 < 0 ? rest : rest[..c4];
+        if (!uint.TryParse(f3, CultureInfo.InvariantCulture, out var util)) return null;
+        double? w = null;
+        if (c4 >= 0)
+        {
+            rest = rest[(c4 + 1)..];
+            int c5 = rest.IndexOf(',');
+            var f4 = c5 < 0 ? rest : rest[..c5];
+            if (double.TryParse(f4, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)) w = x;
+        }
         return new Residency.Tick(at, uv, mhz, util, w);
     }
 }

@@ -4,6 +4,11 @@ The broker keeps a lightweight record of where the GPU actually runs: whenever t
 client or MCP server is connected. This record feeds the curve editor's "Observed V/F" dots and `data_points`'
 `by_point`, alongside the residency samples the MCP server already records.
 
+The MCP server's separate residency sampler runs once a second, in both full and lite mode. It queries only the current
+graphics clock, GPU utilization and board power through NVML, plus the existing NVVDD voltage read. It does not request
+the full telemetry snapshot's fan, VRAM, temperature, limit or maximum-clock fields. Residency keeps its existing
+timestamps, voltage, clock, utilization and power fields and load filter; the broker's 250 ms sampling is unchanged.
+
 ## What is recorded
 
 - **Source:** the broker's flight recorder (`FlightSampler`). It reads every GPU every 250 ms. The history uses the same
@@ -141,13 +146,27 @@ Nothing is rounded to make up the difference.
   time. It is read one UTC day at a time from the stored records, without building an observation per look. 60 days at
   4 looks a second (about 20 million) bin in about 0.3 s and 18 MiB of allocation on the development machine. This haze
   is not cut to a window: the 60-day ends can be off by under 1.5 s.
-- **Only significant bins are drawn.** A bin is shown when it holds at least 1 s of observed time (four looks)
-  and at least 0.05 % of all the observed time in the span. At light load the clock follows the load, not the curve,
-  and jumps by hundreds of MHz between looks, so most such bins hold a single look and say nothing about the curve. On
-  the first day of real use, this left 166 of 1009 bins (144 of 917 between 800 and 890 mV), holding 77 % of the
-  observed time. Nothing is deleted: the records stay on disk, and `observed` reports `shown_bins`, `hidden_bins`,
-  `hidden_seconds` and the `min_bin_seconds` applied. `data_points` is unaffected (its trials have their own 10 s
-  minimum).
+- **Only significant bins are drawn.** A bin is drawn when it holds, on average, at least 1 s of observed time for
+  each local calendar day in the span that holds any (four looks a day; 60 s over 60 days of use). An evening
+  that runs past UTC midnight is one day of use. At light load the clock follows
+  the load, not the curve, and jumps by hundreds of MHz between looks, so most such bins get a single look now and
+  then and say nothing about the curve.
+  - *Why per day:* with the same use, a bin's time and the floor grow together, so what is drawn does not change as the
+    history grows. A look that only passes through now and then never piles up past it, and hours of heavy use do not
+    raise it. 0.8.9's floor of 0.05 % of all time did rise with them (10 h a day for 60 days: 18 min) and hid a region
+    the card ran in for 10 minutes. A region spread by jitter over neighbouring clocks keeps every bin it really used
+    for 1 s a day or more.
+  - *Accepted limit:* a place the card ran in for less than about 1 s per day of use over the span (30 s once in 60
+    days) is not drawn. Its time still counts in a point's "Ran for".
+  - On the first day of real use (one active day, a 1 s floor) this left about 1 bin in 5, holding about 77 % of the
+    observed time. The floor then rises a second with each day of use, so faint dots from the first days fade out over
+    the next few: the rule settling, not lost data.
+  - Nothing is deleted. The records stay on disk, a curve point's "Ran for" counts every bin, drawn or not, and the
+    window's details line says how many bins are drawn and how much of the time they hold. `observed` reports
+    `shown_bins`, `hidden_bins`, `hidden_seconds`, `active_days` and the `min_bin_seconds` applied. `data_points` is
+    unaffected (its trials have their own 10 s minimum).
+- **Evidence read separately:** the trials' windows can reach back past the 60 days. `curve_editor`'s
+  `observed.evidence_read` reports what reading them met, beside `observed.read` for the haze.
 - **What the read met:** `curve_editor`'s `observed.read` and `data_points`' `vf_history_read` report `files`,
   `unreadable_files`, `records`, `skipped_records` and `torn_bytes`, with a note when something could not be read.
   Missing history then reads as missing, not as time the card was not above 825 mV.

@@ -21,7 +21,8 @@ public sealed record OwnershipState(
     string Identity,
     int Pid,
     string BootId,
-    IReadOnlyList<OwnedItem> Items)
+    IReadOnlyList<OwnedItem> Items,
+    DateTimeOffset? AdoptedAt = null)
 {
     public const int CurrentVersion = 1;
 }
@@ -68,40 +69,73 @@ public sealed class OwnershipJournal
 
     public OwnershipState? Load()
     {
-        var bytes = AtomicFile.Read(_path, 1024 * 1024);
-        if (bytes == null) return null;
-        try { return JsonSerializer.Deserialize<OwnershipState>(bytes, Json); }
+        try
+        {
+            var bytes = AtomicFile.Read(_path, 1024 * 1024);
+            if (bytes == null) return null;
+            var state = JsonSerializer.Deserialize<OwnershipState>(bytes, Json);
+            if (state == null || state.Version != OwnershipState.CurrentVersion || state.Pid <= 0
+                || string.IsNullOrWhiteSpace(state.Identity) || string.IsNullOrWhiteSpace(state.BootId)
+                || state.Items == null || state.Items.Any(InvalidItem)
+                || state.Items.Select(i => i.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Items.Count)
+                return null;
+            return state;
+        }
         catch (JsonException) { return null; }
+        catch (InvalidDataException) { return null; } // oversized records are unreadable, never "nothing owed"
+    }
+
+    private static bool InvalidItem(OwnedItem? item) =>
+        item == null || string.IsNullOrWhiteSpace(item.Kind) || string.IsNullOrWhiteSpace(item.Key) || item.Original == null;
+
+    private bool HasRecord => File.Exists(_path) || File.Exists(AtomicFile.BackupPath(_path));
+
+    private OwnershipState? LoadForMutation()
+    {
+        var current = Load();
+        if (current == null)
+        {
+            if (HasRecord) throw new InvalidOperationException("the ownership record is unreadable or unsupported; inspect it before writing");
+        }
+        else if (current.Pid != _host.Pid || !BootIdentity.SameBoot(current.BootId, _host.BootId) || current.Identity != _identity)
+            throw new InvalidOperationException("the ownership record is not this process's for this GPU and boot; run recovery before writing");
+        return current;
     }
 
     /// <summary>Record an item before touching the hardware it describes. Throws when the record cannot be written,
     /// in which case the caller must not write to the driver.</summary>
     public void Claim(OwnedItem item)
     {
-        var current = Load();
+        if (InvalidItem(item)) throw new ArgumentException("an owned item needs a kind, key and original value", nameof(item));
+        var current = LoadForMutation();
         var items = new List<OwnedItem>();
-        if (current != null && current.Pid == _host.Pid && BootIdentity.SameBoot(current.BootId, _host.BootId) && current.Identity == _identity)
-            items.AddRange(current.Items.Where(i => i.Id != item.Id));
-        else if (current != null && current.Items.Count > 0 && !(current.Pid == _host.Pid))
-            throw new InvalidOperationException($"an ownership record from pid {current.Pid} still exists; run recovery before claiming hardware");
+        DateTimeOffset? adoptedAt = null;
+        if (current != null)
+        {
+            items.AddRange(current.Items.Where(i => !string.Equals(i.Id, item.Id, StringComparison.OrdinalIgnoreCase)));
+            adoptedAt = current.AdoptedAt;
+        }
         items.Add(item);
-        Save(items);
+        Save(items, adoptedAt);
     }
 
     /// <summary>Forget an item after its state was given back and verified.</summary>
     public void Release(string kind, string key)
     {
-        var current = Load();
+        var current = LoadForMutation();
         if (current == null) return;
-        var rest = current.Items.Where(i => i.Id != $"{kind}/{key}").ToList();
+        var rest = current.Items.Where(i => !string.Equals(i.Id, $"{kind}/{key}", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (rest.Count == current.Items.Count) return; // no debt for this cell: do not flush/rotate a journal for a no-op
         if (rest.Count == 0) Clear();
-        else Save(rest);
+        else Save(rest, current.AdoptedAt);
     }
 
     public void Clear()
     {
-        if (File.Exists(_path)) File.Delete(_path);
+        // Remove the fallback first. If deleting it fails, keep the newest primary intact;
+        // deleting the primary first would resurrect an older debt via AtomicFile.Read.
         if (File.Exists(AtomicFile.BackupPath(_path))) File.Delete(AtomicFile.BackupPath(_path));
+        if (File.Exists(_path)) File.Delete(_path);
     }
 
     /// <summary>What a starting process should do about an existing record.</summary>
@@ -109,13 +143,18 @@ public sealed class OwnershipJournal
     {
         var s = Load();
         if (s == null)
-            return new RecoveryPlan(File.Exists(_path) ? RecoveryReason.Foreign : RecoveryReason.Nothing, [],
-                File.Exists(_path) ? "ownership record is unreadable" : "no ownership record");
+        {
+            bool exists = HasRecord;
+            return new RecoveryPlan(exists ? RecoveryReason.Foreign : RecoveryReason.Nothing, [],
+                exists ? "ownership record is unreadable or unsupported" : "no ownership record");
+        }
         if (s.Items.Count == 0) return new RecoveryPlan(RecoveryReason.Nothing, [], "empty ownership record");
         if (s.Identity != _identity) return new RecoveryPlan(RecoveryReason.Foreign, s.Items, $"record belongs to GPU '{s.Identity}', not '{_identity}'");
         if (!BootIdentity.SameBoot(s.BootId, _host.BootId)) return new RecoveryPlan(RecoveryReason.Rebooted, s.Items, "record predates the current boot; hardware was reset by the reboot");
         if (s.Pid == _host.Pid) return new RecoveryPlan(RecoveryReason.OwnedByThisProcess, s.Items, "owned by this process");
-        if (_host.IsProcessAlive(s.Pid, s.Items.Min(i => i.ClaimedAt))) return new RecoveryPlan(RecoveryReason.OwnedByLiveProcess, s.Items, $"pid {s.Pid} is still running");
+        // An adopted record carries the dead predecessor's ClaimedAt on its items; check pid reuse against when this owner took over.
+        DateTimeOffset ownerSince = s.AdoptedAt ?? s.Items.Min(i => i.ClaimedAt);
+        if (_host.IsProcessAlive(s.Pid, ownerSince)) return new RecoveryPlan(RecoveryReason.OwnedByLiveProcess, s.Items, $"pid {s.Pid} is still running");
         return new RecoveryPlan(RecoveryReason.OwnerDied, s.Items, $"pid {s.Pid} is gone (or now a later process); {s.Items.Count} item(s) must be given back");
     }
 
@@ -132,7 +171,7 @@ public sealed class OwnershipJournal
         switch (plan.Reason)
         {
             case RecoveryReason.OwnerDied:
-                Save(plan.Items);
+                Save(plan.Items, _host.Now);
                 return new RecoveryPlan(RecoveryReason.OwnedByThisProcess, plan.Items, $"adopted {plan.Items.Count} item(s) left by a process that is gone");
             case RecoveryReason.Rebooted:
                 Clear();
@@ -142,9 +181,9 @@ public sealed class OwnershipJournal
         }
     }
 
-    private void Save(IReadOnlyList<OwnedItem> items)
+    private void Save(IReadOnlyList<OwnedItem> items, DateTimeOffset? adoptedAt = null)
     {
-        var state = new OwnershipState(OwnershipState.CurrentVersion, _identity, _host.Pid, _host.BootId, items);
+        var state = new OwnershipState(OwnershipState.CurrentVersion, _identity, _host.Pid, _host.BootId, items, adoptedAt);
         AtomicFile.Write(_path, JsonSerializer.SerializeToUtf8Bytes(state, Json));
     }
 }

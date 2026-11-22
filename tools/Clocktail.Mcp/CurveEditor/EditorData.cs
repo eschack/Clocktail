@@ -44,7 +44,7 @@ public sealed record EvidenceMark(int Index, double Mv, double? StableMhz, doubl
     public double? HeldBelowMhz => StableMhz is { } set && StableRanMhz is { } ran && set - ran >= HeldBelowMinMhz ? set - ran : null;
 }
 
-/// <summary>Everything the window shows, read once when it opens; the window itself reads nothing from the card.</summary>
+/// <summary>The curve and historical layers, read once when the window opens. Live telemetry is supplied separately.</summary>
 public sealed record EditorData(
     string Gpu,
     double[] Mv,
@@ -71,7 +71,16 @@ public sealed record EditorData(
     /// <summary>The same for the person, with what the daily profile would lose; null when a keep changes nothing but the curve.</summary>
     string? AlsoKept,
     IReadOnlyList<TestMark> Tests,
-    VfCurveSnapshot Curve);
+    VfCurveSnapshot Curve,
+    /// <summary>Every bin of where the card ran, also those <see cref="Runs"/> leaves undrawn: what a point's "Ran for"
+    /// adds up (null: <see cref="Runs"/> is all of them).</summary>
+    IReadOnlyList<RunBin>? AllRuns = null,
+    /// <summary>One line for the window: how many bins are drawn and how much of the observed time they hold.</summary>
+    string? RunsSummary = null)
+{
+    /// <summary>The bins time is counted over: all of them, drawn or not.</summary>
+    public IReadOnlyList<RunBin> RunsForTotals => AllRuns ?? Runs;
+}
 
 /// <summary>What the save button hands over: the offsets, and the band they were drawn with (remembered for next time).</summary>
 public sealed record SaveRequest(int[] Offsets, int Foot, int Top);

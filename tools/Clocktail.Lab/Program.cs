@@ -9,7 +9,9 @@ using Clocktail.Lab.Game;
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
     Console.WriteLine("""
+        clocktail-lab run --profile core|memory|uncore|all [--seconds N] [--json FILE] [--gpu-pci ID]
         clocktail-lab run --phases burn,light,pulse,solo,leap,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
+                          (custom schedules accept burn:30,solo:60,leap:60 with --seconds 150)
                           [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N] [--max-temp-c C]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
         clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
@@ -20,6 +22,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
         clocktail-lab game-plan --seconds N [--seed S] [--patterns LIST] [--levers LIST] [--max-scale P] [--json]
                                                   (the game test's script, offline: no game, no GPU)
         clocktail-lab probe [--gpu-pci ID]
+        clocktail-lab c01 [--seconds N] [--intensity F] [--seed HEX] [--max-temp-c C] [--json FILE] [--gpu-pci ID]
         """);
     return 64;
 }
@@ -35,9 +38,23 @@ try
 {
     switch (args[0])
     {
+        case "c01":
+            return C01Command.Run(D("seconds", 180), D("intensity", 1), O("seed") ?? "5eed5eed5eed5eed",
+                D("max-temp-c", 85), O("gpu-pci"), O("json"));
         case "run":
         {
-            var phases = LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60));
+            // A profile takes whole seconds; a schedule with no --seconds runs for the sum of its durations.
+            var plan = O("profile") is { } goal ? Clocktail.Domain.Lab.LabTestPlan.Create(goal, O("phases"),
+                    O("seconds") is { } duration ? int.TryParse(duration, NumberStyles.Integer, CultureInfo.InvariantCulture, out int whole) ? whole
+                        : throw new ArgumentException("--seconds is a whole number of seconds with --profile") : null)
+                : O("seconds") == null && O("phases") is { } custom ? Clocktail.Domain.Lab.LabTestPlan.Create(phases: custom) : null;
+            if (plan?.Profile == "aria")
+                return C01Command.Run(plan.Seconds, D("intensity", 1), O("seed") ?? "5eed5eed5eed5eed",
+                    D("max-temp-c", 85), O("gpu-pci"), O("json"));
+            if (plan?.Profile == "symphony")
+                throw new ArgumentException("the symphony score is run through lab_test so its workers share one card lease");
+            var phases = plan == null ? LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60))
+                : LabConfig.Parse(plan.PhaseArgument, plan.Seconds);
             var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", double.PositiveInfinity));
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));
@@ -61,7 +78,8 @@ try
                 ulong fits = vramTotal > vramUsed + (1UL << 30) ? vramTotal - vramUsed - (1UL << 30) : 256UL << 20;
                 cap = cap == 0 ? fits : Math.Min(cap, fits);
             }
-            using var engine = new CudaEngine(cu, ordinal, D("mem-fraction", 0.7), cap) { InjectAtComputeLaunch = (int)D("inject-at", 0) };
+            bool memoryNeeded = phases.Any(p => p.Item1 is LabPhase.Memory or LabPhase.Latency or LabPhase.L2);
+            using var engine = new CudaEngine(cu, ordinal, D("mem-fraction", 0.7), cap, allocateMemory: memoryNeeded) { InjectAtComputeLaunch = (int)D("inject-at", 0) };
             var started = DateTime.UtcNow;
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -170,12 +188,6 @@ catch (Exception e) when (e is CudaException or DllNotFoundException or EntryPoi
     return 2;
 }
 
-// The CUDA device at the PCI address the MCP server gave (its card); the first one when none is given.
-static int Ordinal(CudaApi cu, string? pci)
-{
-    if (pci == null) return 0;
-    var want = NvmlSampler.Pci(pci);
-    for (int i = 0; i < cu.DeviceCount(); i++)
-        if (NvmlSampler.Pci(cu.DevicePciBusId(cu.Device(i))) == want) return i;
-    throw new InvalidOperationException($"CUDA has no GPU at PCI {pci}");
-}
+// Resolve the lab’s target to a CUDA ordinal for this process.
+static int Ordinal(CudaApi cu, string? pci) =>
+    GpuSelection.Select(Enumerable.Range(0, cu.DeviceCount()), "CUDA", pci, i => cu.DevicePciBusId(cu.Device(i)));

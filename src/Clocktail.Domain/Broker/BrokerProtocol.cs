@@ -3,6 +3,14 @@ using System.Text.Json.Serialization;
 
 namespace Clocktail.Domain.Broker;
 
+/// <summary>How the broker handles V/F when an internal request changes P0.</summary>
+internal enum P0CurvePolicy
+{
+    Ordinary,
+    KeepDisplacement,
+    RestoreDailyTarget,
+}
+
 /// <summary>
 /// The wire contract between the unprivileged client (the CLI, an agent) and the elevated broker. One request
 /// per call, one response. The set of operations is the whitelist: there is no "raw slot" or "register" verb,
@@ -55,6 +63,9 @@ public sealed record BrokerRequest(
     /// lock before changing the card or saved profile; a changed snapshot requires a new preview and confirmation.</summary>
     string? ExpectedProfileFingerprint = null)
 {
+    /// <summary>Curve behavior chosen by the broker for a trial or daily restoration.</summary>
+    internal P0CurvePolicy P0Curve { get; init; }
+
     public const string OpPing = "ping";
     /// <summary>Read-only status versions 1/2/3. Cached is driver-free; light (2/3) excludes V/F; verify reads the full curve. Version 3 adds dynamic settings and driver-free rows pages (Key = opaque cursor).</summary>
     public const string OpStatus = "status";

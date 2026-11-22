@@ -32,9 +32,11 @@ public sealed partial class SettingsTools
     private sealed record ReportRow(string Icon, string Name, string Original, string Now, string Change, string Mark, string Note);
 
     [McpServerTool(Name = "card_report", ReadOnly = true, OpenWorld = true), Description(
-        "Summarize this RTX 50 GPU's actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
+        "Summarize this RTX 50 GPU's PCI address, actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
     public string CardReport() => Guard(() =>
     {
+        string pciBusId = card.PciBusId;
+        var updateTask = Task.Run(UpdateCheck.Latest);
         using var settingsDoc = JsonDocument.Parse(CardSettings());
         using var limiterDoc = JsonDocument.Parse(WhatLimits());
         var s = settingsDoc.RootElement;
@@ -54,7 +56,7 @@ public sealed partial class SettingsTools
                 $"Clocktail reads and tunes the {Str(s, "gpu")} only; stress_test's load (nvgwls) picks its own GPU, so check the clock moves when it runs"));
         if (Str(s, "driver") is { } driver && Str(s, "tested_on") is { } tested)
             live.Add(new("🧪", "Tested on", "", $"driver {driver}, VBIOS {Str(s, "vbios")}", "", Info, tested));
-        var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
+        var (version, newer, versionNote) = UpdateCheck.Describe(updateTask.GetAwaiter().GetResult());
         live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
         var chart = CurveChart(s, l);
         string verdict = Verdict(rows.Concat(live).ToList());
@@ -63,6 +65,7 @@ public sealed partial class SettingsTools
         return Out(new
         {
             gpu = Str(s, "gpu"),
+            pci_bus_id = pciBusId,
             verdict,
             not_stock = Arr(s, "not_set_by_clocktail").Any() ? true : (bool?)null,
             update_available = newer,
@@ -376,19 +379,33 @@ public sealed partial class SettingsTools
         string profile = daily == null ? $"none: the card runs {found}" : Bool(daily, "suspended") == true ? $"suspended: {found} until load_daily"
             : Str(daily.Value, "kept_at") is { Length: >= 10 } kept ? $"kept {kept[..10]}" : "kept";
         var off = DailyOffCard(s);
+        string? unavail = daily is { } du && Str(du, "approvals_unavailable") is { Length: > 0 } unavailReason ? unavailReason : null;
+        string? unavailNote = unavail == null ? null
+            : $"protected approval folder unavailable ({unavail}): run npx -y clocktail@latest setup to repair it";
         // A profile kept on another VBIOS stays off the card (the service leaves it at stock); a new driver only asks for a test.
+        ReportRow dailyRow;
         if (daily is { } bound && Bool(bound, "suspended") != true && Str(bound, "vbios_now") is { } vbios)
-            rows.Add(new("💾", "Daily profile", "", $"{profile} on VBIOS {Str(bound, "kept_on_vbios")}, not on the card", "", Look,
-                $"the card now runs VBIOS {vbios}: the offsets were measured on the old firmware's curve, so the service leaves the card at stock. stress_test the curve on this VBIOS, then load_daily (it binds the profile to it) or keep_as_daily a new one"));
+            dailyRow = new("💾", "Daily profile", "", $"{profile} on VBIOS {Str(bound, "kept_on_vbios")}, not on the card", "", Look,
+                $"the card now runs VBIOS {vbios}: the offsets were measured on the old firmware's curve, so the service leaves the card at stock. stress_test the curve on this VBIOS, then load_daily (it binds the profile to it) or keep_as_daily a new one");
+        else if (daily is { } unapproved && Bool(unapproved, "suspended") != true && Bool(unapproved, "approved") == false)
+            dailyRow = new("💾", "Daily profile", "", $"{profile}, waiting for approval", "", Look,
+                // With no approval store load_daily is refused too: the repair comes first, and the note below says how.
+                unavail != null ? "the daily profile is kept, but waiting for approval: the service does not put it on until then, and nothing can be approved before the folder is repaired"
+                : "the daily profile is kept, but waiting for approval: the service does not put it on until then. Run load_daily and click Yes in the Clocktail Windows dialog to approve it (needed once after updating)");
         else if (off is { Count: > 0 })
-            rows.Add(new("💾", "Daily profile", "", $"{profile}, not on the card", "", Look,
-                $"the card differs from it: {string.Join(", ", off)}. The service puts it on after a start or a driver reset once the GPU has idled a few seconds; if this stays, back_to_daily puts it on now"));
+            dailyRow = new("💾", "Daily profile", "", $"{profile}, not on the card", "", Look,
+                $"the card differs from it: {string.Join(", ", off)}. The service puts it on after a start or a driver reset once the GPU has idled a few seconds; if this stays, back_to_daily puts it on now");
         else
-            rows.Add(new("💾", "Daily profile", "", off != null ? $"{profile}, on the card" : profile, "", Info,
-                daily != null && Bool(daily, "suspended") != true ? "the service puts it back after every boot and driver reset" : ""));
+            dailyRow = new("💾", "Daily profile", "", off != null ? $"{profile}, on the card" : profile, "", Info,
+                daily != null && Bool(daily, "suspended") != true ? "the service puts it back after every boot and driver reset" : "");
+        if (unavailNote != null)
+            dailyRow = dailyRow with { Mark = Look, Note = Join(dailyRow.Note, unavailNote) };
+        rows.Add(dailyRow);
         if (daily is { } dr && Str(dr, "driver_now") is { } driver && Str(dr, "vbios_now") == null)
             rows.Add(new("💾", "Kept on driver", "", $"{Str(dr, "kept_on_driver")}, now {driver}", "", Look,
-                "the profile still goes on; a new driver can move where the card runs at the same settings, so re-run stress_test on the daily curve before trusting it in games"));
+                Bool(dr, "approved") == false
+                    ? "the profile is waiting for approval; once approved, a new driver can move where the card runs at the same settings, so re-run stress_test on the daily curve before trusting it in games"
+                    : "the profile still goes on; a new driver can move where the card runs at the same settings, so re-run stress_test on the daily curve before trusting it in games"));
         if (Bool(s, "trial_in_force") == true)
             rows.Add(new("🧪", "Trial on the card", "", Str(s, "session", "trial", "change") ?? "a trial", "", Info, "not kept yet: keep_as_daily or back_to_daily"));
         return rows;
@@ -397,13 +414,14 @@ public sealed partial class SettingsTools
     /// <summary>
     /// Where the card differs from the daily profile it should be running: each setting the profile keeps whose value on
     /// the card is another ("memory offset +0 MHz (daily +358)"), or that cannot be read. Empty when the card is on it;
-    /// null when there is nothing to compare: no profile kept, it is suspended (stock is meant), or a trial is in force
-    /// (it is meant to differ). This catches every way the profile can fail to come back: a service that never started,
-    /// an apply that gave up or is still waiting for the GPU to idle, or anything else that wrote over it.
+    /// null when there is nothing to compare: no profile kept, it is suspended (stock is meant), it is waiting for
+    /// approval, or a trial is in force (it is meant to differ). This catches every way the profile can fail to come back:
+    /// a service that never started, an apply that gave up or is still waiting for the GPU to idle, or anything else that
+    /// wrote over it.
     /// </summary>
     public static List<string>? DailyOffCard(JsonElement s)
     {
-        if (Obj(s, "daily_profile") is not { } dp || Str(dp, "error") != null || Bool(dp, "suspended") == true || Bool(s, "trial_in_force") == true)
+        if (Obj(s, "daily_profile") is not { } dp || Str(dp, "error") != null || Bool(dp, "suspended") == true || Bool(dp, "approved") == false || Bool(s, "trial_in_force") == true)
             return null;
         var off = new List<string>();
         void Cmp(string name, double? now, double? daily, string unit, bool signed = true)
@@ -549,7 +567,7 @@ public sealed partial class SettingsTools
     {
         foreach (var p in path)
             if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(p, out e)) return [];
-        return e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().ToList() : [];
+        return e.ValueKind == JsonValueKind.Array ? (IEnumerable<JsonElement>)e.EnumerateArray() : [];
     }
 
     private static string F(double? v) => v is { } x ? x.ToString("0.#", Inv) : "?";

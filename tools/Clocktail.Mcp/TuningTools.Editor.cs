@@ -29,7 +29,7 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "curve_editor", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Open the V/F curve editor window on the person's desktop, when they ask for it. It shows this GPU's curve (dark, " +
-        "points dragged by hand), every crash pinned to the curve point it happened at, the highest setting each point was " +
+        "points dragged by hand), a live dashed crosshair at measured NVVDD voltage and core frequency, every crash pinned to the curve point it happened at, the highest setting each point was " +
         "marked stable or survived at, and where the card actually ran over the last 60 days, weighted by observed time (the " +
         "broker's always-on V/F history of every look above 825 mV NVVDD, light loads included, plus the residency samples at " +
         "50% load or more; observed operation, not a stability result). Under the top of " +
@@ -60,12 +60,12 @@ public sealed partial class TuningTools
             var path = Path.Combine(data.Dir, Experiment.DataFileName);
             Experiment.DeletePoint(path, point);
             // Rebuild using the opened curve's voltage/base mapping, never the user's unsaved edits.
-            return ReadEditorHistory(path, data.Mv, data.BaseKhz, data.Curve);
+            return ReadEditorHistory(path, data.Mv, data.BaseKhz, data.Curve, new VfReadStats());
         }, outcome =>
         {
             EditorState.Closed(outcome);
             try { card.Broker(BrokerRequest.OpExperiment, "note", $"Curve editor window closed: {outcome}"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
-        });
+        }, () => residency.LatestPoint);
         return Out(new
         {
             success = true, opened = true,
@@ -118,19 +118,30 @@ public sealed partial class TuningTools
         string? dir = null;
         (int, int)? band = null;
         var show = card.Broker(BrokerRequest.OpExperiment, "show");
+        var evidenceRead = new VfReadStats();
         var now = DateTimeOffset.Now;
-        var ticks = residency.Between(now - RunsSpan, now);
+        var runsFrom = now - RunsSpan;
+        IReadOnlyList<Residency.Tick> ticks;
         if (show.Ok && show.Result is { } res && res.TryGetProperty("data", out var dp) && dp.GetString() is { } dataPath)
         {
             dir = Path.GetDirectoryName(dataPath);
             band = ReadBand(dir, offsets);
-            history = ReadEditorHistory(dataPath, mv, baseKhz, look.Curve);
+            var all = Experiment.ReadLast(dataPath, int.MaxValue);
+            DateTimeOffset earliest = all.Count > 0 ? all.Min(Experiment.StartOf) : runsFrom;
+            if (runsFrom < earliest) earliest = runsFrom;
+            var allTicks = residency.Between(earliest, now);
+            ticks = runsFrom <= earliest ? allTicks : [.. allTicks.Where(t => t.At >= runsFrom)];
+            history = ProjectEditorHistory(all, mv, baseKhz, look.Curve, HistoryTimeline(all, allTicks, VfHistoryFile.DirBeside(dataPath), evidenceRead));
+        }
+        else
+        {
+            ticks = residency.Between(runsFrom, now);
         }
         // Where the card ran: the residency samples and the broker's always-on V/F history (beside the same records), one
         // timeline weighted by observed time, streamed a UTC day at a time over the 60 days.
         var read = new VfReadStats();
         var observed = ObservedRuns(dir == null ? null : Path.Combine(dir, VfHistoryFile.DirName), now - RunsSpan, now, ticks, read);
-        var shown = Significant(observed.Bins);
+        var shown = Significant(observed.Bins, observed.ActiveDays);
         var runs = shown.Bins;
         var recorder = show.Ok && show.Result is { } sr && sr.TryGetProperty("vf_history", out var vh) && vh.ValueKind == JsonValueKind.Object ? vh.Clone() : (JsonElement?)null;
         info = new
@@ -141,26 +152,41 @@ public sealed partial class TuningTools
             hidden_bins = shown.HiddenBins,
             hidden_seconds = Math.Round(shown.HiddenSeconds, 1),
             min_bin_seconds = Math.Round(shown.MinSeconds, 2),
+            active_days = observed.ActiveDays,
             days = RunsSpan.TotalDays,
             read = ReadReport(read),
+            // The trials' own windows, which can reach back further than the 60 days: read on their own, reported on their own.
+            evidence_read = ReadReport(evidenceRead),
             recorder = (object?)recorder ?? "the broker did not report its V/F history (an older broker, or none answering)",
         };
 
         var (keys, also) = KeptBesideCurve();
         return new EditorData(card.Name, mv, baseKhz, offsets, Math.Min(pts.Count, VfRules.WritablePoints), lowKhz, highKhz,
             look.NvvddVminUv / 1000.0, look.NvvddMaxUv / 1000.0, history.Crashes, history.Evidence, runs, band, dir, keys, also,
-            history.Tests, look.Curve);
+            history.Tests, look.Curve, observed.Bins, RunsSummary(shown, observed.Bins));
     }
 
-    private HistoryData ReadEditorHistory(string dataPath, double[] mv, int[] baseKhz, VfCurveSnapshot curve)
+    /// <summary>The window's line on the haze: what is drawn of it, and what that holds of the observed time.</summary>
+    public static string? RunsSummary(SignificantBins shown, IReadOnlyList<RunBin> all)
+    {
+        double total = all.Sum(b => b.Seconds);
+        if (all.Count == 0 || total <= 0) return null;
+        double drawn = shown.Bins.Sum(b => b.Seconds);
+        return string.Create(CultureInfo.InvariantCulture,
+            $"Observed V/F: {shown.Bins.Count} of {all.Count} bins drawn, holding {drawn / total:0%} of the observed time; a bin with under {MinBinSecondsPerDay:0.#} s per day of use ({shown.MinSeconds:0.#} s in all) is not drawn, and a point's \"Ran for\" still counts it.");
+    }
+
+    private HistoryData ReadEditorHistory(string dataPath, double[] mv, int[] baseKhz, VfCurveSnapshot curve, VfReadStats? read = null)
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
         var ticks = all.Count == 0 ? [] : residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
-        return ProjectEditorHistory(all, mv, baseKhz, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath), new VfReadStats()));
+        return ProjectEditorHistory(all, mv, baseKhz, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath), read));
     }
 
     /// <summary>The bins of where the card ran, and how many observed seconds each source gave.</summary>
-    public sealed record ObservedRunsResult(List<RunBin> Bins, double LightweightSeconds, double ResidencySeconds);
+    /// <param name="ActiveDays">How many local calendar days hold observed time: the span the significance floor scales
+    /// with (an evening past UTC midnight is one day of use, not two).</param>
+    public sealed record ObservedRunsResult(List<RunBin> Bins, double LightweightSeconds, double ResidencySeconds, int ActiveDays = 0);
 
     /// <summary>
     /// Where the card ran, binned by voltage (1 mV) and clock (7.5 MHz), each bin the observed time in it: the broker's
@@ -168,20 +194,24 @@ public sealed partial class TuningTools
     /// timeline, so both count by elapsed time and overlapping seconds once (<see cref="VfDwell"/>). Holds the bins, not
     /// the observations.
     /// </summary>
-    public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks)
+    public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks,
+        TimeSpan? dayOffset = null)
     {
+        long offset = (dayOffset ?? LocalOffset()).Ticks;
         var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
         var bins = new Dictionary<int, double>();
+        var days = new HashSet<long>();
         double light = 0, resid = 0;
         foreach (var w in VfDwell.Weigh(VfTimeline.MergeOrdered(lightweight, res)))
         {
             if (w.Seconds <= 0) continue;
+            days.Add((w.At.UtcTicks + offset) / TimeSpan.TicksPerDay);
             int key = BinKey(w.Uv, w.Mhz);
             ref double sum = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _);
             sum += w.Seconds;
             if (w.Observation.Source == VfSource.Lightweight) light += w.Seconds; else resid += w.Seconds;
         }
-        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid);
+        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid, days.Count);
     }
 
     /// <summary>
@@ -191,10 +221,12 @@ public sealed partial class TuningTools
     /// Merges in time order (a look before a residency sample at the same instant), weighs by <see cref="VfDwell"/>'s rule.
     /// </summary>
     public static ObservedRunsResult ObservedRuns(string? vfDir, DateTimeOffset from, DateTimeOffset to,
-        IReadOnlyList<Residency.Tick> residencyTicks, VfReadStats? stats = null)
+        IReadOnlyList<Residency.Tick> residencyTicks, VfReadStats? stats = null, TimeSpan? dayOffset = null)
     {
+        long offset = (dayOffset ?? LocalOffset()).Ticks;
         var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
         var bins = new Dictionary<int, double>();
+        var days = new HashSet<long>();
         double light = 0, resid = 0;
         long lightTicks = VfDwell.Interval(VfSource.Lightweight).Ticks, residTicks = VfDwell.Interval(VfSource.Residency).Ticks;
         bool has = false, pLight = false;
@@ -211,6 +243,7 @@ public sealed partial class TuningTools
             }
             double seconds = span / (double)TimeSpan.TicksPerSecond;
             if (seconds <= 0) return;
+            days.Add((pT + offset) / TimeSpan.TicksPerDay);
             int key = BinKey(pUv, pMhz);
             System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _) += seconds;
             if (pLight) light += seconds; else resid += seconds;
@@ -242,29 +275,36 @@ public sealed partial class TuningTools
         }
         for (; ri < res.Count; ri++) Push(res[ri].At.UtcTicks, res[ri].Uv, res[ri].Mhz, false);
         if (has) Count(null);
-        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid);
+        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid, days.Count);
     }
+
+    /// <summary>The person's UTC offset now, once per read: days of use are their calendar days.</summary>
+    private static TimeSpan LocalOffset() => TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.UtcNow);
 
     /// <summary>The bins the haze shows, and what it leaves out as passing through.</summary>
     public sealed record SignificantBins(List<RunBin> Bins, int HiddenBins, double HiddenSeconds, double MinSeconds);
 
-    /// <summary>A bin needs at least this much observed time to be shown: four looks of the broker's history.</summary>
-    public const double MinBinSeconds = 1.0;
-
-    /// <summary>And at least this share of all the observed time, so a long span does not let looks that only passed
-    /// through pile up past the floor.</summary>
-    public const double MinBinShare = 0.0005;
+    /// <summary>A bin needs at least this much observed time per day that holds any (four looks of the broker's history a
+    /// day, on average) to be drawn.</summary>
+    public const double MinBinSecondsPerDay = 1.0;
 
     /// <summary>
-    /// The bins with enough observed time to say where the card runs: at least <see cref="MinBinSeconds"/> and
-    /// <see cref="MinBinShare"/> of the total. At light load the clock follows the load, not the curve, and moves by
-    /// hundreds of MHz between looks: most of those bins hold one look (0.25 s) and say nothing about the curve. They stay
-    /// on disk and in the totals; they are only not drawn.
+    /// The bins with enough observed time to say where the card runs: on average at least
+    /// <see cref="MinBinSecondsPerDay"/> for each day with observed time (<paramref name="activeDays"/>, at least one).
+    /// At light load the clock follows the load, not the curve, and moves by hundreds of MHz between looks: most of those
+    /// bins get one look (0.25 s) now and then and say nothing about the curve.
+    /// <para>
+    /// Why per day: with the same use, a bin's time and the floor grow together, so what is drawn does not change as the
+    /// history grows, and a look that only passes through a bin now and then never piles up past it. A floor on the share
+    /// of all time (0.8.9) rose with hours of heavy use instead (10 h a day for 60 days: 18 min) and hid a region the card
+    /// really ran in for 10 minutes; a fixed floor let passing looks pile past it. Nothing is deleted: undrawn bins stay
+    /// on disk and in every total (a point's "Ran for").
+    /// </para>
     /// </summary>
-    public static SignificantBins Significant(IReadOnlyList<RunBin> bins)
+    public static SignificantBins Significant(IReadOnlyList<RunBin> bins, int activeDays = 1)
     {
         double total = bins.Sum(b => b.Seconds);
-        double min = Math.Max(MinBinSeconds, MinBinShare * total);
+        double min = MinBinSecondsPerDay * Math.Max(1, activeDays);
         var shown = bins.Where(b => b.Seconds >= min).ToList();
         return new SignificantBins(shown, bins.Count - shown.Count, total - shown.Sum(b => b.Seconds), min);
     }
@@ -466,7 +506,10 @@ public sealed partial class TuningTools
             return wrote ? Undo(why) : Refused(why);
         }
         progress("Saving as Daily…");
-        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked Save as Daily");
+        var k = KeepEditorDaily(
+            () => card.Broker(BrokerRequest.OpProfile, "preview"),
+            fingerprint => card.Broker(BrokerRequest.OpProfile, "keep",
+                "drawn in the curve editor window; the person clicked Save as Daily", expectedProfileFingerprint: fingerprint));
         // The broker saves the profile and then switches the card to it; a wall or limit that did not go back is reported
         // as a failure with saved=true: the daily profile is this curve all the same.
         bool saved = k.Ok || (k.Result is { } kr && kr.TryGetProperty("saved", out var sv) && sv.ValueKind == JsonValueKind.True);
@@ -474,5 +517,16 @@ public sealed partial class TuningTools
         WriteBand(data.Dir, target, request.Foot, request.Top);
         if (began) card.Broker(BrokerRequest.OpExperiment, "end");   // no trial is left after a keep: the daily, this curve, stays on
         return new SaveResult(true, k.Ok ? null : $"GPU has not fully switched to the new Daily ({k.Error}): ask your agent to retry with back_to_daily or load_daily", null);
+    }
+
+    /// <summary>The editor uses the same fresh preview contract as MCP/CLI; the broker still asks the person.</summary>
+    public static BrokerAnswer KeepEditorDaily(Func<BrokerAnswer> preview, Func<string, BrokerAnswer> keep)
+    {
+        var shown = preview();
+        if (!shown.Ok) return shown;
+        var fingerprint = FullFingerprint(shown);
+        return fingerprint == null
+            ? new BrokerAnswer(false, null, "Daily preview has no valid fingerprint; nothing kept", BrokerCode.BadRequest)
+            : keep(fingerprint);
     }
 }

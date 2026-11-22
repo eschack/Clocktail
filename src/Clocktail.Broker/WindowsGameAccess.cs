@@ -36,7 +36,8 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
             || manager.NvApi.GpuBusId(device.NvapiHandle) != address.Bus || manager.NvApi.GpuBusSlotId(device.NvapiHandle) != address.Device
             || apiId.DeviceId != identity.DeviceId || apiId.SubSystemId != identity.SubSystemId)
             throw new NotSupportedException("the selected PnP/NVML/NVAPI identity no longer agrees");
-        string exe = Environment.GetEnvironmentVariable("CLOCKTAIL_LAB_EXE") ?? Path.Combine(AppContext.BaseDirectory, "clocktail-lab.exe");
+        // The elevated broker must never launch a client/user-selected executable.
+        string exe = Path.Combine(AppContext.BaseDirectory, BrokerInstallBundle.LabName);
         if (!File.Exists(exe)) throw new NotSupportedException("the broker requires the guarded clocktail-lab.exe beside it");
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (string arg in new[] { "game-info", "--gpu-pci", identity.Pci, "--device-id", identity.DeviceId.ToString("x8"), "--subsystem-id", identity.SubSystemId.ToString("x8") }) psi.ArgumentList.Add(arg);
@@ -64,7 +65,8 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
             throw new InvalidOperationException("other work occupies the selected GPU; close it before the game test");
     }
 
-    public GameSnapshot Read()
+    /// <summary>Reads the restorable settings and, at the start of a run, the voltage-limited V/F top.</summary>
+    public GameSnapshot Read(bool measureCoverage = false)
     {
         // This is the only process that reads the game test's curve. NvClient supplies declared shapes, canaries and the loss latch.
         var curve = VfReader.Read(_hw, target.Session); // unsupported layouts are refused by the parser
@@ -88,7 +90,23 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
         cells["power/f8"] = new("power", "f8", power.Additional.Mw?.ToString(CultureInfo.InvariantCulture) ?? "absent");
         string encoded = VfOffsets.Encode(curve.Offsets());
         if (cells["vf/core"].Value != encoded) throw new InvalidDataException("the curve changed during its baseline read");
-        return new(Identity, encoded, power.CapMw ?? wall, power.Board.MinMw, (int)(curve.Points.Max(p => p.EffectiveKhz) / 1000),
-            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList());
+        uint? maxUv = measureCoverage ? ReadNvvddMax() : null;
+        var top = maxUv is > 0 ? Limiter.CurveTop(curve.Points, maxUv) : null;
+        return new(Identity, encoded, power.CapMw ?? wall, power.Board.MinMw, (int?)(top?.EffectiveKhz / 1000),
+            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList(), maxUv, top?.VoltageUv,
+            curve.Mode == VfMode.Regional ? curve.Points.Select(VfEffectiveCurve.Displacement).ToArray() : null);
+    }
+
+    /// <summary>Reads the optional coverage reference while preserving a latched handle loss.</summary>
+    private uint? ReadNvvddMax()
+    {
+        var session = target.Session;
+        try
+        {
+            uint maxUv = VfWrites.FirmwareMaxUv(_hw, session);
+            if (session.Faulted) throw new InvalidOperationException("the GPU handle was lost during the voltage limit read");
+            return maxUv;
+        }
+        catch (Exception e) when (!session.Faulted && e is (InvalidDataException or InvalidOperationException)) { return null; }
     }
 }

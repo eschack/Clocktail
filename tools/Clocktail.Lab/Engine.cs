@@ -3,9 +3,9 @@ using System.Runtime.InteropServices;
 namespace Clocktail.Lab;
 
 /// <summary>One chunk of GPU work. Error != null: the context is dead or the launch failed, and the run stops.</summary>
-public readonly record struct ChunkOutcome(double ElapsedMs, long Mismatches, double WorkUnits, string? Error = null, ulong? FirstBadWord = null)
+public readonly record struct ChunkOutcome(double ElapsedMs, long Mismatches, double WorkUnits, string? Error = null, ulong? FirstBadWord = null, int? ErrorCode = null)
 {
-    public static ChunkOutcome Failed(string error) => new(0, 0, 0, error);
+    public static ChunkOutcome Failed(string error, int? code = null) => new(0, 0, 0, error, ErrorCode: code);
 }
 
 /// <summary>Runs GPU work in chunks: the CUDA engine on the card, a fake in tests.</summary>
@@ -83,7 +83,7 @@ public sealed unsafe class CudaEngine : ILoadEngine
     public int InjectAtComputeLaunch { get; set; }
     private int _computeLaunches;
 
-    public CudaEngine(CudaApi cu, int ordinal, double memoryFraction, ulong memoryCapBytes = 0, int computeThreads = 1 << 20)
+    public CudaEngine(CudaApi cu, int ordinal, double memoryFraction, ulong memoryCapBytes = 0, int computeThreads = 1 << 20, bool allocateMemory = true)
     {
         _cu = cu;
         _dev = cu.Device(ordinal);
@@ -109,20 +109,23 @@ public sealed unsafe class CudaEngine : ILoadEngine
         _reference = new byte[outBytes];
         _dErr = cu.MemAlloc(16);
 
-        var (free, _) = cu.MemInfo();
-        ulong want = (ulong)(free * Math.Clamp(memoryFraction, 0.05, 0.9));
-        if (memoryCapBytes > 0) want = Math.Min(want, memoryCapBytes);
-        const ulong align = 64UL << 20;
-        want = Math.Max(want / align * align, 256UL << 20);
-        while (want >= 256UL << 20)
+        if (allocateMemory)
         {
-            try { _dMem = cu.MemAlloc(want); MemoryBufferBytes = want; break; }
-            catch (CudaException ex) when (ex.Code == 2) { want /= 2; } // out of memory: the display's share or fragmentation; halve and retry
+            var (free, _) = cu.MemInfo();
+            ulong want = (ulong)(free * Math.Clamp(memoryFraction, 0.05, 0.9));
+            if (memoryCapBytes > 0) want = Math.Min(want, memoryCapBytes);
+            const ulong align = 64UL << 20;
+            want = Math.Max(want / align * align, 256UL << 20);
+            while (want >= 256UL << 20)
+            {
+                try { _dMem = cu.MemAlloc(want); MemoryBufferBytes = want; break; }
+                catch (CudaException ex) when (ex.Code == 2) { want /= 2; }
+            }
+            if (MemoryBufferBytes == 0) throw new InvalidOperationException("could not allocate even 256 MiB of video memory");
+            _memGrid = (uint)(SmCount * 8);
+            ulong vectors = MemoryBufferBytes / PatternPlan.VectorBytes;
+            foreach (var p in Enum.GetValues<AccessPattern>()) _plans[p] = PatternPlan.Of(p, vectors, (ulong)_memGrid * Block);
         }
-        if (MemoryBufferBytes == 0) throw new InvalidOperationException("could not allocate even 256 MiB of video memory");
-        _memGrid = (uint)(SmCount * 8);
-        ulong vectors = MemoryBufferBytes / PatternPlan.VectorBytes;
-        foreach (var p in Enum.GetValues<AccessPattern>()) _plans[p] = PatternPlan.Of(p, vectors, (ulong)_memGrid * Block);
 
         _evStart = cu.EventCreate();
         _evEnd = cu.EventCreate();
@@ -178,7 +181,7 @@ public sealed unsafe class CudaEngine : ILoadEngine
     private SoloOutcome SoloFailed(string fn, int rc)
     {
         _dead = true;
-        return SoloOutcome.Failed($"{fn}: {_cu.ErrorName(rc)}");
+        return SoloOutcome.Failed($"{fn}: {_cu.ErrorName(rc)}", rc);
     }
 
     public PatternPlan Plan(AccessPattern p) => _plans[p];
@@ -186,7 +189,7 @@ public sealed unsafe class CudaEngine : ILoadEngine
     private ChunkOutcome Dead(string fn, int rc)
     {
         _dead = true;
-        return ChunkOutcome.Failed($"{fn}: {_cu.ErrorName(rc)}");
+        return ChunkOutcome.Failed($"{fn}: {_cu.ErrorName(rc)}", rc);
     }
 
     public ChunkOutcome RunCompute(uint iterations, bool isReference, int threads = 0)
@@ -213,16 +216,16 @@ public sealed unsafe class CudaEngine : ILoadEngine
         // Once frozen, a chunk equal to the CPU-checked reference byte for byte is right in every thread, so the CPU replays
         // threads only for the reference and before the freeze: replaying 64 every chunk kept the GPU idle ~50 ms of each
         // 200 (412 W in burn on the reference card).
-        bool comparable = !isReference && _referenceIterations == iterations && _referenceThreads == n;
+        bool comparable = !isReference && _referenceIterations == iterations && _referenceThreads >= n;
         int subset = isReference ? (light ? 8 : 1024) : comparable || light ? 0 : 64;
         long mismatches = VerifySubset(iterations, subset, n);
-        if (isReference)
+        if (isReference && (_referenceIterations != iterations || n > _referenceThreads))
         {
             Buffer.BlockCopy(_hostOut, 0, _reference, 0, bytes);
             _referenceIterations = iterations;
             _referenceThreads = n;
         }
-        else if (_referenceIterations == iterations && _referenceThreads == n && !_reference.AsSpan(0, bytes).SequenceEqual(_hostOut.AsSpan(0, bytes)))
+        else if (_referenceIterations == iterations && _referenceThreads >= n && !_reference.AsSpan(0, bytes).SequenceEqual(_hostOut.AsSpan(0, bytes)))
         {
             var a = MemoryMarshal.Cast<byte, uint>(_reference.AsSpan(0, bytes));
             var b = MemoryMarshal.Cast<byte, uint>(_hostOut.AsSpan(0, bytes));
@@ -237,7 +240,6 @@ public sealed unsafe class CudaEngine : ILoadEngine
         if (subset <= 0) return 0;
         int stride = Math.Max(1, threads / subset);
         long bad = 0;
-        var host = MemoryMarshal.Cast<byte, float>(_hostOut).ToArray();
         Parallel.For(0, subset, k =>
         {
             uint gid = (uint)(k * stride);
@@ -245,9 +247,10 @@ public sealed unsafe class CudaEngine : ILoadEngine
             Span<float> expect = stackalloc float[Reference.FloatsPerThread];
             Reference.RotationThread(gid, iterations, expect);
             int off = (int)gid * Reference.FloatsPerThread;
+            var host = MemoryMarshal.Cast<byte, float>(_hostOut.AsSpan(off * sizeof(float), Reference.FloatsPerThread * sizeof(float)));
             long local = 0;
             for (int i = 0; i < Reference.FloatsPerThread; i++)
-                if (BitConverter.SingleToUInt32Bits(expect[i]) != BitConverter.SingleToUInt32Bits(host[off + i])) local++;
+                if (BitConverter.SingleToUInt32Bits(expect[i]) != BitConverter.SingleToUInt32Bits(host[i])) local++;
             if (local > 0) Interlocked.Add(ref bad, local);
         });
         return bad;
@@ -257,11 +260,20 @@ public sealed unsafe class CudaEngine : ILoadEngine
     public const ulong L2RegionBytes = 32UL << 20;
     public const ulong L2Passes = 1024;
 
-    public ChunkOutcome RunMemory(uint seed, AccessPattern pattern) =>
-        Pass(seed, _plans[pattern], MemoryBufferBytes / PatternPlan.VectorBytes, 1);
+    public ChunkOutcome RunMemory(uint seed, AccessPattern pattern)
+    {
+        RequireMemory();
+        return Pass(seed, _plans[pattern], MemoryBufferBytes / PatternPlan.VectorBytes, 1);
+    }
+
+    private void RequireMemory()
+    {
+        if (MemoryBufferBytes == 0) throw new InvalidOperationException("this workload did not allocate the memory test buffer");
+    }
 
     public ChunkOutcome RunL2(uint seed)
     {
+        RequireMemory();
         ulong region = Math.Min(L2RegionBytes, MemoryBufferBytes) / PatternPlan.VectorBytes;
         return Pass(seed, PatternPlan.Of(AccessPattern.Linear, region, (ulong)_memGrid * Block), region, L2Passes);
     }
@@ -321,6 +333,7 @@ public sealed unsafe class CudaEngine : ILoadEngine
 
     public ChunkOutcome RunLatency(uint hops)
     {
+        RequireMemory();
         if (_dead) return ChunkOutcome.Failed("the CUDA context is already dead");
         if (!_chaseReady) PrepareChase();
         if (_dead) return ChunkOutcome.Failed("chase_fill failed");

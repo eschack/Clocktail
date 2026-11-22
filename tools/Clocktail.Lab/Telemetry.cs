@@ -1,4 +1,3 @@
-using System.Globalization;
 using Clocktail.Hw;
 
 namespace Clocktail.Lab;
@@ -11,11 +10,13 @@ public interface ISampler : IDisposable
     LabSample Read(double t, int phase);
 }
 
+public interface ITemperatureSensor : IDisposable { uint? ReadTemperature(); }
+
 /// <summary>
 /// NVML on the GPU the CUDA engine runs on, matched by PCI address (the two number cards differently; NVML writes an
 /// 8-digit domain, CUDA a 4-digit one). Reads only.
 /// </summary>
-public sealed class NvmlSampler : ISampler
+public sealed class NvmlSampler : ISampler, ITemperatureSensor
 {
     private readonly NvmlApi _nvml;
     private readonly nint _h;
@@ -23,23 +24,16 @@ public sealed class NvmlSampler : ISampler
     public NvmlSampler(string cudaPciBusId)
     {
         _nvml = NvmlApi.Load();
-        var want = Clocktail.Hw.PciAddress.Parse(cudaPciBusId) ?? throw new NotSupportedException("invalid target PCI address");
-        for (uint i = 0; i < _nvml.DeviceCount(); i++)
+        try
         {
-            var h = _nvml.HandleByIndex(i);
-            if (Clocktail.Hw.PciAddress.Parse(_nvml.Pci(h).BusId) == want) { _h = h; return; }
+            var handles = Enumerable.Range(0, checked((int)_nvml.DeviceCount())).Select(i => _nvml.HandleByIndex((uint)i));
+            _h = GpuSelection.Select(handles, "NVML", cudaPciBusId, h => _nvml.Pci(h).BusId);
         }
-        _nvml.Dispose();
-        throw new InvalidOperationException($"NVML has no GPU at PCI {cudaPciBusId}");
-    }
-
-    /// <summary>(domain, bus, device) from "dddd:bb:dd.f" or "dddddddd:bb:dd.f"; null when it does not parse.</summary>
-    public static (uint, uint, uint)? Pci(string busId)
-    {
-        var p = busId.Trim().Split(':', '.');
-        return p.Length >= 3 && uint.TryParse(p[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var d)
-            && uint.TryParse(p[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b)
-            && uint.TryParse(p[2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var dev) ? (d, b, dev) : null;
+        catch
+        {
+            _nvml.Dispose();
+            throw;
+        }
     }
 
     public LabSample Read(double t, int phase)
@@ -48,6 +42,11 @@ public sealed class NvmlSampler : ISampler
         return new(t, phase, Try(() => _nvml.PowerUsageMw(_h) / 1000.0), Try(() => _nvml.TemperatureC(_h)),
             Try(() => _nvml.ClockMhz(_h, NvmlClock.Graphics)), Try(() => _nvml.ClockMhz(_h, NvmlClock.Memory)), Try(() => _nvml.Utilization(_h).Gpu),
             _nvml.PerformanceState(_h), Try(() => _nvml.PowerEnforcedMw(_h) / 1000.0));
+    }
+
+    public uint? ReadTemperature()
+    {
+        try { return _nvml.TemperatureC(_h); } catch (NvmlException) { return null; }
     }
 
     /// <summary>Video memory in use and in all, bytes (NVML's _v2 count: the driver's reservation left out); null when unread.</summary>
@@ -63,4 +62,6 @@ public sealed class NvmlSampler : ISampler
     }
 
     public void Dispose() => _nvml.Dispose();
+
+    internal ulong ClockEventReasons() => _nvml.ThrottleReasons(_h);
 }
